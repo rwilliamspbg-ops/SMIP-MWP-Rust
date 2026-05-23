@@ -85,7 +85,10 @@ name = "bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "datapath",
  "rand",
+ "routing",
+ "wire",
 ]
 
 [[package]]

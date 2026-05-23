@@ -5,6 +5,17 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8"
+datapath = { path = "../datapath" }
+routing = { path = "../routing" }
+wire = { path = "../wire" }
 
 [dev-dependencies]
 criterion = "0.4"
+
+[[bench]]
+name = "alloc_bench"
+harness = false
+
+[[bench]]
+name = "datapath_bench"
+harness = false

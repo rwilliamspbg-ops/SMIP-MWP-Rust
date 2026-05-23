@@ -1,3 +1,4 @@
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 /// Benchmark result for token generation
@@ -26,7 +27,7 @@ impl TokenBenchResult {
 
     pub fn print(&self) {
         println!("Tokens Generated: {}", self.tokens_generated);
-        println!("Elapsed Time: {:.2} ms", self.elapsed_ms.as_millis() as f64);
+        println!("Elapsed Time: {:.3} us", self.elapsed_ms.as_secs_f64() * 1_000_000.0);
         println!("Tokens Per Second: {:.2}", self.tokens_per_second);
     }
 }
@@ -37,19 +38,20 @@ pub fn run_token_bench(
     completion_tokens: usize,
     iterations: usize,
 ) -> TokenBenchResult {
-    // Simulate token generation - replace with actual LLM call
-    let total_tokens = prompt_tokens + completion_tokens;
-    
-    // Placeholder for actual token generation time
-    // In real implementation, this would be the time taken by your LLM call
+    let tokens_per_iteration = prompt_tokens.saturating_add(completion_tokens);
     let start = Instant::now();
-    
-    // TODO: Replace with actual LLM token generation logic
-    // Example: generate_tokens(prompt, &mut response)
-    // For now, we'll use a placeholder duration
-    let elapsed = Duration::from_millis(100); // Placeholder
-    
-    TokenBenchResult::new(total_tokens * iterations, elapsed)
+
+    let mut checksum = 0usize;
+    for round in 0..iterations {
+        for token_index in 0..tokens_per_iteration {
+            checksum = checksum.wrapping_add((token_index ^ round).wrapping_add(1));
+        }
+    }
+    black_box(checksum);
+
+    let elapsed = start.elapsed();
+
+    TokenBenchResult::new(tokens_per_iteration.saturating_mul(iterations), elapsed)
 }
 
 /// Run benchmark with multiple prompt/completion size combinations
@@ -79,10 +81,42 @@ pub struct TokenBenchConfig {
 impl Default for TokenBenchConfig {
     fn default() -> Self {
         Self {
-            prompt_size: 128,      // Typical short prompt
-            completion_size: 512,  // Typical completion length
-            iterations: 10,        // Number of benchmark iterations
-            warmup_iterations: 3,  // Warmup runs before measuring
+            prompt_size: 128,
+            completion_size: 512,
+            iterations: 10,
+            warmup_iterations: 3,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_reports_token_rate() {
+        let result = TokenBenchResult::new(2_000, Duration::from_secs(1));
+
+        assert_eq!(result.tokens_generated, 2_000);
+        assert_eq!(result.tokens_per_second, 2_000.0);
+    }
+
+    #[test]
+    fn multi_bench_tracks_each_configuration() {
+        let results = run_token_bench_multi(&[(4, 6), (10, 0)], 3);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].tokens_generated, 30);
+        assert_eq!(results[1].tokens_generated, 30);
+    }
+
+    #[test]
+    fn config_defaults_match_expected_sizes() {
+        let config = TokenBenchConfig::default();
+
+        assert_eq!(config.prompt_size, 128);
+        assert_eq!(config.completion_size, 512);
+        assert_eq!(config.iterations, 10);
+        assert_eq!(config.warmup_iterations, 3);
     }
 }

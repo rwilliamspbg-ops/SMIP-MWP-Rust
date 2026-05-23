@@ -44,6 +44,13 @@ fn main() {
         return;
     }
 
+    if !parse_flag(&args, "--demo") {
+        println!("mohawk-node (Rust rewrite)");
+        println!("  --demo   run the in-process forwarding demo");
+        println!("  --help   show this message");
+        return;
+    }
+
     let stats = run_demo();
     println!(
         "forwarder demo: received={} forwarded={} encrypted={} route_misses={}",

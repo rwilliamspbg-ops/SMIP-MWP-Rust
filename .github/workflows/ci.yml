@@ -11,3 +11,7 @@ jobs:
         toolchain: stable
     - name: Build the project
       run: cargo build --release
+    - name: Run workspace tests
+      run: cargo test --workspace --all-targets
+    - name: Run metrics smoke test
+      run: cargo run --release -p bench

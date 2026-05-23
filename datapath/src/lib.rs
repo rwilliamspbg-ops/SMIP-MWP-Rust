@@ -6,8 +6,7 @@ pub use socket::XdpSocket;
 
 pub struct Forwarder {
     pub routes: Table,
-    session_secret: Vec<u8>,
-    session_info: Vec<u8>,
+    session: Option<HybridSession>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -24,7 +23,8 @@ impl Forwarder {
     }
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
-        Self { routes, session_secret, session_info }
+        let session = HybridSession::new(&session_secret, &session_info).ok();
+        Self { routes, session }
     }
 
     pub fn process_batch(&self, sock: &mut dyn XdpSocket) -> ForwarderStats {
@@ -39,19 +39,19 @@ impl Forwarder {
             return stats;
         }
 
-        let session = HybridSession::new(&self.session_secret, &self.session_info).ok();
-
         for pkt in frames {
             let mut forwarded = false;
 
             if let Ok(h) = Header::parse(&pkt) {
                 if self.routes.lookup_or_predict(h.src_id, h.dst_id, h.flow_label).is_some() {
-                    if let Some(session) = &session {
-                        if pkt.len() >= HEADER_SIZE && h.length as usize > 0 {
-                            let payload = &pkt[HEADER_SIZE..];
+                    if let Some(session) = &self.session {
+                        let payload_len = h.length as usize;
+                        if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                            let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
                             match session.encrypt(payload, h.seq_num) {
                                 Ok(ct) => {
-                                    let mut newpkt = pkt[..HEADER_SIZE].to_vec();
+                                    let mut newpkt = Vec::with_capacity(HEADER_SIZE + ct.len());
+                                    newpkt.extend_from_slice(&pkt[..HEADER_SIZE]);
                                     newpkt.extend_from_slice(&ct);
                                     out.push(newpkt);
                                     stats.encrypted += 1;
@@ -66,6 +66,8 @@ impl Forwarder {
                                     stats.route_misses += 1;
                                 }
                             }
+                        } else if payload_len > 0 {
+                            stats.route_misses += 1;
                         }
                     }
                 } else {
@@ -134,5 +136,39 @@ mod tests {
         assert_eq!(stats.received, 1);
         assert_eq!(stats.encrypted, 1);
         assert!(!sock.sent.is_empty());
+    }
+
+    #[test]
+    fn forwarder_rejects_truncated_payloads() {
+        let rt = Table::new();
+        rt.update_route(RouteEntry {
+            dest_id: [2u8;32],
+            next_hop_id: [3u8;32],
+            metric: 1,
+            last_seen: SystemTime::now(),
+        });
+        let fwd = Forwarder::new(rt);
+
+        let mut buf = wire::Header::new_header_buffer(4);
+        let h = Header {
+            src_id: [1u8;32],
+            dst_id: [2u8;32],
+            flow_label: 0x1,
+            seq_num: 1,
+            session_id: [0u8;16],
+            flags: 0,
+            length: 8,
+        };
+        h.marshal_into(&mut buf).unwrap();
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
+
+        let mut sock = MockSocket::new(vec![buf]);
+        let stats = fwd.process_batch(&mut sock);
+
+        assert_eq!(stats.received, 1);
+        assert_eq!(stats.encrypted, 0);
+        assert_eq!(stats.route_misses, 1);
+        assert_eq!(stats.forwarded, 1);
+        assert_eq!(sock.sent.len(), 1);
     }
 }
