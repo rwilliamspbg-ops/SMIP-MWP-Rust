@@ -4,7 +4,8 @@ use std::is_x86_feature_detected;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use routing::Table;
-use wire::{Header, HEADER_SIZE};
+use wire::{HeaderViewRef, HEADER_SIZE};
+use std::convert::TryInto;
 
 pub use socket::XdpSocket;
 
@@ -50,21 +51,27 @@ impl Forwarder {
         for pkt in frames {
             let mut forwarded = false;
 
-            if let Ok(h) = Header::parse(&pkt) {
-                if self.routes.lookup_or_predict(h.src_id, h.dst_id, h.flow_label).is_some() {
+            if let Ok(h) = HeaderViewRef::new(&pkt) {
+                let src_id: [u8; 32] = h.src_id().try_into().unwrap();
+                let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                let flow_label = h.flow_label();
+                let seq_num    = h.seq_num();
+                let payload_len = h.length() as usize;
+
+                if self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
                     if let Some(session) = &self.session {
-                        let payload_len = h.length as usize;
                         if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                             let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
 
-                            // Pre-size ct_buf to hold ciphertext before calling encrypt_to,
-                            // satisfying the capacity check inside encrypt_to.
                             let needed = payload_len + TAG_SIZE;
                             if ct_buf.capacity() < needed {
                                 ct_buf.reserve(needed - ct_buf.capacity());
                             }
 
-                            match session.encrypt_to(&mut ct_buf, payload, h.seq_num) {
+                            // encrypt_to: copies plaintext into ct_buf, encrypts
+                            // in-place via aead::encrypt_in_place, appends tag.
+                            // Zero extra Vec allocations.
+                            match session.encrypt_to(&mut ct_buf, payload, seq_num) {
                                 Ok(()) => {
                                     // Assemble output packet: one allocation sized exactly,
                                     // then two copy_from_slice calls (header + ciphertext).
@@ -123,6 +130,7 @@ impl Forwarder {
                     stats.route_misses += 1;
                 }
             }
+
 
             if !forwarded {
                 out.push(pkt);
