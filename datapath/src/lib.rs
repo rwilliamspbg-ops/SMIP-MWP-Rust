@@ -50,9 +50,35 @@ impl Forwarder {
                             let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
                             match session.encrypt(payload, h.seq_num) {
                                 Ok(ct) => {
-                                    let mut newpkt = Vec::with_capacity(HEADER_SIZE + ct.len());
-                                    newpkt.extend_from_slice(&pkt[..HEADER_SIZE]);
-                                    newpkt.extend_from_slice(&ct);
+                                    // Assemble packet using hybrid copy: allocate exact size and
+                                    // copy header+ciphertext. For small packets this behaves
+                                    // like a tiled/memcpy-friendly copy, while for larger
+                                    // packets we use chunked scalar copies. This reduces
+                                    // intermediate allocations and gives more control over
+                                    // copy strategy.
+                                    let total = HEADER_SIZE + ct.len();
+                                    let mut newpkt = Vec::with_capacity(total);
+                                    unsafe { newpkt.set_len(total); }
+                                    // copy header
+                                    newpkt[..HEADER_SIZE].copy_from_slice(&pkt[..HEADER_SIZE]);
+                                    // copy ciphertext
+                                    let dst = &mut newpkt[HEADER_SIZE..];
+                                    // Hybrid copy: small -> memcpy-like, large -> chunked
+                                    if dst.len() <= 4096 {
+                                        // single bulk copy
+                                        dst.copy_from_slice(&ct);
+                                    } else {
+                                        // chunked 256-byte scalar copy
+                                        let mut off = 0usize;
+                                        while off + 256 <= dst.len() {
+                                            dst[off..off+256].copy_from_slice(&ct[off..off+256]);
+                                            off += 256;
+                                        }
+                                        if off < dst.len() {
+                                            let rem = dst.len() - off;
+                                            dst[off..].copy_from_slice(&ct[off..off+rem]);
+                                        }
+                                    }
                                     out.push(newpkt);
                                     stats.encrypted += 1;
                                     forwarded = true;

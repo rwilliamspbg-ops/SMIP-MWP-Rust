@@ -24,8 +24,14 @@ jobs:
       - name: Run bench harness
         run: ./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv
 
+      - name: Summarize results
+        run: |
+          python3 tools/bench_harness/summarize_csv.py bench_results.csv bench_summary.csv
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: bench-results
-          path: bench_results.csv
+          path: |
+            bench_results.csv
+            bench_summary.csv
