@@ -137,19 +137,78 @@ impl Forwarder {
 #[cfg(target_arch = "x86_64")]
 unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
     use std::ptr;
-    let mut off = 0usize;
-    // copy 32-byte blocks using AVX2
-    while off + 32 <= len {
-        let src_ptr = src.add(off) as *const __m256i;
-        let v = _mm256_loadu_si256(src_ptr);
-        let dst_ptr = dst.add(off) as *mut __m256i;
-        _mm256_storeu_si256(dst_ptr, v);
-        off += 32;
+    // Tuned AVX2 copy: prefer large unrolled vectorized copies and use streaming
+    // stores for long transfers to avoid polluting caches when dst is aligned.
+    #[target_feature(enable = "avx2")]
+    unsafe fn inner(dst: *mut u8, src: *const u8, len: usize) {
+        let mut off = 0usize;
+        // If destination is 32-byte aligned and length large, use non-temporal stores
+        let dst_aligned = (dst as usize) & 31 == 0;
+        if len >= 4096 && dst_aligned {
+            // streaming stores in 128-byte unrolled blocks
+            while off + 128 <= len {
+                let p0 = src.add(off) as *const __m256i;
+                let v0 = _mm256_loadu_si256(p0);
+                let p1 = src.add(off + 32) as *const __m256i;
+                let v1 = _mm256_loadu_si256(p1);
+                let p2 = src.add(off + 64) as *const __m256i;
+                let v2 = _mm256_loadu_si256(p2);
+                let p3 = src.add(off + 96) as *const __m256i;
+                let v3 = _mm256_loadu_si256(p3);
+                let d0 = dst.add(off) as *mut __m256i;
+                let d1 = dst.add(off + 32) as *mut __m256i;
+                let d2 = dst.add(off + 64) as *mut __m256i;
+                let d3 = dst.add(off + 96) as *mut __m256i;
+                _mm256_stream_si256(d0, v0);
+                _mm256_stream_si256(d1, v1);
+                _mm256_stream_si256(d2, v2);
+                _mm256_stream_si256(d3, v3);
+                off += 128;
+            }
+            _mm_sfence();
+        }
+
+        // Unrolled vector copy for remaining data (128-byte blocks)
+        while off + 128 <= len {
+            let p0 = src.add(off) as *const __m256i;
+            let v0 = _mm256_loadu_si256(p0);
+            let p1 = src.add(off + 32) as *const __m256i;
+            let v1 = _mm256_loadu_si256(p1);
+            let p2 = src.add(off + 64) as *const __m256i;
+            let v2 = _mm256_loadu_si256(p2);
+            let p3 = src.add(off + 96) as *const __m256i;
+            let v3 = _mm256_loadu_si256(p3);
+            let d0 = dst.add(off) as *mut __m256i;
+            let d1 = dst.add(off + 32) as *mut __m256i;
+            let d2 = dst.add(off + 64) as *mut __m256i;
+            let d3 = dst.add(off + 96) as *mut __m256i;
+            _mm256_storeu_si256(d0, v0);
+            _mm256_storeu_si256(d1, v1);
+            _mm256_storeu_si256(d2, v2);
+            _mm256_storeu_si256(d3, v3);
+            off += 128;
+        }
+
+        // Finish with 32-byte vector copies
+        while off + 32 <= len {
+            let src_ptr = src.add(off) as *const __m256i;
+            let v = _mm256_loadu_si256(src_ptr);
+            let dst_ptr = dst.add(off) as *mut __m256i;
+            _mm256_storeu_si256(dst_ptr, v);
+            off += 32;
+        }
+
+        // tail copy
+        if off < len {
+            let rem = len - off;
+            ptr::copy_nonoverlapping(src.add(off), dst.add(off), rem);
+        }
     }
-    // tail copy
-    if off < len {
-        let rem = len - off;
-        ptr::copy_nonoverlapping(src.add(off), dst.add(off), rem);
+
+    if is_x86_feature_detected!("avx2") {
+        inner(dst, src, len);
+    } else {
+        ptr::copy_nonoverlapping(src, dst, len);
     }
 }
 
