@@ -1,0 +1,6 @@
+# CODEOWNERS — assign reviewers for changes
+# Require review from the repo owner for all paths by default
+*    @rwilliamspbg-ops
+
+# If you have teams, add them here, e.g.:
+# /datapath/ @org/datapath-team
