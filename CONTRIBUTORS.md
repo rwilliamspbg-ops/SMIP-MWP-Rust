@@ -4,7 +4,7 @@ Thanks to everyone who contributed to this Rust rewrite of SMIP-MWP.
 
 Maintainers
 
-- Robert Williams (rwilliamspbg-ops) — primary maintainer, bench & datapath
+- Ryan Williams (rwilliamspbg-ops) — primary maintainer, bench & datapath
 
 Contributors
 
