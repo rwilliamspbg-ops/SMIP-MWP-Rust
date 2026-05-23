@@ -1,0 +1,23 @@
+# Ignore Rust build artifacts and other transient files
+/target/
+**/target/
+
+# Ignore Cargo generated files that are large
+*.rlib
+*.rmeta
+
+# Criterion and bench outputs
+/target/criterion/
+target/criterion/
+
+# Compressed artifacts
+*.tar.gz
+*.gz
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Node modules (if any)
+node_modules/
