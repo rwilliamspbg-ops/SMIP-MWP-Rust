@@ -74,6 +74,27 @@ impl Header {
     }
 }
 
+/// Zero-copy immutable view into a packet buffer — no field copies, no
+/// struct allocation.  Use this on the read-only hot path instead of
+/// `Header::parse()`.
+pub struct HeaderViewRef<'a> {
+    buf: &'a [u8],
+}
+
+impl<'a> HeaderViewRef<'a> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, ErrBufferTooSmall> {
+        if buf.len() < HEADER_SIZE {
+            return Err(ErrBufferTooSmall);
+        }
+        Ok(Self { buf })
+    }
+    #[inline] pub fn src_id(&self)    -> &[u8] { &self.buf[SRC_OFFSET..SRC_OFFSET+32] }
+    #[inline] pub fn dst_id(&self)    -> &[u8] { &self.buf[DST_OFFSET..DST_OFFSET+32] }
+    #[inline] pub fn flow_label(&self) -> u32  { u32::from_be_bytes(self.buf[FLOW_OFFSET..FLOW_OFFSET+4].try_into().unwrap()) }
+    #[inline] pub fn seq_num(&self)    -> u64  { u64::from_be_bytes(self.buf[SEQ_OFFSET..SEQ_OFFSET+8].try_into().unwrap()) }
+    #[inline] pub fn length(&self)     -> u16  { u16::from_be_bytes(self.buf[LEN_OFFSET..LEN_OFFSET+2].try_into().unwrap()) }
+}
+
 pub struct HeaderView<'a> {
     buf: &'a mut [u8],
 }
