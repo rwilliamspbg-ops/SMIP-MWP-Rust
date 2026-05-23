@@ -1,4 +1,8 @@
 use crypto::session::{HybridSession, SessionError};
+#[cfg(target_arch = "x86_64")]
+use std::is_x86_feature_detected;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 use routing::Table;
 use wire::{Header, HEADER_SIZE};
 
@@ -63,19 +67,26 @@ impl Forwarder {
                                     newpkt[..HEADER_SIZE].copy_from_slice(&pkt[..HEADER_SIZE]);
                                     // copy ciphertext
                                     let dst = &mut newpkt[HEADER_SIZE..];
-                                    // Hybrid copy: small -> single bulk copy, large -> chunked
+                                    // Hybrid copy: small -> single bulk copy (prefer AVX2 if present), large -> chunked
                                     // Threshold: 4 KiB (4096 bytes).
-                                    // Rationale: microbenchmarks (see tools/bench_harness results)
-                                    // show that tiled/AVX2 or single memcpy-style copies win for
-                                    // small payloads (<=4KiB) while chunked scalar copies are
-                                    // more robust for larger payloads where cache behavior
-                                    // and branch overhead make tiled partial-copying less
-                                    // efficient. Keep this threshold conservative; it's
-                                    // hardware-dependent and can be tuned after running
-                                    // `perf stat` on target hardware.
+                                    // Rationale: microbenchmarks show tiled/AVX2 or single memcpy-style
+                                    // copies win for small payloads (<=4KiB) while chunked scalar copies
+                                    // are more robust for larger payloads. This branch prefers AVX2
+                                    // when available for small copies.
                                     if dst.len() <= 4096 {
-                                        // single bulk copy
-                                        dst.copy_from_slice(&ct);
+                                        // Prefer AVX2 accelerated copy when available on x86_64
+                                        #[cfg(target_arch = "x86_64")]
+                                        {
+                                            if is_x86_feature_detected!("avx2") {
+                                                unsafe { copy_avx2(dst.as_mut_ptr(), ct.as_ptr(), dst.len()); }
+                                            } else {
+                                                dst.copy_from_slice(&ct);
+                                            }
+                                        }
+                                        #[cfg(not(target_arch = "x86_64"))]
+                                        {
+                                            dst.copy_from_slice(&ct);
+                                        }
                                     } else {
                                         // chunked 256-byte scalar copy
                                         let mut off = 0usize;
@@ -118,6 +129,27 @@ impl Forwarder {
 
         let _ = sock.send(out);
         stats
+    }
+}
+
+// AVX2 accelerated copy helper for x86_64. Copies `len` bytes from `src` to `dst`.
+// Safety: caller must ensure `dst` and `src` are valid for `len` bytes and not overlapping in unexpected ways.
+#[cfg(target_arch = "x86_64")]
+unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
+    use std::ptr;
+    let mut off = 0usize;
+    // copy 32-byte blocks using AVX2
+    while off + 32 <= len {
+        let src_ptr = src.add(off) as *const __m256i;
+        let v = _mm256_loadu_si256(src_ptr);
+        let dst_ptr = dst.add(off) as *mut __m256i;
+        _mm256_storeu_si256(dst_ptr, v);
+        off += 32;
+    }
+    // tail copy
+    if off < len {
+        let rem = len - off;
+        ptr::copy_nonoverlapping(src.add(off), dst.add(off), rem);
     }
 }
 
