@@ -1,0 +1,19 @@
+[package]
+name = "afxdp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+datapath = { path = "../datapath" }
+bytes = "1.4"
+thiserror = "1.0"
+
+# low-level libc/nix helpers used only when the `real` feature is enabled
+nix = { version = "0.27", optional = true }
+libc = "0.2"
+
+[features]
+# default to the mock implementation so CI/workers can run without kernel support
+default = ["mock"]
+mock = []
+real = ["nix"]

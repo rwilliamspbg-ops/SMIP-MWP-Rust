@@ -1,0 +1,14 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mohawk-node"
+path = "src/main.rs"
+
+[dependencies]
+afxdp = { path = "../afxdp" }
+datapath = { path = "../datapath" }
+routing = { path = "../routing" }
+wire = { path = "../wire" }

@@ -1,0 +1,10 @@
+[package]
+name = "routing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+parking_lot = "0.12"
+once_cell = "1.18"
+

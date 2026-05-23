@@ -1,0 +1,13 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Rust toolchain
+      uses: rust-lang/rust-toolchain-action@master
+      with:
+        toolchain: stable
+    - name: Build the project
+      run: cargo build --release

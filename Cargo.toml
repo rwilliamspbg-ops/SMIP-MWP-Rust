@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "wire",
+    "crypto",
+    "routing",
+    "datapath",
+    "afxdp",
+    "cli",
+    "bench",
+]
+
+[workspace.metadata]
+description = "Rust rewrite workspace for SMIP-MWP (scaffold)"

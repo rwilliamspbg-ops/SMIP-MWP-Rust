@@ -1,0 +1,10 @@
+[package]
+name = "wire"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1.0"
+
+[dev-dependencies]
+rand = "0.8"
