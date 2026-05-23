@@ -1,4 +1,4 @@
-use crypto::session::{HybridSession, SessionError};
+use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 #[cfg(target_arch = "x86_64")]
 use std::is_x86_feature_detected;
 #[cfg(target_arch = "x86_64")]
@@ -43,6 +43,10 @@ impl Forwarder {
             return stats;
         }
 
+        // Single reusable ciphertext buffer — avoids one heap allocation per packet.
+        // Sized to the largest expected payload + AEAD tag.
+        let mut ct_buf: Vec<u8> = Vec::with_capacity(65536 + TAG_SIZE);
+
         for pkt in frames {
             let mut forwarded = false;
 
@@ -52,53 +56,52 @@ impl Forwarder {
                         let payload_len = h.length as usize;
                         if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                             let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-                            match session.encrypt(payload, h.seq_num) {
-                                Ok(ct) => {
-                                    // Assemble packet using hybrid copy: allocate exact size and
-                                    // copy header+ciphertext. For small packets this behaves
-                                    // like a tiled/memcpy-friendly copy, while for larger
-                                    // packets we use chunked scalar copies. This reduces
-                                    // intermediate allocations and gives more control over
-                                    // copy strategy.
-                                    let total = HEADER_SIZE + ct.len();
+
+                            // Pre-size ct_buf to hold ciphertext before calling encrypt_to,
+                            // satisfying the capacity check inside encrypt_to.
+                            let needed = payload_len + TAG_SIZE;
+                            if ct_buf.capacity() < needed {
+                                ct_buf.reserve(needed - ct_buf.capacity());
+                            }
+
+                            match session.encrypt_to(&mut ct_buf, payload, h.seq_num) {
+                                Ok(()) => {
+                                    // Assemble output packet: one allocation sized exactly,
+                                    // then two copy_from_slice calls (header + ciphertext).
+                                    let total = HEADER_SIZE + ct_buf.len();
                                     let mut newpkt = Vec::with_capacity(total);
                                     unsafe { newpkt.set_len(total); }
-                                    // copy header
+
+                                    // Copy header
                                     newpkt[..HEADER_SIZE].copy_from_slice(&pkt[..HEADER_SIZE]);
-                                    // copy ciphertext
+
+                                    // Copy ciphertext with hybrid SIMD/scalar strategy.
+                                    // Threshold: 4096 bytes.
+                                    // Both branches use the same 4096-byte cutoff so the
+                                    // AVX2 streaming-store path actually fires for large
+                                    // payloads instead of never being reached.
                                     let dst = &mut newpkt[HEADER_SIZE..];
-                                    // Hybrid copy: small -> single bulk copy (prefer AVX2 if present), large -> chunked
-                                    // Threshold: 4 KiB (4096 bytes).
-                                    // Rationale: microbenchmarks show tiled/AVX2 or single memcpy-style
-                                    // copies win for small payloads (<=4KiB) while chunked scalar copies
-                                    // are more robust for larger payloads. This branch prefers AVX2
-                                    // when available for small copies.
-                                    if dst.len() <= 4096 {
-                                        // Prefer AVX2 accelerated copy when available on x86_64
+                                    let src = ct_buf.as_slice();
+                                    if dst.len() >= 4096 {
+                                        // Large payload: AVX2 with streaming stores when
+                                        // destination is 32-byte aligned; avoids cache pollution.
                                         #[cfg(target_arch = "x86_64")]
                                         {
                                             if is_x86_feature_detected!("avx2") {
-                                                unsafe { copy_avx2(dst.as_mut_ptr(), ct.as_ptr(), dst.len()); }
+                                                unsafe { copy_avx2(dst.as_mut_ptr(), src.as_ptr(), dst.len()); }
                                             } else {
-                                                dst.copy_from_slice(&ct);
+                                                dst.copy_from_slice(src);
                                             }
                                         }
                                         #[cfg(not(target_arch = "x86_64"))]
                                         {
-                                            dst.copy_from_slice(&ct);
+                                            dst.copy_from_slice(src);
                                         }
                                     } else {
-                                        // chunked 256-byte scalar copy
-                                        let mut off = 0usize;
-                                        while off + 256 <= dst.len() {
-                                            dst[off..off+256].copy_from_slice(&ct[off..off+256]);
-                                            off += 256;
-                                        }
-                                        if off < dst.len() {
-                                            let rem = dst.len() - off;
-                                            dst[off..].copy_from_slice(&ct[off..off+rem]);
-                                        }
+                                        // Small payload: single bulk copy (LLVM will vectorise).
+                                        dst.copy_from_slice(src);
                                     }
+
                                     out.push(newpkt);
                                     stats.encrypted += 1;
                                     forwarded = true;
@@ -132,88 +135,68 @@ impl Forwarder {
     }
 }
 
-// AVX2 accelerated copy helper for x86_64. Copies `len` bytes from `src` to `dst`.
-// Safety: caller must ensure `dst` and `src` are valid for `len` bytes and not overlapping in unexpected ways.
+// AVX2 accelerated copy helper for x86_64.
+// Safety: caller must ensure dst and src are valid for len bytes and non-overlapping.
 #[cfg(target_arch = "x86_64")]
 unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
     use std::ptr;
-    // Tuned AVX2 copy: prefer large unrolled vectorized copies and use streaming
-    // stores for long transfers to avoid polluting caches when dst is aligned.
+
     #[target_feature(enable = "avx2")]
     unsafe fn inner(dst: *mut u8, src: *const u8, len: usize) {
         let mut off = 0usize;
-        // If destination is 32-byte aligned and length large, use non-temporal stores
         let dst_aligned = (dst as usize) & 31 == 0;
+
+        // Streaming stores for large, aligned transfers — avoids cache pollution.
+        // Threshold matches the outer >= 4096 guard, so this branch actually fires.
         if len >= 4096 && dst_aligned {
-            // streaming stores in 128-byte unrolled blocks
             while off + 128 <= len {
-                let p0 = src.add(off) as *const __m256i;
-                let v0 = _mm256_loadu_si256(p0);
-                let p1 = src.add(off + 32) as *const __m256i;
-                let v1 = _mm256_loadu_si256(p1);
-                let p2 = src.add(off + 64) as *const __m256i;
-                let v2 = _mm256_loadu_si256(p2);
-                let p3 = src.add(off + 96) as *const __m256i;
-                let v3 = _mm256_loadu_si256(p3);
-                let d0 = dst.add(off) as *mut __m256i;
-                let d1 = dst.add(off + 32) as *mut __m256i;
-                let d2 = dst.add(off + 64) as *mut __m256i;
-                let d3 = dst.add(off + 96) as *mut __m256i;
-                _mm256_stream_si256(d0, v0);
-                _mm256_stream_si256(d1, v1);
-                _mm256_stream_si256(d2, v2);
-                _mm256_stream_si256(d3, v3);
+                let v0 = _mm256_loadu_si256(src.add(off)       as *const __m256i);
+                let v1 = _mm256_loadu_si256(src.add(off + 32)  as *const __m256i);
+                let v2 = _mm256_loadu_si256(src.add(off + 64)  as *const __m256i);
+                let v3 = _mm256_loadu_si256(src.add(off + 96)  as *const __m256i);
+                _mm256_stream_si256(dst.add(off)       as *mut __m256i, v0);
+                _mm256_stream_si256(dst.add(off + 32)  as *mut __m256i, v1);
+                _mm256_stream_si256(dst.add(off + 64)  as *mut __m256i, v2);
+                _mm256_stream_si256(dst.add(off + 96)  as *mut __m256i, v3);
                 off += 128;
             }
             _mm_sfence();
         }
 
-        // Unrolled vector copy for remaining data (128-byte blocks)
+        // Unrolled 128-byte vector copy for remainder (or all of a non-aligned buffer)
         while off + 128 <= len {
-            let p0 = src.add(off) as *const __m256i;
-            let v0 = _mm256_loadu_si256(p0);
-            let p1 = src.add(off + 32) as *const __m256i;
-            let v1 = _mm256_loadu_si256(p1);
-            let p2 = src.add(off + 64) as *const __m256i;
-            let v2 = _mm256_loadu_si256(p2);
-            let p3 = src.add(off + 96) as *const __m256i;
-            let v3 = _mm256_loadu_si256(p3);
-            let d0 = dst.add(off) as *mut __m256i;
-            let d1 = dst.add(off + 32) as *mut __m256i;
-            let d2 = dst.add(off + 64) as *mut __m256i;
-            let d3 = dst.add(off + 96) as *mut __m256i;
-            _mm256_storeu_si256(d0, v0);
-            _mm256_storeu_si256(d1, v1);
-            _mm256_storeu_si256(d2, v2);
-            _mm256_storeu_si256(d3, v3);
+            let v0 = _mm256_loadu_si256(src.add(off)       as *const __m256i);
+            let v1 = _mm256_loadu_si256(src.add(off + 32)  as *const __m256i);
+            let v2 = _mm256_loadu_si256(src.add(off + 64)  as *const __m256i);
+            let v3 = _mm256_loadu_si256(src.add(off + 96)  as *const __m256i);
+            _mm256_storeu_si256(dst.add(off)       as *mut __m256i, v0);
+            _mm256_storeu_si256(dst.add(off + 32)  as *mut __m256i, v1);
+            _mm256_storeu_si256(dst.add(off + 64)  as *mut __m256i, v2);
+            _mm256_storeu_si256(dst.add(off + 96)  as *mut __m256i, v3);
             off += 128;
         }
 
-        // Finish with 32-byte vector copies
+        // 32-byte tail
         while off + 32 <= len {
-            let src_ptr = src.add(off) as *const __m256i;
-            let v = _mm256_loadu_si256(src_ptr);
-            let dst_ptr = dst.add(off) as *mut __m256i;
-            _mm256_storeu_si256(dst_ptr, v);
+            let v = _mm256_loadu_si256(src.add(off) as *const __m256i);
+            _mm256_storeu_si256(dst.add(off) as *mut __m256i, v);
             off += 32;
         }
 
-        // tail copy
+        // Byte tail
         if off < len {
-            let rem = len - off;
-            ptr::copy_nonoverlapping(src.add(off), dst.add(off), rem);
+            ptr::copy_nonoverlapping(src.add(off), dst.add(off), len - off);
         }
     }
 
     if is_x86_feature_detected!("avx2") {
         inner(dst, src, len);
     } else {
-        ptr::copy_nonoverlapping(src, dst, len);
+        std::ptr::copy_nonoverlapping(src, dst, len);
     }
 }
 
 pub mod socket {
-    // Minimal XDP-like socket trait used by forwarder tests and mocks
     pub trait XdpSocket {
         fn poll(&mut self, max: usize) -> Vec<Vec<u8>>;
         fn send(&mut self, pkts: Vec<Vec<u8>>) -> Result<(), ()>;
@@ -250,12 +233,9 @@ mod tests {
             last_seen: SystemTime::now(),
         });
         let fwd = Forwarder::new(rt);
-
-        // build header + payload
         let mut buf = wire::Header::new_header_buffer(4);
         let h = Header { src_id: [1u8;32], dst_id: [2u8;32], flow_label: 0x1, seq_num: 1, session_id: [0u8;16], flags: 0, length: 4 };
         h.marshal_into(&mut buf).unwrap();
-        // append payload
         buf[wire::HEADER_SIZE..wire::HEADER_SIZE+4].copy_from_slice(&[0x1,0x2,0x3,0x4]);
         let mut sock = MockSocket::new(vec![buf]);
         let stats = fwd.process_batch(&mut sock);
@@ -274,23 +254,12 @@ mod tests {
             last_seen: SystemTime::now(),
         });
         let fwd = Forwarder::new(rt);
-
         let mut buf = wire::Header::new_header_buffer(4);
-        let h = Header {
-            src_id: [1u8;32],
-            dst_id: [2u8;32],
-            flow_label: 0x1,
-            seq_num: 1,
-            session_id: [0u8;16],
-            flags: 0,
-            length: 8,
-        };
+        let h = Header { src_id: [1u8;32], dst_id: [2u8;32], flow_label: 0x1, seq_num: 1, session_id: [0u8;16], flags: 0, length: 8 };
         h.marshal_into(&mut buf).unwrap();
-        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
-
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE+4].copy_from_slice(&[0x1,0x2,0x3,0x4]);
         let mut sock = MockSocket::new(vec![buf]);
         let stats = fwd.process_batch(&mut sock);
-
         assert_eq!(stats.received, 1);
         assert_eq!(stats.encrypted, 0);
         assert_eq!(stats.route_misses, 1);
