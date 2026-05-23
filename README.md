@@ -3,6 +3,7 @@
 [![CI](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/actions/workflows/ci.yml/badge.svg)](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/actions)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 <a href="https://github.com/sponsors/rwilliamspbg-ops"><img src="https://img.shields.io/badge/Sponsor-❤-1EAEDB?style=social&logo=github" alt="Sponsor"></a>
+[![Contributing](https://img.shields.io/badge/contributing-guidelines-brightgreen.svg)](CONTRIBUTING.md)
 
 This repository contains a Rust rewrite of the SMIP-MWP project components: datapath, crypto, routing and CLI. The goal is a safe, testable, and high-performance implementation suitable for benchmarking and iteration.
 
