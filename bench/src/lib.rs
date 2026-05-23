@@ -1,3 +1,9 @@
+#[inline(always)]
+fn fill_pattern_scalar_chunked(buffer: &mut [u8]) {
+    for (index, byte) in buffer.iter_mut().enumerate() {
+        *byte = (index & 0xFF) as u8;
+    }
+}
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 

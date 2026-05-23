@@ -28,6 +28,54 @@ cargo test --workspace --all-targets
 cargo run --release -p bench
 ```
 
+Bench harness (automated)
+
+The repository includes an automated bench harness that runs multiple fill/processing
+strategies (scalar, tiled with several tile sizes, and an AVX2-accelerated tiled
+variant) and emits CSV results for reproducible comparison.
+
+Files:
+- `tools/bench_harness/run_bench_harness.sh` — driver script that runs each
+	strategy multiple times and appends results to a CSV.
+- `tools/bench_harness/parse_and_append.py` — parses bench output and appends
+	rows to the CSV with columns: `timestamp,commit,run_index,strategy,size,avg_ns,throughput_mib_s`.
+
+Quick usage (local)
+
+1. Build the bench binary (if you have cargo):
+
+```sh
+cargo build -p bench --release
+```
+
+2. Run the harness (example: 20 iterations):
+
+```sh
+./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv
+```
+
+3. The harness writes `bench_results.csv` which you can import into spreadsheets
+	 or analysis tooling for comparison.
+
+CI integration
+
+There is a GitHub Actions workflow at `.github/workflows/bench-harness.yml`
+that builds the `bench` binary and runs the harness, uploading the CSV as a
+workflow artifact. The job is triggerable manually (workflow_dispatch) and
+via tags that match `bench-*`.
+
+Notes
+
+- For low-noise hardware counters (cycles, cache-misses, branch-misses) run
+	`perf stat` on a host machine or a self-hosted runner with `perf` enabled.
+- The harness supports selecting a single strategy via the `BENCH_STRATEGY`
+	environment variable for clearer per-strategy `perf stat` runs, e.g.
+
+```sh
+BENCH_STRATEGY=tiled_256 ./target/release/bench
+```
+
+
 Contributing
 
 Please open issues for design discussions and submit focused pull requests for changes. Large API or design changes should be discussed in an issue first.

@@ -21,3 +21,8 @@ target/criterion/
 
 # Node modules (if any)
 node_modules/
+# Ignore perf and harness artifacts
+perf.data
+perf.data.old
+bench_harness_results.csv
+.vs/
