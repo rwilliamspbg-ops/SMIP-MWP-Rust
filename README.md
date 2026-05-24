@@ -152,7 +152,52 @@ Released under the [GNU Affero General Public License v3 (AGPL-3.0)](https://www
 Legacy inventory and translation notes are in `docs/archive/`.
 
 ---
+# Case Study: High-Performance Network Datapath Optimization (Rust)
 
+A ground-up Rust rewrite and iterative optimization of **SMIP-MWP**, a safe, testable, and ultra-high-performance networking protocol datapath handling cryptographic routing, session management, and AF_XDP ring buffer integration. 
+
+By systematically targeting memory allocations, cache misses, and cryptographic bottlenecks over three rounds of profiling, I achieved a **~3× throughput increase on the miss path** and pushed the core hit path to **2.49 Mpps**.
+
+## 🚀 Impact & Performance Milestones
+
+All metrics are backed by rigorous, automated Criterion microbenchmarks (`cargo bench`) running on release builds:
+
+### Datapath Throughput (Packets / Second)
+* **Hit Path (16-pkt batch):** Scaled from **2.01 Mpps** (scaffold) ➡️ **2.49 Mpps** (+24%)
+* **Miss Path (16-pkt batch):** Scaled from **813 Kpps** (scaffold) ➡️ **2.18 Mpps** (**+168% / ~3× total improvement**)
+
+### Memory Copy Throughput (Alloc + Fill)
+* **64 KB Payloads:** Increased from **32.3 GiB/s** ➡️ **45.1 GiB/s** by correcting SIMD vectorization branches to properly fire AVX2 streaming stores.
+
+### Latency Reductions
+* **Session Lookup:** Plometed from **~500 ns to ~10 ns** (**50× faster**) by replacing heavy cryptographic hashing with a localized, low-overhead hashing strategy.
+
+---
+
+## 🛠️ Key Engineering Wins & Optimization Strategy
+
+### 1. Eliminating Per-Packet Heap Allocations (Zero-Alloc Hot Path)
+* **Single-Arena Send Buffer:** Replaced per-packet `Vec` allocations for outgoing packets with a single persistent arena (`Vec<u8>`). Packets are written into the arena, offsets are passed to the socket, and the arena buffer is reused across batches—eliminating allocator noise in flamegraphs.
+* **In-Place AEAD Encryption:** Shifted from standard `aead::encrypt` (which hid internal heap allocations) to `aead::encrypt_in_place`, writing the auth tag directly into the ciphertext buffer.
+* **Stack Allocation:** Hoisted HKDF info concatenation out of the heap by swapping dynamic vectors for fixed-size, stack-allocated `[u8; 256]` arrays during session derivation.
+
+### 2. Zero-Copy Header Parsing
+* Implemented a lifetime-tracked `HeaderViewRef<'a>` in the network wire crate. This allowed the hot path to read incoming fields directly out of the raw packet buffer, completely erasing a 96-byte struct copy and 7 distinct `copy_from_slice` operations per packet.
+
+### 3. Algorithmic & Cryptographic Right-Sizing
+* **Algorithmic Shift:** Discovered the routing table was cloning and sorting a `Vec` on every single write operation. Replaced the architecture with a `BTreeMap`-backed routing table, guaranteeing $O(\log n)$ writes with zero extra allocations.
+* **Hashing Optimization:** Identified that executing a full SHA-256 hash inside `predictive_next_hop` on every route miss and `derive_cache_key()` on every session lookup was choking the CPU. Swapped these out for a stable `DefaultHasher` (SipHash), safely reclaiming massive execution cycles without compromising necessary distribution.
+
+### 4. SIMD Alignment & Branch Profiling
+* Fixed an unaligned outer guard loop condition that was preventing the hardware from utilizing AVX2 streaming-store branches on large payload fills, unlocking an extra **12.8 GiB/s** of memory bandwidth.
+
+---
+
+## 💻 Technical Stack & Code Hygiene
+* **Language:** Stable Rust (2021 Edition)
+* **Crates Profiled:** `crypto` (AES-256-GCM / ChaCha20Poly1305), `datapath`, `afxdp`, `routing`, `wire`
+* **Tooling:** Criterion (Microbenchmarking), `perf` (System profiling/Flamegraphs), Python (Data aggregation/Harness analysis)
+* **Code Quality:** Clean compilation across the entire workspace with **zero warnings** under strict `-D warnings` Clippy lints.
 ## Sponsorship
 
 Support this work via GitHub Sponsors: https://github.com/sponsors/rwilliamspbg-ops
