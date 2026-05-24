@@ -12,3 +12,7 @@ afxdp = { path = "../afxdp" }
 datapath = { path = "../datapath" }
 routing = { path = "../routing" }
 wire = { path = "../wire" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
