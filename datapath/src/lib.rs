@@ -12,6 +12,8 @@ pub use socket::XdpSocket;
 pub struct Forwarder {
     pub routes: Table,
     session: Option<HybridSession>,
+    arena: Vec<u8>,
+    offsets: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,15 +31,15 @@ impl Forwarder {
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
         let session = HybridSession::new(&session_secret, &session_info).ok();
-        Self { routes, session }
+        Self { routes, session, arena: Vec::new(), offsets: Vec::new() }
     }
 
-    pub fn process_batch(&self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+    pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         let frames = sock.poll(64);
-        // Single arena buffer and offsets to hold outgoing packets without
-        // allocating per-packet boxed slices.
-        let mut arena: Vec<u8> = Vec::with_capacity(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
-        let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(frames.len());
+        // reuse the persistent arena and offsets
+        self.arena.clear();
+        self.offsets.clear();
+        self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
         let mut stats = ForwarderStats {
             received: frames.len(),
             ..ForwarderStats::default()
@@ -85,12 +87,11 @@ impl Forwarder {
                             // Zero extra Vec allocations.
                             match session.encrypt_to(&mut ct_buf, payload, seq_num) {
                                 Ok(()) => {
-                                    // Assemble output packet: allocate and append header
-                                    // and ciphertext. Use AVX2 copy for very large
-                                    // ciphertexts when available.
-                                    let start = arena.len();
+                                    // Assemble output packet: append header
+                                    // and ciphertext into the persistent arena.
+                                    let start = self.arena.len();
                                     // append header
-                                    arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
 
                                     // append ciphertext, using AVX2 optimized copy into
                                     // the arena when available.
@@ -99,27 +100,27 @@ impl Forwarder {
                                         #[cfg(target_arch = "x86_64")]
                                         {
                                             if use_avx2 {
-                                                let start_index = arena.len();
-                                                arena.resize(start_index + ct_len, 0);
+                                                let start_index = self.arena.len();
+                                                self.arena.resize(start_index + ct_len, 0);
                                                 unsafe {
-                                                    let dst_ptr = arena[start_index..].as_mut_ptr();
+                                                    let dst_ptr = self.arena[start_index..].as_mut_ptr();
                                                     let src_ptr = ct_buf.as_ptr();
                                                     copy_avx2(dst_ptr, src_ptr, ct_len);
                                                 }
                                             } else {
-                                                arena.extend_from_slice(&ct_buf);
+                                                self.arena.extend_from_slice(&ct_buf);
                                             }
                                         }
                                         #[cfg(not(target_arch = "x86_64"))]
                                         {
-                                            arena.extend_from_slice(&ct_buf);
+                                            self.arena.extend_from_slice(&ct_buf);
                                         }
                                     } else {
-                                        arena.extend_from_slice(&ct_buf);
+                                        self.arena.extend_from_slice(&ct_buf);
                                     }
 
-                                    let len = arena.len() - start;
-                                    offsets.push((start, len));
+                                    let len = self.arena.len() - start;
+                                    self.offsets.push((start, len));
                                     stats.encrypted += 1;
                                     forwarded = true;
                                 }
@@ -143,15 +144,14 @@ impl Forwarder {
 
 
             if !forwarded {
-                let start = arena.len();
-                arena.extend_from_slice(&pkt);
-                let len = arena.len() - start;
-                offsets.push((start, len));
+                let start = self.arena.len();
+                self.arena.extend_from_slice(&pkt);
+                let len = self.arena.len() - start;
+                self.offsets.push((start, len));
                 stats.forwarded += 1;
             }
         }
-        let boxed_arena = arena.into_boxed_slice();
-        let _ = sock.send(boxed_arena, offsets);
+        let _ = sock.send(&mut self.arena, &self.offsets);
         stats
     }
 }
@@ -170,7 +170,7 @@ unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
         // Streaming stores for large, aligned transfers — avoids cache pollution.
         // Threshold matches the outer >= 4096 guard, so this branch actually fires.
         if len >= 4096 && dst_aligned {
-            while off + 128 <= len {
+                while off + 128 <= len {
                 let v0 = _mm256_loadu_si256(src.add(off)       as *const __m256i);
                 let v1 = _mm256_loadu_si256(src.add(off + 32)  as *const __m256i);
                 let v2 = _mm256_loadu_si256(src.add(off + 64)  as *const __m256i);
@@ -179,10 +179,10 @@ unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
                 _mm256_stream_si256(dst.add(off + 32)  as *mut __m256i, v1);
                 _mm256_stream_si256(dst.add(off + 64)  as *mut __m256i, v2);
                 _mm256_stream_si256(dst.add(off + 96)  as *mut __m256i, v3);
-                off += 128;
-            }
-            _mm_sfence();
-        }
+                        off += 128;
+                    }
+                    _mm_sfence();
+                }
 
         // Unrolled 128-byte vector copy for remainder (or all of a non-aligned buffer)
         while off + 128 <= len {
@@ -221,8 +221,9 @@ pub mod socket {
     pub trait XdpSocket {
         fn poll(&mut self, max: usize) -> Vec<Vec<u8>>;
         // Send a single arena buffer with offsets describing individual packets.
-        // This allows the caller to avoid per-packet heap allocations.
-        fn send(&mut self, buf: Box<[u8]>, offsets: Vec<(usize, usize)>) -> Result<(), ()>;
+        // The socket borrows the arena so the caller retains ownership and can
+        // reuse it across batches.
+        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()>;
     }
 }
 
@@ -243,9 +244,9 @@ mod tests {
     }
     impl XdpSocket for MockSocket {
         fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> { std::mem::take(&mut self.frames) }
-        fn send(&mut self, buf: Box<[u8]>, offsets: Vec<(usize, usize)>) -> Result<(), ()> {
+        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
             self.sent.clear();
-            for (off, len) in offsets {
+            for (off, len) in offsets.iter().cloned() {
                 let slice = &buf[off..off+len];
                 self.sent.push(slice.to_vec().into_boxed_slice());
             }
@@ -262,7 +263,7 @@ mod tests {
             metric: 1,
             last_seen: SystemTime::now(),
         });
-        let fwd = Forwarder::new(rt);
+        let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
         let h = Header { src_id: [1u8;32], dst_id: [2u8;32], flow_label: 0x1, seq_num: 1, session_id: [0u8;16], flags: 0, length: 4 };
         h.marshal_into(&mut buf).unwrap();
@@ -283,7 +284,7 @@ mod tests {
             metric: 1,
             last_seen: SystemTime::now(),
         });
-        let fwd = Forwarder::new(rt);
+        let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
         let h = Header { src_id: [1u8;32], dst_id: [2u8;32], flow_label: 0x1, seq_num: 1, session_id: [0u8;16], flags: 0, length: 8 };
         h.marshal_into(&mut buf).unwrap();

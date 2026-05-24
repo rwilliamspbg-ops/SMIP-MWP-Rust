@@ -29,9 +29,9 @@ impl XdpSocket for MockSocket {
         self.frames.drain(..).collect()
     }
 
-    fn send(&mut self, buf: Box<[u8]>, offsets: Vec<(usize, usize)>) -> Result<(), ()> {
+    fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
         self.sent.clear();
-        for (off, len) in offsets {
+        for (off, len) in offsets.iter().cloned() {
             let slice = &buf[off..off+len];
             self.sent.push(slice.to_vec().into_boxed_slice());
         }
