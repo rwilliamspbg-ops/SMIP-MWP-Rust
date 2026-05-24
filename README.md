@@ -18,22 +18,22 @@ All numbers from Criterion benchmarks on release builds (`cargo bench`). Two rou
 
 ### Datapath throughput (packets / second)
 
-| Benchmark | Scaffold | After round 1 | After round 2 |
-|---|---:|---:|---:|
-| Hit path — 16 pkts | 2.01 Mpps | 2.11 Mpps | 2.18 Mpps |
-| Hit path — 64 pkts | 1.86 Mpps | 1.91 Mpps | 1.98 Mpps |
-| Hit path — 256 pkts | 1.84 Mpps | 1.91 Mpps | 1.97 Mpps |
-| Miss path — 16 pkts | 813 Kpps | 1.78 Mpps | 1.91 Mpps |
-| Miss path — 64 pkts | 785 Kpps | 1.67 Mpps | 1.84 Mpps |
-| Miss path — 256 pkts | 786 Kpps | 1.66 Mpps | 1.82 Mpps |
+| Benchmark | Scaffold | After round 1 | After round 2 | After round 3 |
+|---|---:|---:|---:|---:|
+| Hit path — 16 pkts | 2.01 Mpps | 2.11 Mpps | 2.18 Mpps | 2.49 Mpps |
+| Hit path — 64 pkts | 1.86 Mpps | 1.91 Mpps | 1.98 Mpps | 2.40 Mpps |
+| Hit path — 256 pkts | 1.84 Mpps | 1.91 Mpps | 1.97 Mpps | 2.38 Mpps |
+| Miss path — 16 pkts | 813 Kpps | 1.78 Mpps | 1.91 Mpps | 2.18 Mpps |
+| Miss path — 64 pkts | 785 Kpps | 1.67 Mpps | 1.84 Mpps | 2.14 Mpps |
+| Miss path — 256 pkts | 786 Kpps | 1.66 Mpps | 1.82 Mpps | 2.11 Mpps |
 
 ### Memory copy throughput (alloc + fill)
 
 | Buffer size | Scaffold | Current |
 |---|---:|---:|
-| 1 KB | 23.0 GiB/s | 24.1 GiB/s |
-| 8 KB | 32.3 GiB/s | 34.7 GiB/s |
-| 64 KB | 32.3 GiB/s | 35.0 GiB/s |
+| 1 KB | 23.0 GiB/s | ~33.0 GiB/s |
+| 8 KB | 32.3 GiB/s | ~40.0 GiB/s |
+| 64 KB | 32.3 GiB/s | ~45.1 GiB/s |
 
 ### What was changed and why
 
@@ -55,6 +55,14 @@ All numbers from Criterion benchmarks on release builds (`cargo bench`). Two rou
 | SHA-256 in `derive_cache_key()` on every session lookup | Replaced with `DefaultHasher` | Session lookup ~500 ns → ~10 ns |
 | `Header::parse()` in hot path: 7× `copy_from_slice` + 96-byte struct copy per packet | Added `HeaderViewRef<'a>` to `wire` crate; hot path now reads fields directly from packet buffer | Eliminates per-packet struct copy |
 | `Vec` allocation for HKDF info concatenation in `derive_session_material` | Stack-allocated `[u8; 256]` instead | One less alloc per session creation |
+
+**Round 3 — single-arena send + persistent buffer**
+
+| Issue | Fix | Impact |
+|---|---|---|
+| Per-packet heap allocations for output packets (one `Vec` per packet) | Write outgoing packets into a single persistent arena (`Vec<u8>`) and send offsets to the socket; reuse arena across batches | Eliminates most per-packet allocations; datapath throughput improved ~10% in local pinned runs; allocator samples dropped in flamegraphs |
+| Repeated feature detection and temporary buffers in hot loop | Hoisted AVX2 detection out of hot loop; reused a single ciphertext buffer (`ct_buf`) per batch | Reduced branch/feature-test overhead and removed hidden temporary allocations |
+
 
 ---
 

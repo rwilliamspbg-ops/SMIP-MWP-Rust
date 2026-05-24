@@ -6,7 +6,7 @@ use wire::{Header, HEADER_SIZE};
 
 struct MockSocket {
     frames: Vec<Vec<u8>>,
-    sent: Vec<Vec<u8>>,
+    sent: Vec<Box<[u8]>>,
 }
 
 impl MockSocket {
@@ -29,8 +29,12 @@ impl XdpSocket for MockSocket {
         self.frames.drain(..).collect()
     }
 
-    fn send(&mut self, pkts: Vec<Vec<u8>>) -> Result<(), ()> {
-        self.sent = pkts;
+    fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
+        self.sent.clear();
+        for (off, len) in offsets.iter().cloned() {
+            let slice = &buf[off..off+len];
+            self.sent.push(slice.to_vec().into_boxed_slice());
+        }
         Ok(())
     }
 }

@@ -28,7 +28,14 @@ impl MockSocket {
 
 impl DatapathXdpSocket for MockSocket {
     fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> { std::mem::take(&mut self.frames.lock().unwrap()) }
-    fn send(&mut self, pkts: Vec<Vec<u8>>) -> Result<(), ()> { *self.sent.lock().unwrap() = pkts; Ok(()) }
+    fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
+        let mut out = Vec::with_capacity(offsets.len());
+        for (off, len) in offsets.iter().cloned() {
+            out.push(buf[off..off+len].to_vec());
+        }
+        *self.sent.lock().unwrap() = out;
+        Ok(())
+    }
 }
 
 // Provide a constructor that returns a boxed `datapath::socket::XdpSocket` object.
@@ -229,23 +236,23 @@ mod real {
             // fallback to empty
             Vec::new()
         }
-        fn send(&mut self, pkts: Vec<Vec<u8>>) -> Result<(), ()> {
+        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
             // Use ring-based TX if available
             let ring = match &self.ring {
                 Some(r) => r,
                 None => return Err(()),
             };
-
-            let mut addrs: Vec<u64> = Vec::with_capacity(pkts.len());
+            let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
             let frames = self._umem.len() / self._umem.frame_size();
-            for pkt in pkts.iter() {
+            for (off, len) in offsets.iter().cloned() {
+                let slice = &buf[off..off+len];
                 let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
-                let off = idx * self._umem.frame_size();
+                let mem_off = idx * self._umem.frame_size();
                 unsafe {
-                    let dst = self._umem.base_ptr().add(off);
-                    std::ptr::copy_nonoverlapping(pkt.as_ptr(), dst, std::cmp::min(pkt.len(), self._umem.frame_size()));
+                    let dst = self._umem.base_ptr().add(mem_off);
+                    std::ptr::copy_nonoverlapping(slice.as_ptr(), dst, std::cmp::min(slice.len(), self._umem.frame_size()));
                 }
-                addrs.push(off as u64);
+                addrs.push(mem_off as u64);
             }
 
             let pushed = ring.tx_push(&addrs);
