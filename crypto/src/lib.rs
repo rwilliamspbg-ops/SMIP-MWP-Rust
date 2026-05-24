@@ -23,10 +23,18 @@ mod tests {
 
     #[test]
     fn kex_and_session_flow() {
-        let k = HybridKEX::new().expect("kex new");
-        let pubk = k.public_key();
-        let combined = k.handshake(&pubk).expect("handshake");
-        let sess = HybridSession::new(&combined, b"session-info").expect("session");
+        // Two-phase hybrid KEX: initiator <-> responder
+        let mut initiator = HybridKEX::new().expect("initiator keygen");
+        let init_pub = initiator.public_key();
+
+        let mut responder = HybridKEX::new().expect("responder keygen");
+        let (resp_msg, combined_resp) = responder.respond(&init_pub).expect("respond");
+
+        let combined_init = initiator.finish(&resp_msg).expect("finish");
+        assert_eq!(combined_init, combined_resp, "session secrets must match");
+
+        // Both sides derive the same session
+        let sess = HybridSession::new(&combined_init, b"session-info").expect("session");
         let ct = sess.encrypt(b"hello", 1).expect("encrypt");
         let pt = sess.decrypt(&ct, 1).expect("decrypt");
         assert_eq!(pt, b"hello");
