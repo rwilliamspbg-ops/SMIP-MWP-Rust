@@ -34,7 +34,10 @@ impl Forwarder {
 
     pub fn process_batch(&self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         let frames = sock.poll(64);
-        let mut out: Vec<Vec<u8>> = Vec::with_capacity(frames.len());
+        // Single arena buffer and offsets to hold outgoing packets without
+        // allocating per-packet boxed slices.
+        let mut arena: Vec<u8> = Vec::with_capacity(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+        let mut offsets: Vec<(usize, usize)> = Vec::with_capacity(frames.len());
         let mut stats = ForwarderStats {
             received: frames.len(),
             ..ForwarderStats::default()
@@ -48,6 +51,15 @@ impl Forwarder {
         // Sized to the largest expected payload + AEAD tag.
         let mut ct_buf: Vec<u8> = Vec::with_capacity(65536 + TAG_SIZE);
 
+        // Hoist feature detection out of the hot loop.
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let use_avx2 = false;
+
+        // Borrow session once to avoid repeated borrow resolution in the loop.
+        let session_opt = self.session.as_ref();
+
         for pkt in frames {
             let mut forwarded = false;
 
@@ -59,7 +71,7 @@ impl Forwarder {
                 let payload_len = h.length() as usize;
 
                 if self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
-                    if let Some(session) = &self.session {
+                    if let Some(session) = session_opt {
                         if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                             let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
 
@@ -73,43 +85,41 @@ impl Forwarder {
                             // Zero extra Vec allocations.
                             match session.encrypt_to(&mut ct_buf, payload, seq_num) {
                                 Ok(()) => {
-                                    // Assemble output packet: one allocation sized exactly,
-                                    // then two copy_from_slice calls (header + ciphertext).
-                                    let total = HEADER_SIZE + ct_buf.len();
-                                    let mut newpkt = Vec::with_capacity(total);
-                                    unsafe { newpkt.set_len(total); }
+                                    // Assemble output packet: allocate and append header
+                                    // and ciphertext. Use AVX2 copy for very large
+                                    // ciphertexts when available.
+                                    let start = arena.len();
+                                    // append header
+                                    arena.extend_from_slice(&pkt[..HEADER_SIZE]);
 
-                                    // Copy header
-                                    newpkt[..HEADER_SIZE].copy_from_slice(&pkt[..HEADER_SIZE]);
-
-                                    // Copy ciphertext with hybrid SIMD/scalar strategy.
-                                    // Threshold: 4096 bytes.
-                                    // Both branches use the same 4096-byte cutoff so the
-                                    // AVX2 streaming-store path actually fires for large
-                                    // payloads instead of never being reached.
-                                    let dst = &mut newpkt[HEADER_SIZE..];
-                                    let src = ct_buf.as_slice();
-                                    if dst.len() >= 4096 {
-                                        // Large payload: AVX2 with streaming stores when
-                                        // destination is 32-byte aligned; avoids cache pollution.
+                                    // append ciphertext, using AVX2 optimized copy into
+                                    // the arena when available.
+                                    let ct_len = ct_buf.len();
+                                    if ct_len >= 4096 {
                                         #[cfg(target_arch = "x86_64")]
                                         {
-                                            if is_x86_feature_detected!("avx2") {
-                                                unsafe { copy_avx2(dst.as_mut_ptr(), src.as_ptr(), dst.len()); }
+                                            if use_avx2 {
+                                                let start_index = arena.len();
+                                                arena.resize(start_index + ct_len, 0);
+                                                unsafe {
+                                                    let dst_ptr = arena[start_index..].as_mut_ptr();
+                                                    let src_ptr = ct_buf.as_ptr();
+                                                    copy_avx2(dst_ptr, src_ptr, ct_len);
+                                                }
                                             } else {
-                                                dst.copy_from_slice(src);
+                                                arena.extend_from_slice(&ct_buf);
                                             }
                                         }
                                         #[cfg(not(target_arch = "x86_64"))]
                                         {
-                                            dst.copy_from_slice(src);
+                                            arena.extend_from_slice(&ct_buf);
                                         }
                                     } else {
-                                        // Small payload: single bulk copy (LLVM will vectorise).
-                                        dst.copy_from_slice(src);
+                                        arena.extend_from_slice(&ct_buf);
                                     }
 
-                                    out.push(newpkt);
+                                    let len = arena.len() - start;
+                                    offsets.push((start, len));
                                     stats.encrypted += 1;
                                     forwarded = true;
                                 }
@@ -133,12 +143,15 @@ impl Forwarder {
 
 
             if !forwarded {
-                out.push(pkt);
+                let start = arena.len();
+                arena.extend_from_slice(&pkt);
+                let len = arena.len() - start;
+                offsets.push((start, len));
                 stats.forwarded += 1;
             }
         }
-
-        let _ = sock.send(out);
+        let boxed_arena = arena.into_boxed_slice();
+        let _ = sock.send(boxed_arena, offsets);
         stats
     }
 }
@@ -207,7 +220,9 @@ unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
 pub mod socket {
     pub trait XdpSocket {
         fn poll(&mut self, max: usize) -> Vec<Vec<u8>>;
-        fn send(&mut self, pkts: Vec<Vec<u8>>) -> Result<(), ()>;
+        // Send a single arena buffer with offsets describing individual packets.
+        // This allows the caller to avoid per-packet heap allocations.
+        fn send(&mut self, buf: Box<[u8]>, offsets: Vec<(usize, usize)>) -> Result<(), ()>;
     }
 }
 
@@ -221,14 +236,21 @@ mod tests {
 
     struct MockSocket {
         frames: Vec<Vec<u8>>,
-        sent: Vec<Vec<u8>>,
+        sent: Vec<Box<[u8]>>,
     }
     impl MockSocket {
         fn new(frames: Vec<Vec<u8>>) -> Self { Self { frames, sent: Vec::new() } }
     }
     impl XdpSocket for MockSocket {
         fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> { std::mem::take(&mut self.frames) }
-        fn send(&mut self, pkts: Vec<Vec<u8>>) -> Result<(), ()> { self.sent = pkts; Ok(()) }
+        fn send(&mut self, buf: Box<[u8]>, offsets: Vec<(usize, usize)>) -> Result<(), ()> {
+            self.sent.clear();
+            for (off, len) in offsets {
+                let slice = &buf[off..off+len];
+                self.sent.push(slice.to_vec().into_boxed_slice());
+            }
+            Ok(())
+        }
     }
 
     #[test]
