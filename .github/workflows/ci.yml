@@ -4,11 +4,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Rust toolchain
-      uses: rust-lang/rust-toolchain-action@master
+      uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
+        profile: minimal
+        override: true
     - name: Build the project
       run: cargo build --release
     - name: Run workspace tests
