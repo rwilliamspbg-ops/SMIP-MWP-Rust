@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mohawk Go-Rust Bridge Contract",
+  "type": "object",
+  "properties": {
+    "runtime_config": {
+      "type": "object",
+      "properties": {
+        "iface": { "type": "string" },
+        "queue_id": { "type": "number" },
+        "zero_copy": { "type": "boolean" }
+      },
+      "required": ["iface"]
+    },
+    "route_updates": { "type": "array" },
+    "session_updates": { "type": "array" }
+  },
+  "required": ["runtime_config"]
+}

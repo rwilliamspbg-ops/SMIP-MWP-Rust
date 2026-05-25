@@ -1,0 +1,31 @@
+{
+  "runtime_config": {
+    "iface": "eth0",
+    "queue_id": 0,
+    "zero_copy": false,
+    "num_frames": 1024,
+    "frame_size": 2048,
+    "batch_size": 64,
+    "num_workers": 1
+  },
+  "route_updates": [
+    {
+      "dest_id": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],
+      "next_hop_id": [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]
+    }
+  ],
+  "session_updates": [
+    {
+      "session_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+      "action": "add",
+      "secret": "",
+      "info": ""
+    }
+  ],
+  "feature_flags": {
+    "stub_mode": false,
+    "enable_metrics": false,
+    "enable_adaptive_fill": false,
+    "enable_zero_copy": false
+  }
+}
