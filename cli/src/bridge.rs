@@ -163,7 +163,27 @@ struct BridgeManifest {
 
 #[cfg(test)]
 fn bridge_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("bridge")
+    // Try several plausible locations for the `bridge` artifacts so tests
+    // work both in local dev containers and on GitHub Actions where the
+    // compiled manifest dir layout can differ.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("..").join("..").join("bridge"), // local dev container layout
+        manifest_dir.join("..").join("bridge"),              // repo root layout
+        manifest_dir.join("bridge"),                          // crate-local layout
+        PathBuf::from("/workspaces/bridge"),                  // Codespaces/workspace root
+        PathBuf::from("bridge"),                              // fallback relative path
+    ];
+
+    for cand in &candidates {
+        let p = cand.clone();
+        if p.exists() {
+            return p;
+        }
+    }
+
+    // Return the first candidate if none exist; let the test fail with a clear path.
+    candidates[0].clone()
 }
 
 #[cfg(test)]
