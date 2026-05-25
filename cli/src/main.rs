@@ -21,7 +21,7 @@ fn run_demo() -> datapath::ForwarderStats {
         last_seen: SystemTime::now(),
     });
 
-    let forwarder = Forwarder::with_session(routes, vec![0x42; 32], b"cli-demo".to_vec());
+    let mut forwarder = Forwarder::with_session(routes, vec![0x42; 32], b"cli-demo".to_vec());
     let mut packet = Header::new_header_buffer(4);
     let header = Header {
         src_id: [1u8; 32],
