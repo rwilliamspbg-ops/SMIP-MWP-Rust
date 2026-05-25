@@ -1,4 +1,6 @@
 use aes_gcm::{aead::{Aead, AeadInPlace, KeyInit}, Aes256Gcm};
+use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::aead::generic_array::typenum::U12;
 use chacha20poly1305::ChaCha20Poly1305;
 use hkdf::Hkdf;
 use parking_lot::RwLock;
@@ -93,9 +95,10 @@ impl SessionAead {
     }
 
     fn encrypt(&self, nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
         match self {
-            SessionAead::Aes(aead)   => aead.encrypt(nonce.as_ref().into(), plaintext),
-            SessionAead::ChaCha(aead) => aead.encrypt(nonce.as_ref().into(), plaintext),
+            SessionAead::Aes(aead)   => aead.encrypt(nonce_ref, plaintext),
+            SessionAead::ChaCha(aead) => aead.encrypt(nonce_ref, plaintext),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
     }
@@ -103,7 +106,7 @@ impl SessionAead {
     /// Encrypt plaintext that is already loaded into `buf`, appending the
     /// 16-byte AEAD tag in-place.  Zero extra heap allocations.
     fn encrypt_in_place_buf(&self, nonce: &[u8; NONCE_SIZE], buf: &mut Vec<u8>) -> Result<(), SessionError> {
-        let nonce_ref = nonce.as_ref().into();
+        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
         match self {
             SessionAead::Aes(aead)    => aead.encrypt_in_place(nonce_ref, b"", buf),
             SessionAead::ChaCha(aead) => aead.encrypt_in_place(nonce_ref, b"", buf),
@@ -112,9 +115,10 @@ impl SessionAead {
     }
 
     fn decrypt(&self, nonce: &[u8; NONCE_SIZE], ciphertext: &[u8]) -> Result<Vec<u8>, SessionError> {
+        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
         match self {
-            SessionAead::Aes(aead)    => aead.decrypt(nonce.as_ref().into(), ciphertext),
-            SessionAead::ChaCha(aead) => aead.decrypt(nonce.as_ref().into(), ciphertext),
+            SessionAead::Aes(aead)    => aead.decrypt(nonce_ref, ciphertext),
+            SessionAead::ChaCha(aead) => aead.decrypt(nonce_ref, ciphertext),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
     }
