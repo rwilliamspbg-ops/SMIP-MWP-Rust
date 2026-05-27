@@ -7,6 +7,11 @@ use std::env;
 use std::fs;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::time::Duration;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
@@ -110,6 +115,9 @@ fn render_telemetry(stats: datapath::ForwarderStats, request: Option<&ControlReq
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let want_metrics = parse_flag(&args, "--metrics");
+    let metrics_socket = args.iter().position(|a| a == "--metrics-socket").and_then(|i| args.get(i+1)).map(|s| s.clone());
+    let metrics_http = args.iter().position(|a| a == "--metrics-http").and_then(|i| args.get(i+1)).map(|s| s.clone());
     if parse_flag(&args, "--help") || parse_flag(&args, "-h") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
@@ -139,6 +147,77 @@ fn main() {
         println!("bridge datapath initialized with {} route updates", request.route_updates.len());
         println!("{}", serde_json::to_string_pretty(&telemetry).expect("telemetry json"));
         return;
+    }
+
+    // metrics reporter: prints per-second pconf when requested. It reads and
+    // resets the `datapath::PACKETS_PROCESSED` counter each second.
+    if want_metrics {
+        thread::spawn(|| {
+            loop {
+                let now = std::time::SystemTime::now();
+                let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let count = datapath::PACKETS_PROCESSED.swap(0, Ordering::Relaxed);
+                println!("{},{}", secs, count);
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
+
+    if let Some(sock) = metrics_socket {
+        // Spawn a unix-domain socket listener that returns current cumulative counter
+        let sock_path = sock.clone();
+        thread::spawn(move || {
+            use std::os::unix::net::UnixListener;
+            if std::path::Path::new(&sock_path).exists() {
+                let _ = std::fs::remove_file(&sock_path);
+            }
+            let listener = match UnixListener::bind(&sock_path) {
+                Ok(l) => l,
+                Err(e) => { eprintln!("metrics socket bind: {}", e); return; }
+            };
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut s) => {
+                        let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                        let msg = format!("{{\"timestamp\":{},\"packets_processed\":{}}}\n", now, count);
+                        let _ = s.write_all(msg.as_bytes());
+                    }
+                    Err(e) => { eprintln!("metrics socket accept: {}", e); }
+                }
+            }
+        });
+    }
+
+    if let Some(addr) = metrics_http {
+        let bind_addr = addr.clone();
+        thread::spawn(move || {
+            match TcpListener::bind(&bind_addr) {
+                Ok(listener) => {
+                    for stream in listener.incoming() {
+                        match stream {
+                            Ok(mut s) => {
+                                let mut buf = [0u8; 1024];
+                                let _ = s.read(&mut buf);
+                                let req = String::from_utf8_lossy(&buf);
+                                if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
+                                    let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
+                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                                    let body = format!("{{\"timestamp\":{},\"packets_processed\":{}}}\n", now, count);
+                                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                                    let _ = s.write_all(resp.as_bytes());
+                                } else {
+                                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                                }
+                            }
+                            Err(e) => eprintln!("metrics http accept: {}", e),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("metrics http bind {}: {}", bind_addr, e),
+            }
+        });
     }
 
     if !parse_flag(&args, "--demo") {

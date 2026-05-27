@@ -14,26 +14,35 @@ Rust rewrite of SMIP-MWP — safe, testable, and high-performance datapath, cryp
 
 ## Performance
 
-All numbers from Criterion benchmarks on release builds (`cargo bench`). Two rounds of targeted optimisations have been applied since the initial scaffold.
+All numbers below come from the latest local Criterion runs on release builds (`cargo bench`). The benchmark artifacts and plots are kept in [docs/perf](docs/perf).
 
 ### Datapath throughput (packets / second)
 
-| Benchmark | Scaffold | After round 1 | After round 2 | After round 3 |
-|---|---:|---:|---:|---:|
-| Hit path — 16 pkts | 2.01 Mpps | 2.11 Mpps | 2.18 Mpps | 2.49 Mpps |
-| Hit path — 64 pkts | 1.86 Mpps | 1.91 Mpps | 1.98 Mpps | 2.40 Mpps |
-| Hit path — 256 pkts | 1.84 Mpps | 1.91 Mpps | 1.97 Mpps | 2.38 Mpps |
-| Miss path — 16 pkts | 813 Kpps | 1.78 Mpps | 1.91 Mpps | 2.18 Mpps |
-| Miss path — 64 pkts | 785 Kpps | 1.67 Mpps | 1.84 Mpps | 2.14 Mpps |
-| Miss path — 256 pkts | 786 Kpps | 1.66 Mpps | 1.82 Mpps | 2.11 Mpps |
+| Benchmark | Latest local run |
+|---|---:|
+| Hit path — 16 pkts | 2.40 Mpps |
+| Hit path — 64 pkts | 2.35 Mpps |
+| Hit path — 256 pkts | 2.35 Mpps |
+| Miss path — 16 pkts | 2.13 Mpps |
+| Miss path — 64 pkts | 2.09 Mpps |
+| Miss path — 256 pkts | 2.10 Mpps |
 
 ### Memory copy throughput (alloc + fill)
 
-| Buffer size | Scaffold | Current |
+| Buffer size | Latest local run |
+|---|---:|
+| 1 KB | 34.9 GiB/s |
+| 8 KB | 40.0 GiB/s |
+| 64 KB | 45.8 GiB/s |
+
+### Packet copy cost
+
+| Buffer size | `extend_from_slice` | `copy_nonoverlapping` |
 |---|---:|---:|
-| 1 KB | 23.0 GiB/s | ~33.0 GiB/s |
-| 8 KB | 32.3 GiB/s | ~40.0 GiB/s |
-| 64 KB | 32.3 GiB/s | ~45.1 GiB/s |
+| 256 B | 39.6 GiB/s | 27.8 GiB/s |
+| 1.5 KB | 72.4 GiB/s | 37.8 GiB/s |
+| 4 KB | 63.9 GiB/s | 24.6 GiB/s |
+| 64 KB | 2.72 GiB/s | 2.58 GiB/s |
 
 ### What was changed and why
 
@@ -62,6 +71,15 @@ All numbers from Criterion benchmarks on release builds (`cargo bench`). Two rou
 |---|---|---|
 | Per-packet heap allocations for output packets (one `Vec` per packet) | Write outgoing packets into a single persistent arena (`Vec<u8>`) and send offsets to the socket; reuse arena across batches | Eliminates most per-packet allocations; datapath throughput improved ~10% in local pinned runs; allocator samples dropped in flamegraphs |
 | Repeated feature detection and temporary buffers in hot loop | Hoisted AVX2 detection out of hot loop; reused a single ciphertext buffer (`ct_buf`) per batch | Reduced branch/feature-test overhead and removed hidden temporary allocations |
+
+**Current validation snapshot**
+
+| Area | Latest local result |
+|---|---|
+| Workspace tests | `cargo test --all --tests` passed |
+| Routing miss sweep | Best route count was 2 in the latest local Criterion run |
+| Bench artifacts | Updated CSV and SVG outputs are checked into `docs/perf/` |
+| Stress instrumentation | CLI exposes `--metrics`, `--metrics-socket`, and `--metrics-http` |
 
 
 ---
@@ -123,6 +141,8 @@ python3 tools/bench_harness/plot_routing_miss_sweep.py routing_miss_sweep.csv ro
 This writes one CSV row per route-table size and generates a quick SVG curve so you can spot the minimum fast.
 Criterion requires a sample size of at least `10`.
 
+The latest local run produced `docs/perf/routing_miss_sweep.csv` and `docs/perf/routing_miss_sweep.svg`, with the minimum at `route_count=2`.
+
 **Broad vs fine sweep:**
 
 | route_count | broad mean_time_ns | fine mean_time_ns |
@@ -135,7 +155,11 @@ Criterion requires a sample size of at least `10`.
 
 The minimum stayed at `route_count=1` in both sweeps.
 
-Saved artifacts live in [docs/perf](docs/perf) for quick sharing and review.
+Saved artifacts live in [docs/perf](docs/perf) for quick sharing and review, including:
+
+- [bench_results.csv](docs/perf/bench_results.csv)
+- [routing_miss_sweep.csv](docs/perf/routing_miss_sweep.csv)
+- [routing_miss_sweep.svg](docs/perf/routing_miss_sweep.svg)
 
 **Per-strategy profiling with `perf`:**
 

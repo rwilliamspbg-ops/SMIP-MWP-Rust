@@ -23,6 +23,7 @@ Additional smoke checks:
 ```bash
 cargo run -p cli
 cargo run -p cli -- --demo
+cargo run --release -p cli -- --metrics-http 127.0.0.1:9090
 cargo run --release -p bench
 ```
 
@@ -32,6 +33,7 @@ cargo run --release -p bench
 - `cargo test --workspace --all-targets` runs unit tests across all member crates.
 - `cargo run -p cli` exercises the CLI entry point and the usage path.
 - `cargo run -p cli -- --demo` runs the in-process forwarding demo.
+- `cargo run --release -p cli -- --metrics-http 127.0.0.1:9090` starts the JSON metrics endpoint used by the stress harness.
 - `cargo run --release -p bench` runs the synthetic allocation benchmark in `bench/src/lib.rs` and prints throughput-style numbers.
 
 ## Current Repository Notes
@@ -39,6 +41,7 @@ cargo run --release -p bench
 - The workspace CI currently checks `cargo build --release`.
 - The repo has passing tests across `wire`, `crypto`, `routing`, `datapath`, `afxdp`, `cli`, and `bench`.
 - The benchmark output currently reflects synthetic allocation/fill performance, not real AF_XDP packet latency or NIC throughput.
+- The latest perf artifacts also include routing miss sweep CSV/SVG outputs under `docs/perf/`.
 - `cargo` warnings about the workspace resolver are avoided by using `resolver = "2"` at the workspace root.
 
 ## AF_XDP / Hardware Validation Plan
@@ -80,6 +83,7 @@ For the current scaffold, a healthy local run should look like this:
 cargo build --release
 cargo test --workspace --all-targets
 cargo run -p cli -- --demo
+cargo run -p cli -- --metrics
 cargo run --release -p bench
 ```
 
