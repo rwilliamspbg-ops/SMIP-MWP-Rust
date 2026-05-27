@@ -9,6 +9,9 @@ build:
 stress-test:
 	@echo "Run: ./tools/stress/run_stress.sh --dut $$DUT_BIN --gen '$$GEN_CMD' --iface $$IFACE --rate $$RATE --duration $$DURATION --out $$OUT"
 
+	@echo "Example with metrics socket:"
+	@echo "  METRICS_SOCKET=/tmp/mohawk.metrics.sock DUT_BIN=./target/release/mohawk-node GEN_CMD=\"trex...\" IFACE=ens1f0 ./tools/stress/run_stress.sh --dut \"$$DUT_BIN\" --gen \"$$GEN_CMD\" --iface $$IFACE --duration $$DURATION --out $$OUT"
+
 profile: build
 	@echo "Run: sudo ./tools/stress/profile_stress.sh --dut $$DUT_BIN --gen '$$GEN_CMD' --iface $$IFACE --rate $$RATE --duration $$DURATION --out $$OUT"
 
