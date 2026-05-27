@@ -71,10 +71,31 @@ GEN_PID=$!
 END=$(( $(date +%s) + DURATION ))
 while [ $(date +%s) -lt $END ]; do
   now=$(date --iso-8601=seconds)
-  rx_pkts=$(cat /sys/class/net/${IFACE}/statistics/rx_packets 2>/dev/null || echo 0)
-  tx_pkts=$(cat /sys/class/net/${IFACE}/statistics/tx_packets 2>/dev/null || echo 0)
-  rx_bytes=$(cat /sys/class/net/${IFACE}/statistics/rx_bytes 2>/dev/null || echo 0)
-  tx_bytes=$(cat /sys/class/net/${IFACE}/statistics/tx_bytes 2>/dev/null || echo 0)
+  if [ -n "${METRICS_SOCKET:-}" ]; then
+    # Query the DUT metrics unix socket for JSON: {"timestamp":..,"packets_processed": N}
+    pkt_count=$(python3 - <<PY ${METRICS_SOCKET}
+import socket,sys,json
+sock=sys.argv[1]
+try:
+ s=socket.socket(socket.AF_UNIX)
+ s.connect(sock)
+ data=s.recv(4096).decode()
+ j=json.loads(data)
+ print(j.get('packets_processed',0))
+except Exception as e:
+ print(0)
+PY
+)
+    rx_pkts=${pkt_count}
+    tx_pkts=0
+    rx_bytes=0
+    tx_bytes=0
+  else
+    rx_pkts=$(cat /sys/class/net/${IFACE}/statistics/rx_packets 2>/dev/null || echo 0)
+    tx_pkts=$(cat /sys/class/net/${IFACE}/statistics/tx_packets 2>/dev/null || echo 0)
+    rx_bytes=$(cat /sys/class/net/${IFACE}/statistics/rx_bytes 2>/dev/null || echo 0)
+    tx_bytes=$(cat /sys/class/net/${IFACE}/statistics/tx_bytes 2>/dev/null || echo 0)
+  fi
 
   # gather per-process CPU times if available
   if [ -d "/proc/${DUT_PID}" ]; then

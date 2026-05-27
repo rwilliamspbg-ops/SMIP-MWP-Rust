@@ -10,6 +10,7 @@ use wire::{Header, HEADER_SIZE};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+use std::io::Write;
 
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
@@ -114,6 +115,7 @@ fn render_telemetry(stats: datapath::ForwarderStats, request: Option<&ControlReq
 fn main() {
     let args: Vec<String> = env::args().collect();
     let want_metrics = parse_flag(&args, "--metrics");
+    let metrics_socket = args.iter().position(|a| a == "--metrics-socket").and_then(|i| args.get(i+1)).map(|s| s.clone());
     if parse_flag(&args, "--help") || parse_flag(&args, "-h") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
@@ -156,6 +158,32 @@ fn main() {
                 println!("{},{}", secs, count);
                 std::io::Write::flush(&mut std::io::stdout()).ok();
                 thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
+
+    if let Some(sock) = metrics_socket {
+        // Spawn a unix-domain socket listener that returns current cumulative counter
+        let sock_path = sock.clone();
+        thread::spawn(move || {
+            use std::os::unix::net::UnixListener;
+            if std::path::Path::new(&sock_path).exists() {
+                let _ = std::fs::remove_file(&sock_path);
+            }
+            let listener = match UnixListener::bind(&sock_path) {
+                Ok(l) => l,
+                Err(e) => { eprintln!("metrics socket bind: {}", e); return; }
+            };
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut s) => {
+                        let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                        let msg = format!("{{\"timestamp\":{},\"packets_processed\":{}}}\n", now, count);
+                        let _ = s.write_all(msg.as_bytes());
+                    }
+                    Err(e) => { eprintln!("metrics socket accept: {}", e); }
+                }
             }
         });
     }
