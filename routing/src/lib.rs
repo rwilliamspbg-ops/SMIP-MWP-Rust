@@ -21,6 +21,7 @@ pub struct Table {
 struct TableInner {
     // BTreeMap keeps keys sorted automatically — no manual re-sort needed
     entries: BTreeMap<[u8;32], RouteEntry>,
+    predictive_entries: Vec<RouteEntry>,
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
@@ -36,7 +37,11 @@ fn fast_flow_hash(src_id: &[u8;32], dst_id: &[u8;32], flow_label: u32) -> u64 {
 
 impl Table {
     pub fn new() -> Self {
-        Self { inner: RwLock::new(TableInner { entries: BTreeMap::new() }) }
+        Self { inner: RwLock::new(TableInner { entries: BTreeMap::new(), predictive_entries: Vec::new() }) }
+    }
+
+    fn rebuild_predictive_entries(inner: &mut TableInner) {
+        inner.predictive_entries = inner.entries.values().cloned().collect();
     }
 
     pub fn update_route(&self, e: RouteEntry) {
@@ -45,11 +50,13 @@ impl Table {
         e.last_seen = SystemTime::now();
         // BTreeMap insert is O(log n) and keeps order; no sort needed
         inner.entries.insert(e.dest_id, e);
+        Self::rebuild_predictive_entries(&mut inner);
     }
 
     pub fn remove_route(&self, dest: [u8;32]) {
         let mut inner = self.inner.write();
         inner.entries.remove(&dest);
+        Self::rebuild_predictive_entries(&mut inner);
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8;32], _flow_label: u32) -> Option<[u8;32]> {
@@ -65,19 +72,26 @@ impl Table {
         if let Some(e) = inner.entries.get(&dst_id) {
             return Some(e.next_hop_id);
         }
-        let n = inner.entries.len();
+        let n = inner.predictive_entries.len();
         // Fast hash instead of SHA-256 — O(1), ~10 ns vs ~500 ns
         let idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
-        // BTreeMap iteration is ordered and stable
-        let chosen = inner.entries.values().nth(idx).unwrap();
+        let chosen = inner.predictive_entries.get(idx).unwrap();
         Some(chosen.next_hop_id)
     }
 
     pub fn lookup_or_predict(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        if let Some(nh) = self.lookup_next_hop(dst_id, flow_label) {
-            return Some(nh);
+        let inner = self.inner.read();
+        if let Some(e) = inner.entries.get(&dst_id) {
+            return Some(e.next_hop_id);
         }
-        self.predictive_next_hop(src_id, dst_id, flow_label)
+        if inner.entries.is_empty() {
+            return None;
+        }
+
+        let n = inner.predictive_entries.len();
+        let idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
+        let chosen = inner.predictive_entries.get(idx).unwrap();
+        Some(chosen.next_hop_id)
     }
 }
 

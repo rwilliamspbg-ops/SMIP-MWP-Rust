@@ -112,6 +112,31 @@ cargo build -p bench --release
 ./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv
 ```
 
+**Routing miss sweep:**
+
+```sh
+chmod +x tools/bench_harness/run_routing_miss_sweep.sh tools/bench_harness/parse_routing_miss_criterion.py
+./tools/bench_harness/run_routing_miss_sweep.sh routing_miss_sweep.csv 10
+python3 tools/bench_harness/plot_routing_miss_sweep.py routing_miss_sweep.csv routing_miss_sweep.svg
+```
+
+This writes one CSV row per route-table size and generates a quick SVG curve so you can spot the minimum fast.
+Criterion requires a sample size of at least `10`.
+
+**Broad vs fine sweep:**
+
+| route_count | broad mean_time_ns | fine mean_time_ns |
+|---|---:|---:|
+| 1 | 24.203 | 24.442 |
+| 2 | 24.926 | 26.014 |
+| 4 | 25.332 | 25.496 |
+| 8 | 27.956 | 27.650 |
+| 16 | 29.898 | 29.661 |
+
+The minimum stayed at `route_count=1` in both sweeps.
+
+Saved artifacts live in [docs/perf](docs/perf) for quick sharing and review.
+
 **Per-strategy profiling with `perf`:**
 
 ```sh

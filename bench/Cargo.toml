@@ -19,3 +19,15 @@ harness = false
 [[bench]]
 name = "datapath_bench"
 harness = false
+
+[[bench]]
+name = "packet_copy_bench"
+harness = false
+
+[[bench]]
+name = "poll_slices_bench"
+harness = false
+
+[[bench]]
+name = "routing_miss_bench"
+harness = false

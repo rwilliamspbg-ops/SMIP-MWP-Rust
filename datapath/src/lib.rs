@@ -13,6 +13,7 @@ pub struct Forwarder {
     pub routes: Table,
     session: Option<HybridSession>,
     arena: Vec<u8>,
+    ciphertext: Vec<u8>,
     offsets: Vec<(usize, usize)>,
 }
 
@@ -31,7 +32,82 @@ impl Forwarder {
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
         let session = HybridSession::new(&session_secret, &session_info).ok();
-        Self { routes, session, arena: Vec::new(), offsets: Vec::new() }
+        Self { routes, session, arena: Vec::new(), ciphertext: Vec::new(), offsets: Vec::new() }
+    }
+
+    fn handle_packet(&mut self, pkt: &[u8], use_avx2: bool, stats: &mut ForwarderStats) -> bool {
+        let mut forwarded = false;
+
+        if let Ok(h) = HeaderViewRef::new(pkt) {
+            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
+            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let flow_label = h.flow_label();
+            let seq_num = h.seq_num();
+            let payload_len = h.length() as usize;
+
+            if self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
+                if let Some(session) = self.session.as_ref() {
+                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                        let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
+
+                        let needed = payload_len + TAG_SIZE;
+                        if self.ciphertext.capacity() < needed {
+                            self.ciphertext.reserve(needed - self.ciphertext.capacity());
+                        }
+
+                        match session.encrypt_to(&mut self.ciphertext, payload, seq_num) {
+                            Ok(()) => {
+                                let start = self.arena.len();
+                                self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+
+                                let ct_len = self.ciphertext.len();
+                                if ct_len >= 4096 {
+                                    #[cfg(target_arch = "x86_64")]
+                                    {
+                                        if use_avx2 {
+                                            let start_index = self.arena.len();
+                                            self.arena.resize(start_index + ct_len, 0);
+                                            unsafe {
+                                                let dst_ptr = self.arena[start_index..].as_mut_ptr();
+                                                let src_ptr = self.ciphertext.as_ptr();
+                                                copy_avx2(dst_ptr, src_ptr, ct_len);
+                                            }
+                                        } else {
+                                            self.arena.extend_from_slice(&self.ciphertext);
+                                        }
+                                    }
+                                    #[cfg(not(target_arch = "x86_64"))]
+                                    {
+                                        self.arena.extend_from_slice(&self.ciphertext);
+                                    }
+                                } else {
+                                    self.arena.extend_from_slice(&self.ciphertext);
+                                }
+
+                                let len = self.arena.len() - start;
+                                self.offsets.push((start, len));
+                                stats.encrypted += 1;
+                                forwarded = true;
+                            }
+                            Err(SessionError::AuthenticationFailed)
+                            | Err(SessionError::PayloadTooLarge)
+                            | Err(SessionError::CiphertextTooShort)
+                            | Err(SessionError::AeadError)
+                            | Err(SessionError::BufferTooSmall)
+                            | Err(SessionError::InsufficientCapacity) => {
+                                stats.route_misses += 1;
+                            }
+                        }
+                    } else if payload_len > 0 {
+                        stats.route_misses += 1;
+                    }
+                }
+            } else {
+                stats.route_misses += 1;
+            }
+        }
+
+        forwarded
     }
 
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
@@ -49,9 +125,9 @@ impl Forwarder {
             return stats;
         }
 
-        // Single reusable ciphertext buffer — avoids one heap allocation per packet.
-        // Sized to the largest expected payload + AEAD tag.
-        let mut ct_buf: Vec<u8> = Vec::with_capacity(65536 + TAG_SIZE);
+        // Reuse a persistent ciphertext buffer across batches to avoid repeated
+        // heap growth and allocator churn on the hot path.
+        self.ciphertext.clear();
 
         // Hoist feature detection out of the hot loop.
         #[cfg(target_arch = "x86_64")]
@@ -59,88 +135,8 @@ impl Forwarder {
         #[cfg(not(target_arch = "x86_64"))]
         let use_avx2 = false;
 
-        // Borrow session once to avoid repeated borrow resolution in the loop.
-        let session_opt = self.session.as_ref();
-
         for pkt in frames {
-            let mut forwarded = false;
-
-            if let Ok(h) = HeaderViewRef::new(&pkt) {
-                let src_id: [u8; 32] = h.src_id().try_into().unwrap();
-                let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
-                let flow_label = h.flow_label();
-                let seq_num    = h.seq_num();
-                let payload_len = h.length() as usize;
-
-                if self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
-                    if let Some(session) = session_opt {
-                        if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                            let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-
-                            let needed = payload_len + TAG_SIZE;
-                            if ct_buf.capacity() < needed {
-                                ct_buf.reserve(needed - ct_buf.capacity());
-                            }
-
-                            // encrypt_to: copies plaintext into ct_buf, encrypts
-                            // in-place via aead::encrypt_in_place, appends tag.
-                            // Zero extra Vec allocations.
-                            match session.encrypt_to(&mut ct_buf, payload, seq_num) {
-                                Ok(()) => {
-                                    // Assemble output packet: append header
-                                    // and ciphertext into the persistent arena.
-                                    let start = self.arena.len();
-                                    // append header
-                                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-
-                                    // append ciphertext, using AVX2 optimized copy into
-                                    // the arena when available.
-                                    let ct_len = ct_buf.len();
-                                    if ct_len >= 4096 {
-                                        #[cfg(target_arch = "x86_64")]
-                                        {
-                                            if use_avx2 {
-                                                let start_index = self.arena.len();
-                                                self.arena.resize(start_index + ct_len, 0);
-                                                unsafe {
-                                                    let dst_ptr = self.arena[start_index..].as_mut_ptr();
-                                                    let src_ptr = ct_buf.as_ptr();
-                                                    copy_avx2(dst_ptr, src_ptr, ct_len);
-                                                }
-                                            } else {
-                                                self.arena.extend_from_slice(&ct_buf);
-                                            }
-                                        }
-                                        #[cfg(not(target_arch = "x86_64"))]
-                                        {
-                                            self.arena.extend_from_slice(&ct_buf);
-                                        }
-                                    } else {
-                                        self.arena.extend_from_slice(&ct_buf);
-                                    }
-
-                                    let len = self.arena.len() - start;
-                                    self.offsets.push((start, len));
-                                    stats.encrypted += 1;
-                                    forwarded = true;
-                                }
-                                Err(SessionError::AuthenticationFailed)
-                                | Err(SessionError::PayloadTooLarge)
-                                | Err(SessionError::CiphertextTooShort)
-                                | Err(SessionError::AeadError)
-                                | Err(SessionError::BufferTooSmall)
-                                | Err(SessionError::InsufficientCapacity) => {
-                                    stats.route_misses += 1;
-                                }
-                            }
-                        } else if payload_len > 0 {
-                            stats.route_misses += 1;
-                        }
-                    }
-                } else {
-                    stats.route_misses += 1;
-                }
-            }
+            let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats);
 
 
             if !forwarded {
@@ -151,6 +147,47 @@ impl Forwarder {
                 stats.forwarded += 1;
             }
         }
+        let _ = sock.send(&mut self.arena, &self.offsets);
+        stats
+    }
+
+    pub fn process_batch_slices(&mut self, sock: &mut dyn XdpSocket, ring: &mut socket::SliceRing) -> ForwarderStats {
+        let received = sock.poll_slices(64, ring);
+        self.arena.clear();
+        self.offsets.clear();
+        self.ciphertext.clear();
+
+        let mut stats = ForwarderStats {
+            received,
+            ..ForwarderStats::default()
+        };
+
+        if received == 0 {
+            return stats;
+        }
+
+        self.arena.reserve(
+            ring.active.iter().take(received).map(|&idx| ring.slot(idx).len()).sum::<usize>() + received * TAG_SIZE,
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let use_avx2 = false;
+
+        for &idx in ring.active.iter().take(received) {
+            let pkt = ring.slot(idx);
+            let forwarded = self.handle_packet(pkt, use_avx2, &mut stats);
+
+            if !forwarded {
+                let start = self.arena.len();
+                self.arena.extend_from_slice(pkt);
+                let len = self.arena.len() - start;
+                self.offsets.push((start, len));
+                stats.forwarded += 1;
+            }
+        }
+
         let _ = sock.send(&mut self.arena, &self.offsets);
         stats
     }
@@ -218,8 +255,63 @@ unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
 }
 
 pub mod socket {
+    pub struct SliceRing {
+        slots: Vec<Vec<u8>>,
+        lens: Vec<usize>,
+        pub active: Vec<usize>,
+    }
+
+    impl SliceRing {
+        pub fn new(slot_count: usize, slot_size: usize) -> Self {
+            let mut slots = Vec::with_capacity(slot_count);
+            for _ in 0..slot_count {
+                slots.push(vec![0u8; slot_size]);
+            }
+            Self {
+                slots,
+                lens: vec![0; slot_count],
+                active: Vec::with_capacity(slot_count),
+            }
+        }
+
+        pub fn clear(&mut self) {
+            self.active.clear();
+        }
+
+        pub fn claim(&self) -> usize {
+            let idx = self.active.len();
+            assert!(idx < self.slots.len(), "SliceRing exhausted");
+            idx
+        }
+
+        pub fn slot_mut(&mut self, idx: usize) -> &mut [u8] {
+            self.slots[idx].as_mut_slice()
+        }
+
+        pub fn set_len(&mut self, idx: usize, len: usize) {
+            self.lens[idx] = len.min(self.slots[idx].len());
+        }
+
+        pub fn slot(&self, idx: usize) -> &[u8] {
+            &self.slots[idx][..self.lens[idx]]
+        }
+    }
+
     pub trait XdpSocket {
         fn poll(&mut self, max: usize) -> Vec<Vec<u8>>;
+        fn poll_slices(&mut self, max: usize, ring: &mut SliceRing) -> usize {
+            let frames = self.poll(max);
+            ring.clear();
+            for frame in frames {
+                let idx = ring.claim();
+                let slot = ring.slot_mut(idx);
+                let len = frame.len().min(slot.len());
+                slot[..len].copy_from_slice(&frame[..len]);
+                ring.set_len(idx, len);
+                ring.active.push(idx);
+            }
+            ring.active.len()
+        }
         // Send a single arena buffer with offsets describing individual packets.
         // The socket borrows the arena so the caller retains ownership and can
         // reuse it across batches.
