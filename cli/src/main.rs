@@ -7,6 +7,9 @@ use std::env;
 use std::fs;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::time::Duration;
 
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
@@ -110,6 +113,7 @@ fn render_telemetry(stats: datapath::ForwarderStats, request: Option<&ControlReq
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let want_metrics = parse_flag(&args, "--metrics");
     if parse_flag(&args, "--help") || parse_flag(&args, "-h") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
@@ -139,6 +143,21 @@ fn main() {
         println!("bridge datapath initialized with {} route updates", request.route_updates.len());
         println!("{}", serde_json::to_string_pretty(&telemetry).expect("telemetry json"));
         return;
+    }
+
+    // metrics reporter: prints per-second pconf when requested. It reads and
+    // resets the `datapath::PACKETS_PROCESSED` counter each second.
+    if want_metrics {
+        thread::spawn(|| {
+            loop {
+                let now = std::time::SystemTime::now();
+                let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let count = datapath::PACKETS_PROCESSED.swap(0, Ordering::Relaxed);
+                println!("{},{}", secs, count);
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
     }
 
     if !parse_flag(&args, "--demo") {

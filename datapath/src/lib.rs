@@ -3,6 +3,10 @@ use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 use std::is_x86_feature_detected;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Application-level processed packet counter (samples per-second externally)
+pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 use routing::Table;
 use wire::{HeaderViewRef, HEADER_SIZE};
 use std::convert::TryInto;
@@ -148,6 +152,8 @@ impl Forwarder {
             }
         }
         let _ = sock.send(&mut self.arena, &self.offsets);
+        // update global application pconf counter
+        PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
     }
 
@@ -189,6 +195,8 @@ impl Forwarder {
         }
 
         let _ = sock.send(&mut self.arena, &self.offsets);
+        // update global application pconf counter
+        PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
     }
 }
