@@ -30,8 +30,8 @@ sudo ./tools/stress/profile_stress.sh --dut ./target/release/mohawk-node --gen "
 ```
 
 Notes & limitations
-- These scripts sample NIC counters not internal application `pconf`. For accurate
-  pconf you should expose an application metric endpoint or write a small
-  instrumentation hook in the datapath to emit counts to stdout or a socket.
+- These scripts can sample NIC counters and, when `--metrics-http` or
+  `--metrics-socket` is enabled on the DUT, they can also capture the
+  application-level `packets_processed` counter.
 - Use a dedicated test host for high-rate tests; disable C-states and frequency
   scaling and pin IRQs/cores for deterministic results.
