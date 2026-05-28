@@ -12,22 +12,22 @@ Validate safety-invariant resilience under hostile traffic while keeping perform
 ## Input Artifact
 
 - Source CSV: `tools/bench_results/chaos_epyc_profile.csv`
-- Latest sampled row timestamp: `2026-05-28T22:19:24Z`
+- Latest sampled row timestamp: `2026-05-28T22:22:51Z`
 - Core set: `0-1`
 
 ## Latest Chaos Metrics
 
-- throughput_pkt_s: `1205495.68`
-- latency_ns p50: `34655`
-- latency_ns p99: `320850`
-- latency_ns p99_9: `331209`
+- throughput_pkt_s: `1338660.33`
+- latency_ns p50: `34063`
+- latency_ns p99: `122338`
+- latency_ns p99_9: `184164`
 
 ## Baseline Comparison
 
-- Baseline throughput_pkt_s: `1494126.89`
-- Baseline p99_ns: `57157.0`
-- Throughput degradation: `19.32% (goal < 5.00%)`
-- p99 increase: `263693.00 ns (goal < 1000.00 ns)`
+- Baseline throughput_pkt_s: `1378064.38`
+- Baseline p99_ns: `77214.0`
+- Throughput degradation: `2.86% (goal < 5.00%)`
+- p99 increase: `45124.00 ns (goal < 1000.00 ns)`
 
 ## Invariant Notes
 

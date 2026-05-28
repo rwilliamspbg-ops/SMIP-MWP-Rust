@@ -1,4 +1,4 @@
-use aes_gcm::aead::generic_array::typenum::U12;
+use aes_gcm::aead::generic_array::typenum::{U12, U16};
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::{
     aead::{Aead, AeadInPlace, KeyInit},
@@ -126,6 +126,22 @@ impl SessionAead {
         .map_err(|_| SessionError::AuthenticationFailed)
     }
 
+    fn encrypt_in_place_detached(
+        &self,
+        nonce: &[u8; NONCE_SIZE],
+        buf: &mut [u8],
+    ) -> Result<GenericArray<u8, U16>, SessionError> {
+        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
+        match self {
+            SessionAead::Aes(aead) => aead
+                .encrypt_in_place_detached(nonce_ref, b"", buf)
+                .map_err(|_| SessionError::AuthenticationFailed),
+            SessionAead::ChaCha(aead) => aead
+                .encrypt_in_place_detached(nonce_ref, b"", buf)
+                .map_err(|_| SessionError::AuthenticationFailed),
+        }
+    }
+
     fn decrypt(
         &self,
         nonce: &[u8; NONCE_SIZE],
@@ -194,6 +210,18 @@ impl HybridSession {
         let ct = self.encrypt(payload, seq)?;
         *payload = ct;
         Ok(())
+    }
+
+    pub fn encrypt_into_slice(
+        &self,
+        payload: &mut [u8],
+        seq: u64,
+    ) -> Result<GenericArray<u8, U16>, SessionError> {
+        if payload.len() > (1 << 24) {
+            return Err(SessionError::PayloadTooLarge);
+        }
+        let nonce = self.build_nonce(seq);
+        self.aead.encrypt_in_place_detached(&nonce, payload)
     }
 
     /// Zero-allocation encrypt: caller fills `dst` with the plaintext, then

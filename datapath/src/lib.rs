@@ -59,7 +59,7 @@ impl Forwarder {
         }
     }
 
-    fn handle_packet(&mut self, pkt: &[u8], use_avx2: bool, stats: &mut ForwarderStats) -> bool {
+    fn handle_packet(&mut self, pkt: &[u8], _use_avx2: bool, stats: &mut ForwarderStats) -> bool {
         let mut forwarded = false;
 
         if let Ok(h) = HeaderViewRef::new(pkt) {
@@ -78,41 +78,23 @@ impl Forwarder {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
 
-                        let needed = payload_len + TAG_SIZE;
-                        if self.ciphertext.capacity() < needed {
-                            self.ciphertext.reserve(needed - self.ciphertext.capacity());
+                        let start = self.arena.len();
+                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
+                        if remaining < needed {
+                            self.arena.reserve(needed - remaining);
                         }
 
-                        match session.encrypt_to(&mut self.ciphertext, payload, seq_num) {
-                            Ok(()) => {
-                                let start = self.arena.len();
-                                self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                        let payload_start = self.arena.len();
+                        self.arena.extend_from_slice(payload);
 
-                                let ct_len = self.ciphertext.len();
-                                if ct_len >= 16384 {
-                                    #[cfg(target_arch = "x86_64")]
-                                    {
-                                        if use_avx2 {
-                                            let start_index = self.arena.len();
-                                            self.arena.resize(start_index + ct_len, 0);
-                                            unsafe {
-                                                let dst_ptr =
-                                                    self.arena[start_index..].as_mut_ptr();
-                                                let src_ptr = self.ciphertext.as_ptr();
-                                                copy_avx2(dst_ptr, src_ptr, ct_len);
-                                            }
-                                        } else {
-                                            self.arena.extend_from_slice(&self.ciphertext);
-                                        }
-                                    }
-                                    #[cfg(not(target_arch = "x86_64"))]
-                                    {
-                                        self.arena.extend_from_slice(&self.ciphertext);
-                                    }
-                                } else {
-                                    self.arena.extend_from_slice(&self.ciphertext);
-                                }
-
+                        match session.encrypt_into_slice(
+                            &mut self.arena[payload_start..payload_start + payload_len],
+                            seq_num,
+                        ) {
+                            Ok(tag) => {
+                                self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
                                 stats.encrypted += 1;
@@ -124,6 +106,7 @@ impl Forwarder {
                             | Err(SessionError::AeadError)
                             | Err(SessionError::BufferTooSmall)
                             | Err(SessionError::InsufficientCapacity) => {
+                                self.arena.truncate(start);
                                 stats.route_misses += 1;
                             }
                         }
