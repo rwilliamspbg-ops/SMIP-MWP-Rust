@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -6,6 +5,8 @@ use ahash::{AHashMap, AHasher};
 use std::time::SystemTime;
 use crossbeam_epoch::{self as epoch, Atomic, Owned};
 use std::sync::atomic::Ordering;
+use std::sync::atomic::AtomicU64;
+use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
 pub struct RouteEntry {
@@ -25,6 +26,31 @@ struct TableInner {
     // BTreeMap keeps keys sorted automatically — no manual re-sort needed
     entries: BTreeMap<[u8;32], RouteEntry>,
     predictive_entries: Vec<RouteEntry>,
+}
+
+const HOT_CACHE_SIZE: usize = 8;
+
+static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Copy, Clone)]
+struct CacheEntry {
+    epoch: u64,
+    dest_id: [u8;32],
+    next_hop: [u8;32],
+}
+
+thread_local! {
+    static HOT_CACHE: RefCell<[Option<CacheEntry>; HOT_CACHE_SIZE]> = RefCell::new([None; HOT_CACHE_SIZE]);
+    static HOT_CACHE_NEXT: RefCell<usize> = RefCell::new(0);
+}
+
+fn cache_next_idx() -> usize {
+    HOT_CACHE_NEXT.with(|n| {
+        let mut v = n.borrow_mut();
+        let idx = *v;
+        *v = (*v + 1) % HOT_CACHE_SIZE;
+        idx
+    })
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
@@ -62,9 +88,11 @@ impl Table {
             Self::rebuild_predictive_entries(&mut next);
 
             let new_owned = Owned::new(next);
-            match self.inner.compare_and_set(curr, new_owned, Ordering::AcqRel, &guard) {
+            match self.inner.compare_exchange(curr, new_owned, Ordering::AcqRel, Ordering::Acquire, &guard) {
                 Ok(_shared) => {
                     unsafe { guard.defer_destroy(curr); }
+                    // Advance global epoch so per-thread caches are invalidated
+                    GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
                     break;
                 }
                 Err(_) => continue,
@@ -82,9 +110,11 @@ impl Table {
             Self::rebuild_predictive_entries(&mut next);
 
             let new_owned = Owned::new(next);
-            match self.inner.compare_and_set(curr, new_owned, Ordering::AcqRel, &guard) {
+            match self.inner.compare_exchange(curr, new_owned, Ordering::AcqRel, Ordering::Acquire, &guard) {
                 Ok(_shared) => {
                     unsafe { guard.defer_destroy(curr); }
+                    // Advance global epoch so caches see the removal
+                    GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
                     break;
                 }
                 Err(_) => continue,
@@ -93,10 +123,35 @@ impl Table {
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8;32], _flow_label: u32) -> Option<[u8;32]> {
+        // Fast per-thread hot-key cache check
+        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
+        if let Some(v) = HOT_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            for slot in cache.iter() {
+                if let Some(ent) = slot {
+                    if ent.epoch == cur_epoch && ent.dest_id == dst_id {
+                        return Some(ent.next_hop);
+                    }
+                }
+            }
+            None
+        }) {
+            return Some(v);
+        }
+
+        // Miss -> do normal epoch-protected lookup and populate cache
         let guard = epoch::pin();
         let curr = self.inner.load(Ordering::Acquire, &guard);
         let inner = unsafe { curr.deref() };
-        inner.entries.get(&dst_id).map(|e| e.next_hop_id)
+        let res = inner.entries.get(&dst_id).map(|e| e.next_hop_id);
+        if let Some(nh) = res {
+            HOT_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                let idx = cache_next_idx();
+                cache[idx] = Some(CacheEntry { epoch: cur_epoch, dest_id: dst_id, next_hop: nh });
+            });
+        }
+        res
     }
 
     pub fn predictive_next_hop(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
