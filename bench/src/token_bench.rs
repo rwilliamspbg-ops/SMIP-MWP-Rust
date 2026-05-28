@@ -17,7 +17,7 @@ impl TokenBenchResult {
         } else {
             0.0
         };
-        
+
         Self {
             tokens_generated: tokens,
             elapsed_ms: elapsed,
@@ -27,7 +27,10 @@ impl TokenBenchResult {
 
     pub fn print(&self) {
         println!("Tokens Generated: {}", self.tokens_generated);
-        println!("Elapsed Time: {:.3} us", self.elapsed_ms.as_secs_f64() * 1_000_000.0);
+        println!(
+            "Elapsed Time: {:.3} us",
+            self.elapsed_ms.as_secs_f64() * 1_000_000.0
+        );
         println!("Tokens Per Second: {:.2}", self.tokens_per_second);
     }
 }
@@ -60,12 +63,12 @@ pub fn run_token_bench_multi(
     iterations: usize,
 ) -> Vec<TokenBenchResult> {
     let mut results = Vec::with_capacity(configs.len());
-    
+
     for &(prompt_tokens, completion_tokens) in configs {
         let result = run_token_bench(prompt_tokens, completion_tokens, iterations);
         results.push(result);
     }
-    
+
     results
 }
 

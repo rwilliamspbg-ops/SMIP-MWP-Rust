@@ -28,9 +28,9 @@
 //! ```
 
 use hkdf::Hkdf;
-use ml_kem::{KemCore, MlKem768, MlKem768Params, EncodedSizeUser};
-use ml_kem::kem::{EncapsulationKey, DecapsulationKey};
-use kem::{Encapsulate, Decapsulate};
+use kem::{Decapsulate, Encapsulate};
+use ml_kem::kem::{DecapsulationKey, EncapsulationKey};
+use ml_kem::{EncodedSizeUser, KemCore, MlKem768, MlKem768Params};
 use rand_core::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
@@ -62,13 +62,13 @@ pub enum KexError {
 impl std::fmt::Display for KexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            KexError::KeyGenFailed     => write!(f, "kex: key generation failed"),
-            KexError::BadInitiatorPub  => write!(f, "kex: initiator public key invalid"),
-            KexError::BadResponderMsg  => write!(f, "kex: responder message invalid"),
+            KexError::KeyGenFailed => write!(f, "kex: key generation failed"),
+            KexError::BadInitiatorPub => write!(f, "kex: initiator public key invalid"),
+            KexError::BadResponderMsg => write!(f, "kex: responder message invalid"),
             KexError::EncapsulateFailed => write!(f, "kex: ml-kem encapsulation failed"),
             KexError::DecapsulateFailed => write!(f, "kex: ml-kem decapsulation failed"),
             KexError::HkdfExpandFailed => write!(f, "kex: hkdf expand failed"),
-            KexError::BadPublicKey(s)  => write!(f, "kex: bad public key: {s}"),
+            KexError::BadPublicKey(s) => write!(f, "kex: bad public key: {s}"),
         }
     }
 }
@@ -82,7 +82,7 @@ impl std::error::Error for KexError {}
 pub struct HybridKEX {
     /// Ephemeral x25519 private key — consumed during DH.
     x25519_priv: Option<EphemeralSecret>,
-    x25519_pub:  X25519PublicKey,
+    x25519_pub: X25519PublicKey,
 
     /// ML-KEM-768 decapsulation key (initiator side).
     mlkem_dk: DecapsulationKey<MlKem768Params>,
@@ -94,7 +94,7 @@ impl HybridKEX {
     /// Generate a fresh ephemeral keypair.
     pub fn new() -> Result<Self, KexError> {
         let x25519_priv = EphemeralSecret::random_from_rng(OsRng);
-        let x25519_pub  = X25519PublicKey::from(&x25519_priv);
+        let x25519_pub = X25519PublicKey::from(&x25519_priv);
 
         let (mlkem_dk, mlkem_ek) = MlKem768::generate(&mut OsRng);
 
@@ -124,7 +124,8 @@ impl HybridKEX {
         }
 
         // --- Classical: X25519 DH ---
-        let peer_x25519_bytes: [u8; 32] = initiator_pub[..32].try_into()
+        let peer_x25519_bytes: [u8; 32] = initiator_pub[..32]
+            .try_into()
             .map_err(|_| KexError::BadInitiatorPub)?;
         let peer_x25519_pub = X25519PublicKey::from(peer_x25519_bytes);
 
@@ -137,7 +138,8 @@ impl HybridKEX {
             hybrid_array::Array::try_from(init_mlkem_pub_bytes)
                 .map_err(|_| KexError::BadInitiatorPub)?;
         let init_ek = EncapsulationKey::<MlKem768Params>::from_bytes(&init_ek_arr);
-        let (ct, mlkem_ss) = init_ek.encapsulate(&mut OsRng)
+        let (ct, mlkem_ss) = init_ek
+            .encapsulate(&mut OsRng)
             .map_err(|_| KexError::EncapsulateFailed)?;
         let ct_bytes: Vec<u8> = ct.as_slice().to_vec();
 
@@ -169,7 +171,8 @@ impl HybridKEX {
         }
 
         // --- Classical: X25519 DH ---
-        let resp_x25519_bytes: [u8; 32] = responder_msg[..32].try_into()
+        let resp_x25519_bytes: [u8; 32] = responder_msg[..32]
+            .try_into()
             .map_err(|_| KexError::BadResponderMsg)?;
         let resp_x25519_pub = X25519PublicKey::from(resp_x25519_bytes);
 
@@ -178,9 +181,11 @@ impl HybridKEX {
 
         // --- PQC: ML-KEM-768 decapsulation ---
         let ct_bytes = &responder_msg[32..32 + MLKEM768_CT_LEN];
-        let ct_arr: hybrid_array::Array<u8, _> = hybrid_array::Array::try_from(ct_bytes)
-            .map_err(|_| KexError::BadResponderMsg)?;
-        let mlkem_ss = self.mlkem_dk.decapsulate(&ct_arr)
+        let ct_arr: hybrid_array::Array<u8, _> =
+            hybrid_array::Array::try_from(ct_bytes).map_err(|_| KexError::BadResponderMsg)?;
+        let mlkem_ss = self
+            .mlkem_dk
+            .decapsulate(&ct_arr)
             .map_err(|_| KexError::DecapsulateFailed)?;
 
         let init_mlkem_pub_bytes = self.mlkem_ek.as_bytes();
@@ -202,8 +207,8 @@ impl HybridKEX {
 fn build_transcript(
     x25519_init_pub: &[u8],
     x25519_resp_pub: &[u8],
-    mlkem_init_pub:  &[u8],
-    mlkem_ct:        &[u8],
+    mlkem_init_pub: &[u8],
+    mlkem_ct: &[u8],
 ) -> [u8; 32] {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
@@ -217,7 +222,7 @@ fn build_transcript(
 /// Two-stage HKDF combiner producing a 64-byte session secret.
 fn derive_session_secret(
     x25519_ss: &[u8],
-    mlkem_ss:  &[u8],
+    mlkem_ss: &[u8],
     transcript: &[u8],
 ) -> Result<Vec<u8>, KexError> {
     // prk_classical = HKDF-Extract(transcript, x25519_ss)
@@ -232,8 +237,7 @@ fn derive_session_secret(
     let (prk_combined, _) = Hkdf::<Sha256>::extract(Some(transcript), &combined);
 
     // session_secret = HKDF-Expand(combined_prk, "smip-mwp-kex-v1", 64)
-    let hkdf = Hkdf::<Sha256>::from_prk(&prk_combined)
-        .map_err(|_| KexError::HkdfExpandFailed)?;
+    let hkdf = Hkdf::<Sha256>::from_prk(&prk_combined).map_err(|_| KexError::HkdfExpandFailed)?;
     let mut session_secret = vec![0u8; SESSION_SECRET_LEN];
     hkdf.expand(b"smip-mwp-kex-v1", &mut session_secret)
         .map_err(|_| KexError::HkdfExpandFailed)?;
@@ -287,19 +291,28 @@ mod tests {
         assert_eq!(ss1, ss1_init);
         assert_eq!(ss2, ss2_init);
         // Two independent sessions must differ (overwhelming probability)
-        assert_ne!(ss1, ss2, "independent sessions must produce distinct secrets");
+        assert_ne!(
+            ss1, ss2,
+            "independent sessions must produce distinct secrets"
+        );
     }
 
     #[test]
     fn bad_inputs_are_rejected() {
         let mut kex = HybridKEX::new().unwrap();
-        assert!(kex.respond(&[0u8; 10]).is_err(), "short initiator pub should fail");
+        assert!(
+            kex.respond(&[0u8; 10]).is_err(),
+            "short initiator pub should fail"
+        );
 
         let mut kex2 = HybridKEX::new().unwrap();
         let mut r = HybridKEX::new().unwrap();
         let pub2 = kex2.public_key();
         let _ = r.respond(&pub2).unwrap();
         // kex2's private key is consumed; finish with bad msg
-        assert!(kex2.finish(&[0u8; 10]).is_err(), "short responder msg should fail");
+        assert!(
+            kex2.finish(&[0u8; 10]).is_err(),
+            "short responder msg should fail"
+        );
     }
 }

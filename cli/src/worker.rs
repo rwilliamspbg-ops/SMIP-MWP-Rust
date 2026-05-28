@@ -11,16 +11,28 @@ pub struct WorkerAssignment {
 pub fn parse_core_list(spec: &str) -> Result<Vec<usize>, String> {
     let mut cores = Vec::new();
 
-    for chunk in spec.split(',').map(str::trim).filter(|chunk| !chunk.is_empty()) {
+    for chunk in spec
+        .split(',')
+        .map(str::trim)
+        .filter(|chunk| !chunk.is_empty())
+    {
         if let Some((start, end)) = chunk.split_once('-') {
-            let start = start.trim().parse::<usize>().map_err(|err| format!("invalid core id '{start}': {err}"))?;
-            let end = end.trim().parse::<usize>().map_err(|err| format!("invalid core id '{end}': {err}"))?;
+            let start = start
+                .trim()
+                .parse::<usize>()
+                .map_err(|err| format!("invalid core id '{start}': {err}"))?;
+            let end = end
+                .trim()
+                .parse::<usize>()
+                .map_err(|err| format!("invalid core id '{end}': {err}"))?;
             if start > end {
                 return Err(format!("invalid core range '{chunk}'"));
             }
             cores.extend(start..=end);
         } else {
-            let core = chunk.parse::<usize>().map_err(|err| format!("invalid core id '{chunk}': {err}"))?;
+            let core = chunk
+                .parse::<usize>()
+                .map_err(|err| format!("invalid core id '{chunk}': {err}"))?;
             cores.push(core);
         }
     }
@@ -51,7 +63,10 @@ pub fn build_worker_plan(worker_count: usize, core_ids: &[usize]) -> Vec<WorkerA
         .collect()
 }
 
-pub fn spawn_pinned_workers<F, T>(assignments: &[WorkerAssignment], worker_fn: F) -> Vec<JoinHandle<T>>
+pub fn spawn_pinned_workers<F, T>(
+    assignments: &[WorkerAssignment],
+    worker_fn: F,
+) -> Vec<JoinHandle<T>>
 where
     F: Fn(WorkerAssignment) -> T + Send + Sync + 'static,
     T: Send + 'static,
@@ -94,6 +109,11 @@ mod tests {
     #[test]
     fn builds_round_robin_worker_plans() {
         let plan = build_worker_plan(5, &[2, 4]);
-        assert_eq!(plan.iter().map(|assignment| assignment.core_id).collect::<Vec<_>>(), vec![2, 4, 2, 4, 2]);
+        assert_eq!(
+            plan.iter()
+                .map(|assignment| assignment.core_id)
+                .collect::<Vec<_>>(),
+            vec![2, 4, 2, 4, 2]
+        );
     }
 }

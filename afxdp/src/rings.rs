@@ -30,19 +30,31 @@ impl RingMmap {
     /// least `map_size` bytes long. The caller must ensure the memory remains
     /// valid for the lifetime of the returned `RingMmap`.
     pub unsafe fn new(map_ptr: *mut libc::c_void, map_size: usize, offs: XskMmapOffsets) -> Self {
-        RingMmap { base: NonNull::new_unchecked(map_ptr as *mut u8), size: map_size, offsets: offs }
+        RingMmap {
+            base: NonNull::new_unchecked(map_ptr as *mut u8),
+            size: map_size,
+            offsets: offs,
+        }
     }
 
     /// Access the raw base pointer
-    pub fn base_ptr(&self) -> *mut u8 { self.base.as_ptr() }
+    pub fn base_ptr(&self) -> *mut u8 {
+        self.base.as_ptr()
+    }
 
     /// Return the size of the mapped ring region.
-    pub fn len(&self) -> usize { self.size }
+    pub fn len(&self) -> usize {
+        self.size
+    }
 
     /// Returns true if the mapped region has zero length.
-    pub fn is_empty(&self) -> bool { self.size == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
     /// Report the mmap offsets
-    pub fn offsets(&self) -> XskMmapOffsets { self.offsets }
+    pub fn offsets(&self) -> XskMmapOffsets {
+        self.offsets
+    }
 
     pub fn rx_available(&self) -> usize {
         unsafe {
@@ -58,7 +70,8 @@ impl RingMmap {
     }
 
     fn tx_capacity(&self) -> usize {
-        let desc_region_bytes = self.offsets.fill_desc.saturating_sub(self.offsets.tx_desc) as usize;
+        let desc_region_bytes =
+            self.offsets.fill_desc.saturating_sub(self.offsets.tx_desc) as usize;
         (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
     }
 
@@ -72,7 +85,9 @@ impl RingMmap {
             let prod = self.read_u32_at(rx_meta_off);
             let cons = self.read_u32_at(rx_meta_off + 4);
             let avail = prod.wrapping_sub(cons) as usize;
-            if avail == 0 { return Vec::new(); }
+            if avail == 0 {
+                return Vec::new();
+            }
 
             let capacity = self.rx_capacity();
             let mask = capacity - 1;
@@ -108,7 +123,9 @@ impl RingMmap {
 
             let used = prod.wrapping_sub(cons) as usize;
             let free = capacity.saturating_sub(used);
-            if free == 0 { return 0; }
+            if free == 0 {
+                return 0;
+            }
 
             let to_push = std::cmp::min(free, addrs.len());
             for (i, &addr) in addrs.iter().enumerate().take(to_push) {
@@ -187,7 +204,16 @@ mod tests {
     fn test_rx_pop_advances_consumer() {
         let mut buf = vec![0u8; 4096].into_boxed_slice();
         let ptr = buf.as_mut_ptr();
-        let offs = XskMmapOffsets { rx: 0, rx_desc: 128, tx: 0, tx_desc: 128 + 64, fill: 0, fill_desc: 128 + 128, comp: 0, comp_desc: 0 };
+        let offs = XskMmapOffsets {
+            rx: 0,
+            rx_desc: 128,
+            tx: 0,
+            tx_desc: 128 + 64,
+            fill: 0,
+            fill_desc: 128 + 128,
+            comp: 0,
+            comp_desc: 0,
+        };
         let ring = unsafe { RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
 
         unsafe {
@@ -214,7 +240,16 @@ mod tests {
     fn test_tx_push_writes_descriptors_and_advances_prod() {
         let mut buf = vec![0u8; 4096].into_boxed_slice();
         let ptr = buf.as_mut_ptr();
-        let offs = XskMmapOffsets { rx: 0, rx_desc: 128, tx: 64, tx_desc: 256, fill: 0, fill_desc: 256 + 8*8, comp: 0, comp_desc: 0 };
+        let offs = XskMmapOffsets {
+            rx: 0,
+            rx_desc: 128,
+            tx: 64,
+            tx_desc: 256,
+            fill: 0,
+            fill_desc: 256 + 8 * 8,
+            comp: 0,
+            comp_desc: 0,
+        };
         let ring = unsafe { RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
 
         unsafe {

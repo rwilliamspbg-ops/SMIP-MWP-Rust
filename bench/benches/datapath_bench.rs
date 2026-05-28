@@ -125,7 +125,8 @@ impl DatapathFixture {
 
     fn run(&mut self) {
         self.socket.reset(&self.templates);
-        self.forwarder.process_batch_slices(&mut self.socket, &mut self.ring);
+        self.forwarder
+            .process_batch_slices(&mut self.socket, &mut self.ring);
     }
 }
 
@@ -136,10 +137,14 @@ fn datapath_forwarder_benchmark(c: &mut Criterion) {
 
     for &packet_count in &packet_counts {
         group.throughput(Throughput::Elements(packet_count as u64));
-        group.bench_with_input(format!("packets_{}", packet_count), &packet_count, |b, &count| {
-            let mut fixture = DatapathFixture::new(count, payload_len, false);
-            b.iter(|| fixture.run());
-        });
+        group.bench_with_input(
+            format!("packets_{}", packet_count),
+            &packet_count,
+            |b, &count| {
+                let mut fixture = DatapathFixture::new(count, payload_len, false);
+                b.iter(|| fixture.run());
+            },
+        );
     }
 
     group.finish();
@@ -152,14 +157,22 @@ fn datapath_forwarder_miss_benchmark(c: &mut Criterion) {
 
     for &packet_count in &packet_counts {
         group.throughput(Throughput::Elements(packet_count as u64));
-        group.bench_with_input(format!("packets_{}", packet_count), &packet_count, |b, &count| {
-            let mut fixture = DatapathFixture::new(count, payload_len, true);
-            b.iter(|| fixture.run());
-        });
+        group.bench_with_input(
+            format!("packets_{}", packet_count),
+            &packet_count,
+            |b, &count| {
+                let mut fixture = DatapathFixture::new(count, payload_len, true);
+                b.iter(|| fixture.run());
+            },
+        );
     }
 
     group.finish();
 }
 
-criterion_group!(benches, datapath_forwarder_benchmark, datapath_forwarder_miss_benchmark);
+criterion_group!(
+    benches,
+    datapath_forwarder_benchmark,
+    datapath_forwarder_miss_benchmark
+);
 criterion_main!(benches);

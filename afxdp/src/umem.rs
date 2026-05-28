@@ -25,25 +25,42 @@ impl Umem {
         unsafe {
             let p = libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0);
             if p == libc::MAP_FAILED {
-                return Err(UmemError::MmapFailed(std::io::Error::last_os_error().to_string()));
+                return Err(UmemError::MmapFailed(
+                    std::io::Error::last_os_error().to_string(),
+                ));
             }
             let nn = NonNull::new_unchecked(p as *mut u8);
-            Ok(Umem { ptr: nn, len, frame_size, frames: AtomicUsize::new(0) })
+            Ok(Umem {
+                ptr: nn,
+                len,
+                frame_size,
+                frames: AtomicUsize::new(0),
+            })
         }
     }
 
     /// Number of frames available (simple counter for demo use)
-    pub fn frame_count(&self) -> usize { self.frames.load(Ordering::SeqCst) }
+    pub fn frame_count(&self) -> usize {
+        self.frames.load(Ordering::SeqCst)
+    }
 
     /// A pointer to the base of the UMEM region
-    pub fn base_ptr(&self) -> *mut u8 { self.ptr.as_ptr() }
+    pub fn base_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
 
-    pub fn len(&self) -> usize { self.len }
+    pub fn len(&self) -> usize {
+        self.len
+    }
 
-    pub fn frame_size(&self) -> usize { self.frame_size }
+    pub fn frame_size(&self) -> usize {
+        self.frame_size
+    }
 
     /// Return true if the UMEM region has zero length.
-    pub fn is_empty(&self) -> bool { self.len == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl Drop for Umem {

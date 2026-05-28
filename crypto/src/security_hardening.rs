@@ -98,7 +98,10 @@ impl HybridKEXState {
 
     pub fn check_timeout(&mut self) -> Result<(), String> {
         if !self.handshake_done && SystemTime::now() > self.timeout {
-            return Err(format!("crypto: handshake timeout for session {:02x?}", self.session_id));
+            return Err(format!(
+                "crypto: handshake timeout for session {:02x?}",
+                self.session_id
+            ));
         }
         if !self.handshake_done {
             self.timeout = SystemTime::now() + HANDSHAKE_TIMEOUT;
@@ -110,7 +113,10 @@ impl HybridKEXState {
         self.seq_counter = self.seq_counter.saturating_add(1);
         let seq = self.seq_counter;
         if self.seq_window.contains(&seq) {
-            return Err(format!("crypto: replay attack detected for session {:02x?}", self.session_id));
+            return Err(format!(
+                "crypto: replay attack detected for session {:02x?}",
+                self.session_id
+            ));
         }
         while self.seq_window.len() as u64 >= MAX_REPLAY_WINDOW {
             if let Some(oldest) = self.seq_window.iter().next().copied() {
@@ -125,7 +131,10 @@ impl HybridKEXState {
 
     pub fn check_retries(&mut self) -> Result<(), String> {
         if self.retry_count >= 3 {
-            return Err(format!("crypto: handshake retry limit exceeded for session {:02x?}", self.session_id));
+            return Err(format!(
+                "crypto: handshake retry limit exceeded for session {:02x?}",
+                self.session_id
+            ));
         }
         self.retry_count += 1;
         Ok(())

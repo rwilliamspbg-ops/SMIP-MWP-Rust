@@ -189,18 +189,14 @@ fn bench_poll_cost_only(c: &mut Criterion) {
     for &count in PACKET_COUNTS {
         group.throughput(Throughput::Elements(count as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("clone_poll", count),
-            &count,
-            |b, &n| {
-                let mut sock = CloneSocket::new(n);
-                b.iter(|| {
-                    sock.reset();
-                    let frames = sock.poll(n);
-                    black_box(frames);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("clone_poll", count), &count, |b, &n| {
+            let mut sock = CloneSocket::new(n);
+            b.iter(|| {
+                sock.reset();
+                let frames = sock.poll(n);
+                black_box(frames);
+            });
+        });
 
         group.bench_with_input(
             BenchmarkId::new("zero_copy_poll_slices", count),

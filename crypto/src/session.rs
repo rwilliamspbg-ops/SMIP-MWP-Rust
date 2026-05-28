@@ -1,13 +1,16 @@
-use aes_gcm::{aead::{Aead, AeadInPlace, KeyInit}, Aes256Gcm};
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::generic_array::typenum::U12;
+use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::{
+    aead::{Aead, AeadInPlace, KeyInit},
+    Aes256Gcm,
+};
+use ahash::{AHashMap, AHasher};
 use chacha20poly1305::ChaCha20Poly1305;
 use hkdf::Hkdf;
-use ahash::{AHashMap, AHasher};
 use parking_lot::RwLock;
 use sha2::Sha256;
-use std::hash::{Hash, Hasher};
 use std::convert::TryInto;
+use std::hash::{Hash, Hasher};
 use thiserror::Error;
 
 pub const TAG_SIZE: usize = 16;
@@ -51,7 +54,10 @@ fn derive_cache_key(combined_secret: &[u8], session_info: &[u8]) -> u64 {
 static HKDF_CACHE: once_cell::sync::Lazy<CacheMap> =
     once_cell::sync::Lazy::new(|| RwLock::new(AHashMap::new()));
 
-fn derive_session_material(combined_secret: &[u8], session_info: &[u8]) -> Result<CacheEntry, SessionError> {
+fn derive_session_material(
+    combined_secret: &[u8],
+    session_info: &[u8],
+) -> Result<CacheEntry, SessionError> {
     let label = b"smip-mwp-session-v1";
     // Stack buffer avoids the heap allocation for info concatenation
     let mut info = [0u8; 256];
@@ -64,13 +70,16 @@ fn derive_session_material(combined_secret: &[u8], session_info: &[u8]) -> Resul
     let hk = Hkdf::<Sha256>::new(None, combined_secret);
 
     let mut key = [0u8; KEY_SIZE];
-    hk.expand(info_slice, &mut key).map_err(|_| SessionError::AeadError)?;
+    hk.expand(info_slice, &mut key)
+        .map_err(|_| SessionError::AeadError)?;
 
     let hk2 = Hkdf::<Sha256>::new(None, &key);
     let mut nonce_base = [0u8; NONCE_SIZE];
-    hk2.expand(b"nonce", &mut nonce_base).map_err(|_| SessionError::AeadError)?;
+    hk2.expand(b"nonce", &mut nonce_base)
+        .map_err(|_| SessionError::AeadError)?;
     let mut mask_bytes = [0u8; 8];
-    hk2.expand(b"mask", &mut mask_bytes).map_err(|_| SessionError::AeadError)?;
+    hk2.expand(b"mask", &mut mask_bytes)
+        .map_err(|_| SessionError::AeadError)?;
 
     Ok(CacheEntry {
         key,
@@ -96,7 +105,7 @@ impl SessionAead {
     fn encrypt(&self, nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
         let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
         match self {
-            SessionAead::Aes(aead)   => aead.encrypt(nonce_ref, plaintext),
+            SessionAead::Aes(aead) => aead.encrypt(nonce_ref, plaintext),
             SessionAead::ChaCha(aead) => aead.encrypt(nonce_ref, plaintext),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
@@ -104,19 +113,27 @@ impl SessionAead {
 
     /// Encrypt plaintext that is already loaded into `buf`, appending the
     /// 16-byte AEAD tag in-place.  Zero extra heap allocations.
-    fn encrypt_in_place_buf(&self, nonce: &[u8; NONCE_SIZE], buf: &mut Vec<u8>) -> Result<(), SessionError> {
+    fn encrypt_in_place_buf(
+        &self,
+        nonce: &[u8; NONCE_SIZE],
+        buf: &mut Vec<u8>,
+    ) -> Result<(), SessionError> {
         let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
         match self {
-            SessionAead::Aes(aead)    => aead.encrypt_in_place(nonce_ref, b"", buf),
+            SessionAead::Aes(aead) => aead.encrypt_in_place(nonce_ref, b"", buf),
             SessionAead::ChaCha(aead) => aead.encrypt_in_place(nonce_ref, b"", buf),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
     }
 
-    fn decrypt(&self, nonce: &[u8; NONCE_SIZE], ciphertext: &[u8]) -> Result<Vec<u8>, SessionError> {
+    fn decrypt(
+        &self,
+        nonce: &[u8; NONCE_SIZE],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, SessionError> {
         let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
         match self {
-            SessionAead::Aes(aead)    => aead.decrypt(nonce_ref, ciphertext),
+            SessionAead::Aes(aead) => aead.decrypt(nonce_ref, ciphertext),
             SessionAead::ChaCha(aead) => aead.decrypt(nonce_ref, ciphertext),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
@@ -155,7 +172,11 @@ impl HybridSession {
         let entry = derive_session_material(combined_secret, session_info)?;
         let aead = SessionAead::new(&entry.key)?;
         HKDF_CACHE.write().insert(cache_key, entry.clone());
-        Ok(Self { aead, nonce_base: entry.nonce_base, seq_mask: entry.seq_mask })
+        Ok(Self {
+            aead,
+            nonce_base: entry.nonce_base,
+            seq_mask: entry.seq_mask,
+        })
     }
 
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
@@ -178,7 +199,12 @@ impl HybridSession {
     /// Zero-allocation encrypt: caller fills `dst` with the plaintext, then
     /// this method encrypts it in-place and appends the 16-byte tag.
     /// `dst` must have capacity for `plaintext_len + TAG_SIZE` bytes.
-    pub fn encrypt_to(&self, dst: &mut Vec<u8>, plaintext: &[u8], seq: u64) -> Result<(), SessionError> {
+    pub fn encrypt_to(
+        &self,
+        dst: &mut Vec<u8>,
+        plaintext: &[u8],
+        seq: u64,
+    ) -> Result<(), SessionError> {
         if dst.capacity() < plaintext.len() + TAG_SIZE {
             return Err(SessionError::InsufficientCapacity);
         }
@@ -236,7 +262,8 @@ mod tests {
         let sess = HybridSession::new(&combined, info).expect("session");
         let plaintext = b"zero alloc payload";
         let mut buf = Vec::with_capacity(plaintext.len() + TAG_SIZE);
-        sess.encrypt_to(&mut buf, plaintext, 42).expect("encrypt_to");
+        sess.encrypt_to(&mut buf, plaintext, 42)
+            .expect("encrypt_to");
         assert_eq!(buf.len(), plaintext.len() + TAG_SIZE);
         let pt = sess.decrypt(&buf, 42).expect("decrypt");
         assert_eq!(pt, plaintext);
@@ -248,10 +275,14 @@ mod tests {
         let info = b"inplace-info";
         let sess = HybridSession::new(&combined, info).expect("session");
         let mut payload = b"payload".to_vec();
-        sess.encrypt_in_place(&mut payload, 7).expect("encrypt in place");
+        sess.encrypt_in_place(&mut payload, 7)
+            .expect("encrypt in place");
         let sess2 = HybridSession::new(&combined, info).expect("session2");
         let pt = sess2.decrypt(&payload, 7).expect("decrypt");
         assert_eq!(pt, b"payload");
-        assert!(matches!(sess2.decrypt(&[1, 2, 3], 0), Err(SessionError::CiphertextTooShort)));
+        assert!(matches!(
+            sess2.decrypt(&[1, 2, 3], 0),
+            Err(SessionError::CiphertextTooShort)
+        ));
     }
 }
