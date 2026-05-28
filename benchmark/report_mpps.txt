@@ -1,0 +1,19 @@
+SMIP-MWP-Rust Packet Processing Rate Report
+==========================================
+
+Status: DRAFT / NOT FINAL
+Goal: > 50 Mpps (header-dominant payload profile)
+
+Latest local harness observations (chaos profile, 2026-05-28):
+- core_set=2-3 throughput_pkt_s=792003.11
+- core_set=2-5 throughput_pkt_s=932108.75
+
+Interpretation:
+- Current measured packet rate in this environment is below final target envelope.
+- This snapshot is useful for regression tracking but not sufficient for final Mpps attestation.
+
+To finalize:
+1) Run on target EPYC/Sapphire Rapids hardware with isolated cores.
+2) Use minimal payload profile and sustained duration.
+3) Capture repeat runs and confidence intervals.
+4) Attach raw logs and host metadata.

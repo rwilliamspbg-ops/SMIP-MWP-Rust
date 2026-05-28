@@ -17,3 +17,39 @@ jobs:
       run: cargo test --workspace --all-targets
     - name: Run metrics smoke test
       run: cargo run --release -p bench
+    - name: Run bridge validation gate
+      run: make verify-bridge
+    - name: Run chaos report PASS gate
+      run: |
+        chmod +x tools/benchmark/run_chaos_epyc_profile.sh
+        chmod +x tools/benchmark/ci_validate_chaos_report.sh
+        REPS=7 AGG_METHOD=median ./tools/benchmark/ci_validate_chaos_report.sh
+    - name: Run chaos benchmark gate
+      run: |
+        chmod +x tools/benchmark/assert_chaos_thresholds.py
+        cargo run --release -p benchmark -- \
+          --packets 10000 \
+          --payload-len 512 \
+          --loss-percent 5 \
+          --corrupt-percent 2 \
+          --duplicate-percent 1 \
+          --seed 1337 | tee /tmp/chaos_benchmark_ci.txt
+        python3 tools/benchmark/assert_chaos_thresholds.py \
+          --input /tmp/chaos_benchmark_ci.txt \
+          --min-throughput 100000 \
+          --max-p99-ns 5000 \
+          --max-p999-ns 10000
+    - name: Upload chaos validation artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: chaos-validation-artifacts
+        path: |
+          benchmark/chaos_report.md
+          tools/bench_results/chaos_epyc_profile.csv
+          tools/bench_results/datapath_profile.csv
+          tools/bench_results/datapath_alloc_events.csv
+          tools/bench_results/datapath_handle_events.csv
+          tools/bench_results/datapath_bench_after_opt.txt
+          /tmp/chaos_benchmark_ci.txt
+        if-no-files-found: warn

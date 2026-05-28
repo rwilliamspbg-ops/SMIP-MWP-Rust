@@ -8,6 +8,7 @@ members = [
     "afxdp",
     "cli",
     "bench",
+    "benchmark",
 ]
 
 [workspace.metadata]

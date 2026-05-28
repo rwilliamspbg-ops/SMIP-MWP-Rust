@@ -1,0 +1,11 @@
+[package]
+name = "benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+afxdp = { path = "../afxdp" }
+datapath = { path = "../datapath" }
+routing = { path = "../routing" }
+wire = { path = "../wire" }
+rand = "0.8"

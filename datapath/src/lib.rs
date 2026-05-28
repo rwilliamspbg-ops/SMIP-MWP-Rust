@@ -1,5 +1,9 @@
 use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 use rayon::prelude::*;
+use std::cell::RefCell;
+thread_local! {
+    static TLS_CIPHERTEXT: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(65536));
+}
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 #[cfg(target_arch = "x86_64")]
@@ -48,9 +52,10 @@ impl Forwarder {
         Self {
             routes,
             session,
-            arena: Vec::new(),
-            ciphertext: Vec::new(),
-            offsets: Vec::new(),
+            // Pre-reserve arena and ciphertext buffers to avoid mid-run allocations.
+            arena: Vec::with_capacity(262144),
+            ciphertext: Vec::with_capacity(65536),
+            offsets: Vec::with_capacity(4096),
         }
     }
 
@@ -84,7 +89,7 @@ impl Forwarder {
                                 self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
 
                                 let ct_len = self.ciphertext.len();
-                                if ct_len >= 4096 {
+                                if ct_len >= 16384 {
                                     #[cfg(target_arch = "x86_64")]
                                     {
                                         if use_avx2 {
@@ -154,54 +159,58 @@ impl Forwarder {
                 if let Some(session) = session {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-                        let mut ciphertext = Vec::with_capacity(payload_len + TAG_SIZE);
-
-                        match session.encrypt_to(&mut ciphertext, payload, seq_num) {
-                            Ok(()) => {
-                                let mut bytes = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
-                                bytes.extend_from_slice(&pkt[..HEADER_SIZE]);
-
-                                let ct_len = ciphertext.len();
-                                if ct_len >= 4096 {
-                                    #[cfg(target_arch = "x86_64")]
-                                    {
-                                        if use_avx2 {
-                                            let start_index = bytes.len();
-                                            bytes.resize(start_index + ct_len, 0);
-                                            unsafe {
-                                                let dst_ptr = bytes[start_index..].as_mut_ptr();
-                                                let src_ptr = ciphertext.as_ptr();
-                                                copy_avx2(dst_ptr, src_ptr, ct_len);
-                                            }
-                                        } else {
-                                            bytes.extend_from_slice(&ciphertext);
-                                        }
-                                    }
-                                    #[cfg(not(target_arch = "x86_64"))]
-                                    {
-                                        bytes.extend_from_slice(&ciphertext);
-                                    }
-                                } else {
-                                    bytes.extend_from_slice(&ciphertext);
-                                }
-
-                                return PacketOutput {
-                                    bytes,
-                                    encrypted: true,
-                                    route_miss: false,
-                                };
+                        // Reuse a thread-local ciphertext buffer to avoid per-packet allocations
+                        let encrypt_result = TLS_CIPHERTEXT.with(|buf_cell| {
+                            let mut buf = buf_cell.borrow_mut();
+                            buf.clear();
+                            let cap = buf.capacity();
+                            if cap < payload_len + TAG_SIZE {
+                                buf.reserve(payload_len + TAG_SIZE - cap);
                             }
+                            match session.encrypt_to(&mut *buf, payload, seq_num) {
+                                Ok(()) => {
+                                    let ct_len = buf.len();
+                                    let mut bytes = Vec::with_capacity(HEADER_SIZE + ct_len);
+                                    bytes.extend_from_slice(&pkt[..HEADER_SIZE]);
+
+                                    if ct_len >= 16384 {
+                                        #[cfg(target_arch = "x86_64")]
+                                        {
+                                            if use_avx2 {
+                                                let start_index = bytes.len();
+                                                bytes.resize(start_index + ct_len, 0);
+                                                unsafe {
+                                                    let dst_ptr = bytes[start_index..].as_mut_ptr();
+                                                    let src_ptr = buf.as_ptr();
+                                                    copy_avx2(dst_ptr, src_ptr, ct_len);
+                                                }
+                                            } else {
+                                                bytes.extend_from_slice(&buf);
+                                            }
+                                        }
+                                        #[cfg(not(target_arch = "x86_64"))]
+                                        {
+                                            bytes.extend_from_slice(&buf);
+                                        }
+                                    } else {
+                                        bytes.extend_from_slice(&buf);
+                                    }
+
+                                    Ok(PacketOutput { bytes, encrypted: true, route_miss: false })
+                                }
+                                Err(e) => Err(e),
+                            }
+                        });
+
+                        match encrypt_result {
+                            Ok(pkt_out) => return pkt_out,
                             Err(SessionError::AuthenticationFailed)
                             | Err(SessionError::PayloadTooLarge)
                             | Err(SessionError::CiphertextTooShort)
                             | Err(SessionError::AeadError)
                             | Err(SessionError::BufferTooSmall)
                             | Err(SessionError::InsufficientCapacity) => {
-                                return PacketOutput {
-                                    bytes: pkt,
-                                    encrypted: false,
-                                    route_miss: true,
-                                };
+                                return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
                             }
                         }
                     } else if payload_len > 0 {

@@ -2,7 +2,7 @@
 import sys
 import re
 import csv
-from datetime import datetime
+from datetime import datetime, UTC
 
 if len(sys.argv) < 6:
     print("Usage: parse_and_append.py <bench_output.txt> <out.csv> <run_index> <strategy> <commit>")
@@ -14,20 +14,40 @@ run_index = sys.argv[3]
 strategy = sys.argv[4]
 commit = sys.argv[5]
 
-pattern = re.compile(r"strategy=(?P<strategy>\w+) size=(?P<size>\d+) avg_ns=(?P<avg>[0-9.]+) throughput_mib_s=(?P<tps>[0-9.]+)")
+# Support both legacy lines with explicit strategy and current output lines
+# where strategy is provided out-of-band by the harness invocation argument.
+pattern_with_strategy = re.compile(
+    r"strategy=(?P<strategy>\w+) size=(?P<size>\d+) avg_ns=(?P<avg>[0-9.]+) throughput_mib_s=(?P<tps>[0-9.]+)"
+)
+pattern_without_strategy = re.compile(
+    r"size=(?P<size>\d+) avg_ns=(?P<avg>[0-9.]+) throughput_mib_s=(?P<tps>[0-9.]+)"
+)
 
 with open(bench_file) as f:
     lines = f.readlines()
 
 rows = []
 for line in lines:
-    m = pattern.search(line)
+    m = pattern_with_strategy.search(line)
     if m:
         rows.append({
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(UTC).isoformat(),
             'commit': commit,
             'run_index': run_index,
             'strategy': m.group('strategy'),
+            'size': m.group('size'),
+            'avg_ns': m.group('avg'),
+            'throughput_mib_s': m.group('tps')
+        })
+        continue
+
+    m = pattern_without_strategy.search(line)
+    if m:
+        rows.append({
+            'timestamp': datetime.now(UTC).isoformat(),
+            'commit': commit,
+            'run_index': run_index,
+            'strategy': strategy,
             'size': m.group('size'),
             'avg_ns': m.group('avg'),
             'throughput_mib_s': m.group('tps')
