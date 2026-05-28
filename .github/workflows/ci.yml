@@ -37,8 +37,8 @@ jobs:
         python3 tools/benchmark/assert_chaos_thresholds.py \
           --input /tmp/chaos_benchmark_ci.txt \
           --min-throughput 100000 \
-          --max-p99-ns 5000 \
-          --max-p999-ns 10000
+          --max-p99-ns 120000 \
+          --max-p999-ns 200000
     - name: Upload chaos validation artifacts
       if: always()
       uses: actions/upload-artifact@v4

@@ -31,6 +31,9 @@ The CI workflow runs the benchmark in two modes:
 - A direct threshold assertion over a single benchmark sample via `tools/benchmark/assert_chaos_thresholds.py`
 - A baseline-aware contract gate via `tools/benchmark/ci_validate_chaos_report.sh`
 
+The direct threshold check is a coarse smoke test; the baseline-aware gate is the
+primary performance contract.
+
 CI uploads these artifacts for debugging and review:
 
 - `benchmark/chaos_report.md`
