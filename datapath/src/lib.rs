@@ -430,6 +430,7 @@ pub mod socket {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub trait XdpSocket {
         fn poll(&mut self, max: usize) -> Vec<Vec<u8>>;
         fn poll_slices(&mut self, max: usize, ring: &mut SliceRing) -> usize {

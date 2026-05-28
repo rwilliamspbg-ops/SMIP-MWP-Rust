@@ -80,14 +80,14 @@ fn derive_session_material(combined_secret: &[u8], session_info: &[u8]) -> Resul
 }
 
 enum SessionAead {
-    Aes(Aes256Gcm),
+    Aes(Box<Aes256Gcm>),
     ChaCha(ChaCha20Poly1305),
 }
 
 impl SessionAead {
     fn new(key: &[u8; KEY_SIZE]) -> Result<Self, SessionError> {
         if let Ok(aes) = Aes256Gcm::new_from_slice(key) {
-            return Ok(Self::Aes(aes));
+            return Ok(Self::Aes(Box::new(aes)));
         }
         let chacha = ChaCha20Poly1305::new_from_slice(key).map_err(|_| SessionError::AeadError)?;
         Ok(Self::ChaCha(chacha))

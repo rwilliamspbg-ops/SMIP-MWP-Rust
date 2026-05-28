@@ -40,6 +40,8 @@ impl Header {
         }
     }
 
+    
+
     pub fn marshal_into(&self, buf: &mut [u8]) -> Result<(), ErrBufferTooSmall> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
@@ -72,6 +74,10 @@ impl Header {
     pub fn new_header_buffer(payload_len: usize) -> Vec<u8> {
         vec![0u8; HEADER_SIZE + payload_len]
     }
+}
+
+impl Default for Header {
+    fn default() -> Self { Self::new() }
 }
 
 /// Zero-copy immutable view into a packet buffer — no field copies, no

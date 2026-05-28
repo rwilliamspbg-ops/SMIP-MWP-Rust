@@ -64,6 +64,17 @@ Then validate on real hardware with:
 
 At that point, add a Rust-native AF_XDP smoke test and a benchmark harness that measures packet throughput and latency against the actual datapath implementation.
 
+## Pinned Benchmarking Notes
+
+For reproducible microbenchmarks and lower variance, run pinned, repeated Criterion runs on isolated cores. Example:
+
+```bash
+# run Criterion bench with CPU affinity pinned to core 2
+taskset -c 2 cargo bench --bench routing_miss_bench -- --sample-size 300 --nocapture | tee tools/bench_results/routing_miss_pinned_core2_run1_$(date +%Y%m%d_%H%M%S).txt
+```
+
+Recent pinned-sweep artifacts are stored in `tools/bench_results/` and include parsed CSVs and plots. Use repeated runs (5–10 per core) to compute meaningful confidence intervals before drawing conclusions about microsecond-scale differences.
+
 ## Suggested Result Log
 
 Record the following for each run:

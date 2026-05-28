@@ -1,0 +1,29 @@
+name: Remote Bench (self-hosted)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: [self-hosted, bench-host]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Make script executable
+        run: chmod +x ./tools/run_pinned_bench.sh
+
+      - name: Run pinned bench (cores 4,5)
+        run: |
+          ./tools/run_pinned_bench.sh --cores 4,5 --repeats 10 --sample-size 300 --outdir tools/bench_results/remote_github_action --commit no
+
+      - name: Upload bench artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: tools/bench_results/**

@@ -186,8 +186,8 @@ fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let want_metrics = parse_flag(&args, "--metrics");
-    let metrics_socket = args.iter().position(|a| a == "--metrics-socket").and_then(|i| args.get(i+1)).map(|s| s.clone());
-    let metrics_http = args.iter().position(|a| a == "--metrics-http").and_then(|i| args.get(i+1)).map(|s| s.clone());
+    let metrics_socket = args.iter().position(|a| a == "--metrics-socket").and_then(|i| args.get(i+1)).cloned();
+    let metrics_http = args.iter().position(|a| a == "--metrics-http").and_then(|i| args.get(i+1)).cloned();
     if parse_flag(&args, "--help") || parse_flag(&args, "-h") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
