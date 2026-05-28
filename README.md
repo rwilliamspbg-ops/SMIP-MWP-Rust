@@ -1,14 +1,20 @@
+
 # SMIP-MWP (Rust rewrite)
+
+<!-- Hero badges -->
 
 [![CI](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/actions/workflows/ci.yml/badge.svg)](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/actions/workflows/ci.yml)
 [![Bench Harness](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/actions/workflows/bench-harness.yml/badge.svg)](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/actions/workflows/bench-harness.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![Edition: 2021](https://img.shields.io/badge/edition-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/)
+[![GitHub stars](https://img.shields.io/github/stars/rwilliamspbg-ops/SMIP-MWP-Rust?style=social)](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/stargazers)
+[![Open issues](https://img.shields.io/github/issues/rwilliamspbg-ops/SMIP-MWP-Rust)](https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust/issues)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Performance: High](https://img.shields.io/badge/Performance-High-orange.svg)](docs/perf)
 <a href="https://github.com/sponsors/rwilliamspbg-ops"><img src="https://img.shields.io/badge/Sponsor-❤-1EAEDB?style=social&logo=github" alt="Sponsor"></a>
-[![Contributing](https://img.shields.io/badge/contributing-guidelines-brightgreen.svg)](CONTRIBUTING.md)
 
-Rust rewrite of SMIP-MWP — safe, testable, and high-performance datapath, crypto, routing, and CLI components.
+Rust rewrite of SMIP-MWP — safe, testable, and high-performance datapath, crypto, routing, and CLI components. Built for low-latency, high-throughput networking and reproducible benchmarking.
 
 ---
 
