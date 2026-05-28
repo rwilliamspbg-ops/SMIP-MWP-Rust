@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use ahash::{AHashMap, AHasher};
 use std::time::SystemTime;
+use arc_swap::ArcSwap;
 
 #[derive(Clone, Debug)]
 pub struct RouteEntry {
@@ -14,10 +16,10 @@ pub struct RouteEntry {
 
 #[derive(Debug)]
 pub struct Table {
-    inner: RwLock<TableInner>,
+    inner: ArcSwap<TableInner>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct TableInner {
     // BTreeMap keeps keys sorted automatically — no manual re-sort needed
     entries: BTreeMap<[u8;32], RouteEntry>,
@@ -36,8 +38,9 @@ fn fast_flow_hash(src_id: &[u8;32], dst_id: &[u8;32], flow_label: u32) -> u64 {
 }
 
 impl Table {
+
     pub fn new() -> Self {
-        Self { inner: RwLock::new(TableInner { entries: BTreeMap::new(), predictive_entries: Vec::new() }) }
+        Self { inner: ArcSwap::from_pointee(TableInner { entries: BTreeMap::new(), predictive_entries: Vec::new() }) }
     }
 
     fn rebuild_predictive_entries(inner: &mut TableInner) {
@@ -45,27 +48,44 @@ impl Table {
     }
 
     pub fn update_route(&self, e: RouteEntry) {
-        let mut inner = self.inner.write();
         let mut e = e;
         e.last_seen = SystemTime::now();
-        // BTreeMap insert is O(log n) and keeps order; no sort needed
-        inner.entries.insert(e.dest_id, e);
-        Self::rebuild_predictive_entries(&mut inner);
+
+        loop {
+            let current = self.inner.load_full();
+            let mut next = (*current).clone();
+            next.entries.insert(e.dest_id, e.clone());
+            Self::rebuild_predictive_entries(&mut next);
+            let new_arc = std::sync::Arc::new(next);
+            let prev = self.inner.compare_and_swap(&current, new_arc);
+            if Arc::ptr_eq(&prev, &current) {
+                break;
+            }
+            // else, retry
+        }
     }
 
     pub fn remove_route(&self, dest: [u8;32]) {
-        let mut inner = self.inner.write();
-        inner.entries.remove(&dest);
-        Self::rebuild_predictive_entries(&mut inner);
+        loop {
+            let current = self.inner.load_full();
+            let mut next = (*current).clone();
+            next.entries.remove(&dest);
+            Self::rebuild_predictive_entries(&mut next);
+            let new_arc = std::sync::Arc::new(next);
+            let prev = self.inner.compare_and_swap(&current, new_arc);
+            if Arc::ptr_eq(&prev, &current) {
+                break;
+            }
+        }
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8;32], _flow_label: u32) -> Option<[u8;32]> {
-        let inner = self.inner.read();
+        let inner = self.inner.load();
         inner.entries.get(&dst_id).map(|e| e.next_hop_id)
     }
 
     pub fn predictive_next_hop(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        let inner = self.inner.read();
+        let inner = self.inner.load();
         if inner.entries.is_empty() {
             return None;
         }
@@ -80,7 +100,7 @@ impl Table {
     }
 
     pub fn lookup_or_predict(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        let inner = self.inner.read();
+        let inner = self.inner.load();
         if let Some(e) = inner.entries.get(&dst_id) {
             return Some(e.next_hop_id);
         }
