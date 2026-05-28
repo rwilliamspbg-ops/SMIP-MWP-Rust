@@ -28,7 +28,7 @@ struct TableInner {
     predictive_entries: Vec<RouteEntry>,
 }
 
-const HOT_CACHE_SIZE: usize = 8;
+const HOT_CACHE_SIZE: usize = 16;
 
 static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
