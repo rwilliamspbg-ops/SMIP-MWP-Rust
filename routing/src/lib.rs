@@ -18,7 +18,8 @@ pub struct RouteEntry {
 
 #[derive(Debug)]
 pub struct Table {
-    inner: Atomic<TableInner>,
+    inner: RwLock<TableInner>,
+    fast_shards: Vec<RwLock<AHashMap<[u8;32], RouteEntry>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +30,8 @@ struct TableInner {
 }
 
 const HOT_CACHE_SIZE: usize = 16;
+const HOT_CACHE_PROBE: usize = 4;
+const FAST_SHARDS: usize = 16;
 
 static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
@@ -68,7 +71,17 @@ impl Table {
 
     pub fn new() -> Self {
         let init = TableInner { entries: BTreeMap::new(), predictive_entries: Vec::new() };
-        Self { inner: Atomic::new(init) }
+        let mut shards = Vec::with_capacity(FAST_SHARDS);
+        for _ in 0..FAST_SHARDS {
+            shards.push(RwLock::new(AHashMap::new()));
+        }
+        Self { inner: RwLock::new(init), fast_shards: shards }
+    }
+
+    fn shard_for(key: &[u8;32]) -> usize {
+        let mut h = AHasher::default();
+        key.hash(&mut h);
+        (h.finish() as usize) % FAST_SHARDS
     }
 
     fn rebuild_predictive_entries(inner: &mut TableInner) {
@@ -78,48 +91,38 @@ impl Table {
     pub fn update_route(&self, e: RouteEntry) {
         let mut e = e;
         e.last_seen = SystemTime::now();
-
-        loop {
-            let guard = epoch::pin();
-            let curr = self.inner.load(Ordering::Acquire, &guard);
-            let curr_ref = unsafe { curr.deref() };
-            let mut next = curr_ref.clone();
-            next.entries.insert(e.dest_id, e.clone());
-            Self::rebuild_predictive_entries(&mut next);
-
-            let new_owned = Owned::new(next);
-            match self.inner.compare_exchange(curr, new_owned, Ordering::AcqRel, Ordering::Acquire, &guard) {
-                Ok(_shared) => {
-                    unsafe { guard.defer_destroy(curr); }
-                    // Advance global epoch so per-thread caches are invalidated
-                    GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
-                    break;
-                }
-                Err(_) => continue,
-            }
+        // update fast-path shard first
+        let shard = Self::shard_for(&e.dest_id);
+        {
+            let mut map = self.fast_shards[shard].write();
+            map.insert(e.dest_id, e.clone());
         }
+
+        // update main table under write lock
+        {
+            let mut inner = self.inner.write();
+            inner.entries.insert(e.dest_id, e.clone());
+            Self::rebuild_predictive_entries(&mut inner);
+        }
+        // Invalidate per-thread caches
+        GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn remove_route(&self, dest: [u8;32]) {
-        loop {
-            let guard = epoch::pin();
-            let curr = self.inner.load(Ordering::Acquire, &guard);
-            let curr_ref = unsafe { curr.deref() };
-            let mut next = curr_ref.clone();
-            next.entries.remove(&dest);
-            Self::rebuild_predictive_entries(&mut next);
-
-            let new_owned = Owned::new(next);
-            match self.inner.compare_exchange(curr, new_owned, Ordering::AcqRel, Ordering::Acquire, &guard) {
-                Ok(_shared) => {
-                    unsafe { guard.defer_destroy(curr); }
-                    // Advance global epoch so caches see the removal
-                    GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
-                    break;
-                }
-                Err(_) => continue,
-            }
+        // remove from fast-path shard first
+        let shard = Self::shard_for(&dest);
+        {
+            let mut map = self.fast_shards[shard].write();
+            map.remove(&dest);
         }
+
+        // update main table under write lock
+        {
+            let mut inner = self.inner.write();
+            inner.entries.remove(&dest);
+            Self::rebuild_predictive_entries(&mut inner);
+        }
+        GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8;32], _flow_label: u32) -> Option<[u8;32]> {
@@ -139,11 +142,28 @@ impl Table {
             return Some(v);
         }
 
+<<<<<<< Updated upstream
         // Miss -> do normal epoch-protected lookup and populate cache
         let guard = epoch::pin();
         let curr = self.inner.load(Ordering::Acquire, &guard);
         let inner = unsafe { curr.deref() };
         let res = inner.entries.get(&dst_id).map(|e| e.next_hop_id);
+=======
+        // Fast-path shard lookup
+        let shard = Self::shard_for(&dst_id);
+        {
+            let map = self.fast_shards[shard].read();
+            if let Some(e) = map.get(&dst_id) {
+                return Some(e.next_hop_id);
+            }
+        }
+
+        // Miss -> try fast-path already checked; fall back to main table under read lock and populate cache using multiple-probe insertion
+        let res = {
+            let inner = self.inner.read();
+            inner.entries.get(&dst_id).map(|e| e.next_hop_id)
+        };
+>>>>>>> Stashed changes
         if let Some(nh) = res {
             HOT_CACHE.with(|c| {
                 let mut cache = c.borrow_mut();
@@ -155,9 +175,7 @@ impl Table {
     }
 
     pub fn predictive_next_hop(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        let guard = epoch::pin();
-        let curr = self.inner.load(Ordering::Acquire, &guard);
-        let inner = unsafe { curr.deref() };
+        let inner = self.inner.read();
         if inner.entries.is_empty() {
             return None;
         }
@@ -172,9 +190,7 @@ impl Table {
     }
 
     pub fn lookup_or_predict(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        let guard = epoch::pin();
-        let curr = self.inner.load(Ordering::Acquire, &guard);
-        let inner = unsafe { curr.deref() };
+        let inner = self.inner.read();
         if let Some(e) = inner.entries.get(&dst_id) {
             return Some(e.next_hop_id);
         }
