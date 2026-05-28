@@ -113,6 +113,27 @@ fn render_telemetry(stats: datapath::ForwarderStats, request: Option<&ControlReq
     }
 }
 
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
+    format!(
+        concat!(
+            "# HELP mohawk_packets_processed_total Total packets processed by the datapath.\n",
+            "# TYPE mohawk_packets_processed_total counter\n",
+            "mohawk_packets_processed_total {}\n",
+            "# HELP mohawk_metrics_timestamp_seconds Unix timestamp for the current sample.\n",
+            "# TYPE mohawk_metrics_timestamp_seconds gauge\n",
+            "mohawk_metrics_timestamp_seconds {}\n"
+        ),
+        count, timestamp
+    )
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let want_metrics = parse_flag(&args, "--metrics");
@@ -203,9 +224,8 @@ fn main() {
                                 let req = String::from_utf8_lossy(&buf);
                                 if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
                                     let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                                    let body = format!("{{\"timestamp\":{},\"packets_processed\":{}}}\n", now, count);
-                                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                                    let body = render_prometheus_metrics(count, unix_timestamp_secs());
+                                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                                     let _ = s.write_all(resp.as_bytes());
                                 } else {
                                     let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
@@ -233,4 +253,20 @@ fn main() {
         "forwarder demo: received={} forwarded={} encrypted={} route_misses={}",
         stats.received, stats.forwarded, stats.encrypted, stats.route_misses
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_prometheus_metrics;
+
+    #[test]
+    fn prometheus_metrics_render_expected_lines() {
+        let body = render_prometheus_metrics(42, 1234567890);
+
+        assert!(body.contains("# HELP mohawk_packets_processed_total"));
+        assert!(body.contains("# TYPE mohawk_packets_processed_total counter"));
+        assert!(body.contains("mohawk_packets_processed_total 42"));
+        assert!(body.contains("# TYPE mohawk_metrics_timestamp_seconds gauge"));
+        assert!(body.contains("mohawk_metrics_timestamp_seconds 1234567890"));
+    }
 }

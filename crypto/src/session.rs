@@ -3,10 +3,9 @@ use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::generic_array::typenum::U12;
 use chacha20poly1305::ChaCha20Poly1305;
 use hkdf::Hkdf;
+use ahash::{AHashMap, AHasher};
 use parking_lot::RwLock;
 use sha2::Sha256;
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::convert::TryInto;
 use thiserror::Error;
@@ -38,19 +37,19 @@ struct CacheEntry {
     seq_mask: u64,
 }
 
-type CacheMap = RwLock<HashMap<u64, CacheEntry>>;
+type CacheMap = RwLock<AHashMap<u64, CacheEntry>>;
 
 /// Fast non-cryptographic cache key — replaces the previous SHA-256 call.
 /// Session cache lookups go from ~500 ns to ~10 ns.
 fn derive_cache_key(combined_secret: &[u8], session_info: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = AHasher::default();
     combined_secret.hash(&mut h);
     session_info.hash(&mut h);
     h.finish()
 }
 
 static HKDF_CACHE: once_cell::sync::Lazy<CacheMap> =
-    once_cell::sync::Lazy::new(|| RwLock::new(HashMap::new()));
+    once_cell::sync::Lazy::new(|| RwLock::new(AHashMap::new()));
 
 fn derive_session_material(combined_secret: &[u8], session_info: &[u8]) -> Result<CacheEntry, SessionError> {
     let label = b"smip-mwp-session-v1";

@@ -3,6 +3,7 @@ use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 use std::is_x86_feature_detected;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Application-level processed packet counter (samples per-second externally)
@@ -10,6 +11,8 @@ pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 use routing::Table;
 use wire::{HeaderViewRef, HEADER_SIZE};
 use std::convert::TryInto;
+
+const PARALLEL_BATCH_THRESHOLD: usize = 1024;
 
 pub use socket::XdpSocket;
 
@@ -19,6 +22,12 @@ pub struct Forwarder {
     arena: Vec<u8>,
     ciphertext: Vec<u8>,
     offsets: Vec<(usize, usize)>,
+}
+
+struct PacketOutput {
+    bytes: Vec<u8>,
+    encrypted: bool,
+    route_miss: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -114,24 +123,114 @@ impl Forwarder {
         forwarded
     }
 
-    pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
-        let frames = sock.poll(64);
-        // reuse the persistent arena and offsets
+    fn process_packet_owned(
+        pkt: Vec<u8>,
+        routes: &Table,
+        session: Option<&HybridSession>,
+        use_avx2: bool,
+    ) -> PacketOutput {
+        if let Ok(h) = HeaderViewRef::new(&pkt) {
+            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
+            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let flow_label = h.flow_label();
+            let seq_num = h.seq_num();
+            let payload_len = h.length() as usize;
+
+            if routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
+                if let Some(session) = session {
+                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                        let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
+                        let mut ciphertext = Vec::with_capacity(payload_len + TAG_SIZE);
+
+                        match session.encrypt_to(&mut ciphertext, payload, seq_num) {
+                            Ok(()) => {
+                                let mut bytes = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
+                                bytes.extend_from_slice(&pkt[..HEADER_SIZE]);
+
+                                let ct_len = ciphertext.len();
+                                if ct_len >= 4096 {
+                                    #[cfg(target_arch = "x86_64")]
+                                    {
+                                        if use_avx2 {
+                                            let start_index = bytes.len();
+                                            bytes.resize(start_index + ct_len, 0);
+                                            unsafe {
+                                                let dst_ptr = bytes[start_index..].as_mut_ptr();
+                                                let src_ptr = ciphertext.as_ptr();
+                                                copy_avx2(dst_ptr, src_ptr, ct_len);
+                                            }
+                                        } else {
+                                            bytes.extend_from_slice(&ciphertext);
+                                        }
+                                    }
+                                    #[cfg(not(target_arch = "x86_64"))]
+                                    {
+                                        bytes.extend_from_slice(&ciphertext);
+                                    }
+                                } else {
+                                    bytes.extend_from_slice(&ciphertext);
+                                }
+
+                                return PacketOutput { bytes, encrypted: true, route_miss: false };
+                            }
+                            Err(SessionError::AuthenticationFailed)
+                            | Err(SessionError::PayloadTooLarge)
+                            | Err(SessionError::CiphertextTooShort)
+                            | Err(SessionError::AeadError)
+                            | Err(SessionError::BufferTooSmall)
+                            | Err(SessionError::InsufficientCapacity) => {
+                                return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                            }
+                        }
+                    } else if payload_len > 0 {
+                        return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                    }
+                }
+            } else {
+                return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+            }
+        }
+
+        PacketOutput { bytes: pkt, encrypted: false, route_miss: false }
+    }
+
+    fn append_outputs(&mut self, outputs: Vec<PacketOutput>, received: usize) -> ForwarderStats {
         self.arena.clear();
         self.offsets.clear();
-        self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+
         let mut stats = ForwarderStats {
-            received: frames.len(),
+            received,
             ..ForwarderStats::default()
         };
 
-        if frames.is_empty() {
-            return stats;
+        self.arena.reserve(outputs.iter().map(|output| output.bytes.len()).sum::<usize>());
+        self.offsets.reserve(outputs.len());
+
+        for output in outputs {
+            let start = self.arena.len();
+            self.arena.extend_from_slice(&output.bytes);
+            let len = self.arena.len() - start;
+            self.offsets.push((start, len));
+            if output.encrypted {
+                stats.encrypted += 1;
+            } else {
+                stats.forwarded += 1;
+            }
+            if output.route_miss {
+                stats.route_misses += 1;
+            }
         }
 
-        // Reuse a persistent ciphertext buffer across batches to avoid repeated
-        // heap growth and allocator churn on the hot path.
-        self.ciphertext.clear();
+        stats
+    }
+
+    pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        let frames = sock.poll(64);
+        let received = frames.len();
+
+        if frames.is_empty() {
+            return ForwarderStats::default();
+        }
 
         // Hoist feature detection out of the hot loop.
         #[cfg(target_arch = "x86_64")]
@@ -139,18 +238,44 @@ impl Forwarder {
         #[cfg(not(target_arch = "x86_64"))]
         let use_avx2 = false;
 
-        for pkt in frames {
-            let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats);
+        if received < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
+            self.arena.clear();
+            self.offsets.clear();
+            self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+            let mut stats = ForwarderStats {
+                received,
+                ..ForwarderStats::default()
+            };
 
+            // Reuse a persistent ciphertext buffer across batches to avoid repeated
+            // heap growth and allocator churn on the hot path.
+            self.ciphertext.clear();
 
-            if !forwarded {
-                let start = self.arena.len();
-                self.arena.extend_from_slice(&pkt);
-                let len = self.arena.len() - start;
-                self.offsets.push((start, len));
-                stats.forwarded += 1;
+            for pkt in frames {
+                let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats);
+
+                if !forwarded {
+                    let start = self.arena.len();
+                    self.arena.extend_from_slice(&pkt);
+                    let len = self.arena.len() - start;
+                    self.offsets.push((start, len));
+                    stats.forwarded += 1;
+                }
             }
+
+            let _ = sock.send(&mut self.arena, &self.offsets);
+            PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+            return stats;
         }
+
+        let routes = &self.routes;
+        let session = self.session.as_ref();
+        let outputs = frames
+            .into_par_iter()
+            .map(|pkt| Self::process_packet_owned(pkt, routes, session, use_avx2))
+            .collect::<Vec<_>>();
+
+        let stats = self.append_outputs(outputs, received);
         let _ = sock.send(&mut self.arena, &self.offsets);
         // update global application pconf counter
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);

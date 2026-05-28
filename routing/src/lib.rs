@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
+use ahash::{AHashMap, AHasher};
 use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
@@ -25,10 +25,10 @@ struct TableInner {
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
-/// predictive routing. SipHash via DefaultHasher replaces the previous SHA-256
-/// call, reducing per-miss cost from ~500 ns to ~10 ns.
+/// predictive routing. AHasher replaces the previous SipHash-backed default
+/// hasher, reducing per-miss cost on the trusted datapath hot path.
 fn fast_flow_hash(src_id: &[u8;32], dst_id: &[u8;32], flow_label: u32) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = AHasher::default();
     src_id.hash(&mut h);
     dst_id.hash(&mut h);
     flow_label.hash(&mut h);
@@ -104,12 +104,12 @@ pub struct RoutePolicy {
 
 #[derive(Debug)]
 pub struct Router {
-    inner: RwLock<HashMap<u64, RoutePolicy>>,
+    inner: RwLock<AHashMap<u64, RoutePolicy>>,
 }
 
 impl Router {
     pub fn new() -> Self {
-        let r = Self { inner: RwLock::new(HashMap::new()) };
+        let r = Self { inner: RwLock::new(AHashMap::new()) };
         r.seed_default_policies();
         r
     }
