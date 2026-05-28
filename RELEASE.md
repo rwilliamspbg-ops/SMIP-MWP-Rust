@@ -1,25 +1,23 @@
-# Release v1.0.0
+# Changelog
 
-Tag: `v1.0.0`
+This file tracks notable repository-level changes on the current `main` branch.
 
-This release marks the initial v1.0 milestone for the Rust rewrite workspace. It contains:
+## Unreleased / main
 
-- Stabilized workspace layout and core crate scaffolding
-- Bench harness and basic datapath microbench fixes
-- Test-suite validation across crates
-- Refreshed benchmark artifacts in `docs/perf/` with the latest routing miss sweep and bench outputs
-- CLI metrics endpoints for local stress runs (`--metrics`, `--metrics-socket`, and `--metrics-http`)
-- Stress harness scripts and Makefile targets for sustained load and perf collection
+- `make verify-bridge` now uses the committed [tools/validation/verify_bridge.sh](tools/validation/verify_bridge.sh) wrapper so CI and local checkouts resolve the same path.
+- The chaos gate is pinned to median aggregation with `REPS=7`, and CI uploads the resulting benchmark artifacts for inspection.
+- The datapath serial hot path now encrypts payloads directly inside the output arena instead of bouncing through an intermediate ciphertext buffer.
+- The README and benchmark docs were refreshed to match the current workspace, workflows, and artifact layout.
 
-For release notes and changelog, see the project GitHub releases page.
+## v1.0.0
 
-Checklist (current release state):
+- Stabilized workspace layout and core crate scaffolding.
+- Added the benchmark harness and basic datapath microbench fixes.
+- Validated the workspace test suite across crates.
+- Refreshed benchmark artifacts in `docs/perf/` and `tools/bench_results/`.
+- Added CLI metrics endpoints for local stress runs.
+- Added stress harness scripts and Makefile targets for sustained load and perf collection.
 
-- [x] Stabilized workspace layout and core crate scaffolding
-- [x] Bench harness and basic datapath microbench fixes
-- [x] Test-suite validation across crates
-- [x] Refreshed benchmark artifacts included (see `tools/bench_results/`)
-- [x] CPU-pinned bench sweeps captured for routing tuning (cores 2 & 3, multi-run artifacts)
+## Notes
 
-Notes:
-- A performance tuning PR (perf/tune-routing-cache, PR #16) includes updated bench artifacts and plots. The current recommendation from these local runs is to merge the `RwLock` baseline with the per-thread hot-cache and fast-shards; further hybrid tuning is optional and should follow a structured parameter sweep with pinned repeats for statistical confidence.
+- Release notes and benchmark artifacts are generated from the current workspace state; always prefer the scripts in `tools/` over hand-editing outputs.
