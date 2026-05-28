@@ -1,0 +1,92 @@
+routing_miss_path/lookup_or_predict_miss/1
+                        time:   [16.595 µs 16.741 µs 16.904 µs]
+                        thrpt:  [15.145 Melem/s 15.292 Melem/s 15.427 Melem/s]
+                 change:
+                        time:   [-0.1575% +0.9072% +1.9984%] (p = 0.11 > 0.05)
+                        thrpt:  [-1.9592% -0.8990% +0.1577%]
+                        No change in performance detected.
+Found 59 outliers among 300 measurements (19.67%)
+  12 (4.00%) high mild
+  47 (15.67%) high severe
+routing_miss_path/lookup_or_predict_miss/2
+                        time:   [16.430 µs 16.559 µs 16.708 µs]
+                        thrpt:  [15.322 Melem/s 15.460 Melem/s 15.582 Melem/s]
+                 change:
+                        time:   [-2.4101% -0.9824% +0.3891%] (p = 0.17 > 0.05)
+                        thrpt:  [-0.3876% +0.9921% +2.4696%]
+                        No change in performance detected.
+Found 58 outliers among 300 measurements (19.33%)
+  9 (3.00%) high mild
+  49 (16.33%) high severe
+routing_miss_path/lookup_or_predict_miss/3
+                        time:   [16.731 µs 16.924 µs 17.141 µs]
+                        thrpt:  [14.935 Melem/s 15.127 Melem/s 15.301 Melem/s]
+                 change:
+                        time:   [-0.4107% +0.8766% +2.1444%] (p = 0.18 > 0.05)
+                        thrpt:  [-2.0994% -0.8690% +0.4123%]
+                        No change in performance detected.
+Found 63 outliers among 300 measurements (21.00%)
+  2 (0.67%) low mild
+  8 (2.67%) high mild
+  53 (17.67%) high severe
+routing_miss_path/lookup_or_predict_miss/4
+                        time:   [17.171 µs 17.347 µs 17.546 µs]
+                        thrpt:  [14.590 Melem/s 14.757 Melem/s 14.909 Melem/s]
+                 change:
+                        time:   [-0.3788% +1.0199% +2.3694%] (p = 0.15 > 0.05)
+                        thrpt:  [-2.3145% -1.0096% +0.3802%]
+                        No change in performance detected.
+Found 53 outliers among 300 measurements (17.67%)
+  5 (1.67%) high mild
+  48 (16.00%) high severe
+routing_miss_path/lookup_or_predict_miss/5
+                        time:   [17.907 µs 18.095 µs 18.309 µs]
+                        thrpt:  [13.982 Melem/s 14.147 Melem/s 14.296 Melem/s]
+                 change:
+                        time:   [-1.3281% +0.2170% +1.8305%] (p = 0.79 > 0.05)
+                        thrpt:  [-1.7976% -0.2165% +1.3460%]
+                        No change in performance detected.
+Found 55 outliers among 300 measurements (18.33%)
+  7 (2.33%) high mild
+  48 (16.00%) high severe
+routing_miss_path/lookup_or_predict_miss/6
+                        time:   [18.564 µs 18.769 µs 19.011 µs]
+                        thrpt:  [13.466 Melem/s 13.639 Melem/s 13.790 Melem/s]
+                 change:
+                        time:   [-0.4923% +1.0217% +2.5538%] (p = 0.20 > 0.05)
+                        thrpt:  [-2.4902% -1.0114% +0.4947%]
+                        No change in performance detected.
+Found 50 outliers among 300 measurements (16.67%)
+  4 (1.33%) high mild
+  46 (15.33%) high severe
+routing_miss_path/lookup_or_predict_miss/7
+                        time:   [20.024 µs 20.582 µs 21.178 µs]
+                        thrpt:  [12.088 Melem/s 12.438 Melem/s 12.784 Melem/s]
+                 change:
+                        time:   [+0.7233% +2.7626% +4.8132%] (p = 0.01 < 0.05)
+                        thrpt:  [-4.5922% -2.6884% -0.7181%]
+                        Change within noise threshold.
+Found 57 outliers among 300 measurements (19.00%)
+  6 (2.00%) high mild
+  51 (17.00%) high severe
+routing_miss_path/lookup_or_predict_miss/8
+                        time:   [19.841 µs 20.010 µs 20.205 µs]
+                        thrpt:  [12.670 Melem/s 12.794 Melem/s 12.903 Melem/s]
+                 change:
+                        time:   [-1.6971% -0.2284% +1.2604%] (p = 0.77 > 0.05)
+                        thrpt:  [-1.2447% +0.2289% +1.7264%]
+                        No change in performance detected.
+Found 50 outliers among 300 measurements (16.67%)
+  11 (3.67%) high mild
+  39 (13.00%) high severe
+routing_miss_path/lookup_or_predict_miss/16
+                        time:   [21.835 µs 22.119 µs 22.441 µs]
+                        thrpt:  [11.408 Melem/s 11.574 Melem/s 11.724 Melem/s]
+                 change:
+                        time:   [-1.6704% -0.3457% +1.0267%] (p = 0.61 > 0.05)
+                        thrpt:  [-1.0163% +0.3469% +1.6988%]
+                        No change in performance detected.
+Found 55 outliers among 300 measurements (18.33%)
+  8 (2.67%) high mild
+  47 (15.67%) high severe
+
