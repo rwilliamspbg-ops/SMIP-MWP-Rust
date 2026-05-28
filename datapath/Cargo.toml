@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rayon = "1.10"
 wire = { path = "../wire" }
 routing = { path = "../routing" }
 crypto = { path = "../crypto" }

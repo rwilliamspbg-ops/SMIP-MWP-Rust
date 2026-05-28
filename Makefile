@@ -1,6 +1,6 @@
 ## Makefile - stress and profiling helpers
 
-.PHONY: build stress-test profile clean
+.PHONY: build stress-test real-bench profile clean
 
 build:
 	cargo build --release
@@ -14,6 +14,11 @@ stress-test:
 
 profile: build
 	@echo "Run: sudo ./tools/stress/profile_stress.sh --dut $$DUT_BIN --gen '$$GEN_CMD' --iface $$IFACE --rate $$RATE --duration $$DURATION --out $$OUT"
+
+## Run a real hardware-backed benchmark using the stress harness.
+## Expects env vars: DUT_BIN, GEN_CMD, IFACE, DURATION, OUT
+real-bench: build
+	./tools/stress/run_stress.sh --dut "$$DUT_BIN" --gen "$$GEN_CMD" --iface "$$IFACE" --duration "$$DURATION" --out "$$OUT"
 
 clean:
 	cargo clean

@@ -29,9 +29,21 @@ Profile run (records perf for DUT process):
 sudo ./tools/stress/profile_stress.sh --dut ./target/release/mohawk-node --gen "trex-64r --cfg ..." --iface ens1f0 --duration 60 --out /tmp/pconf.csv
 ```
 
+Real benchmark run (records NIC counters and DUT CPU time):
+
+```sh
+make real-bench \
+  DUT_BIN=./target/release/mohawk-node \
+  GEN_CMD="sudo trex-64r --cfg ... --duration 60" \
+  IFACE=ens1f0 \
+  DURATION=60 \
+  OUT=/tmp/stress_pconf.csv
+```
+
 Notes & limitations
 - These scripts can sample NIC counters and, when `--metrics-http` or
   `--metrics-socket` is enabled on the DUT, they can also capture the
   application-level `packets_processed` counter.
+- For bridge-request runs, `MOHAWK_WORKER_CORES=0-3` pins `cli` worker threads to specific cores when `num_workers > 1`.
 - Use a dedicated test host for high-rate tests; disable C-states and frequency
   scaling and pin IRQs/cores for deterministic results.

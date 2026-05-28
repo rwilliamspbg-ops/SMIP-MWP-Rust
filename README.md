@@ -130,6 +130,19 @@ cargo build -p bench --release
 ./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv
 ```
 
+**Real hardware-backed benchmark:**
+
+```sh
+make real-bench \
+	DUT_BIN=./target/release/mohawk-node \
+	GEN_CMD="sudo trex-64r --cfg mycfg.yaml --duration 60" \
+	IFACE=ens1f0 \
+	DURATION=60 \
+	OUT=/tmp/stress_pconf.csv
+```
+
+This runs the stress harness against a live DUT and records NIC counters plus per-process CPU times.
+
 **Routing miss sweep:**
 
 ```sh

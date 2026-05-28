@@ -1,4 +1,5 @@
 mod bridge;
+mod worker;
 
 use bridge::{ControlRequest, ForwarderStats, QueueStats, TelemetryResponse};
 use datapath::Forwarder;
@@ -12,21 +13,13 @@ use std::thread;
 use std::time::Duration;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
 
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
 
-fn run_demo() -> datapath::ForwarderStats {
-    let routes = Table::new();
-    routes.update_route(RouteEntry {
-        dest_id: [2u8; 32],
-        next_hop_id: [3u8; 32],
-        metric: 1,
-        last_seen: SystemTime::now(),
-    });
-
-    let mut forwarder = Forwarder::with_session(routes, vec![0x42; 32], b"cli-demo".to_vec());
+fn demo_packet() -> Vec<u8> {
     let mut packet = Header::new_header_buffer(4);
     let header = Header {
         src_id: [1u8; 32],
@@ -40,7 +33,21 @@ fn run_demo() -> datapath::ForwarderStats {
     header.marshal_into(&mut packet).expect("marshal header");
     packet[HEADER_SIZE..HEADER_SIZE + 4].copy_from_slice(&[1, 2, 3, 4]);
 
-    let mut sock = afxdp::MockSocket::new(vec![packet]);
+    packet
+}
+
+fn run_demo() -> datapath::ForwarderStats {
+    let routes = Table::new();
+    routes.update_route(RouteEntry {
+        dest_id: [2u8; 32],
+        next_hop_id: [3u8; 32],
+        metric: 1,
+        last_seen: SystemTime::now(),
+    });
+
+    let mut forwarder = Forwarder::with_session(routes, vec![0x42; 32], b"cli-demo".to_vec());
+
+    let mut sock = afxdp::MockSocket::new(vec![demo_packet()]);
     forwarder.process_batch(&mut sock)
 }
 
@@ -71,6 +78,48 @@ fn build_forwarder_from_request(request: &ControlRequest) -> Forwarder {
     }
 
     Forwarder::with_session(routes, secret, info)
+}
+
+fn resolve_worker_cores() -> Vec<usize> {
+    if let Ok(spec) = env::var("MOHAWK_WORKER_CORES") {
+        if let Ok(cores) = worker::parse_core_list(&spec) {
+            return cores;
+        }
+    }
+
+    worker::available_core_ids()
+}
+
+fn run_pinned_workers(request: &ControlRequest) -> datapath::ForwarderStats {
+    let worker_count = request.runtime_config.num_workers.max(1) as usize;
+    let core_ids = resolve_worker_cores();
+    let plan = worker::build_worker_plan(worker_count, &core_ids);
+    let request = Arc::new(request.clone());
+    let packet = demo_packet();
+
+    let handles = worker::spawn_pinned_workers(&plan, move |assignment| {
+        let mut forwarder = build_forwarder_from_request(&request);
+        let mut sock = afxdp::MockSocket::new(vec![packet.clone()]);
+        let stats = forwarder.process_batch(&mut sock);
+        eprintln!(
+            "worker {} pinned to core {} processed {} packets",
+            assignment.worker_index,
+            assignment.core_id,
+            stats.received
+        );
+        stats
+    });
+
+    handles
+        .into_iter()
+        .filter_map(|handle| handle.join().ok())
+        .fold(datapath::ForwarderStats::default(), |mut acc, stats| {
+            acc.received += stats.received;
+            acc.forwarded += stats.forwarded;
+            acc.encrypted += stats.encrypted;
+            acc.route_misses += stats.route_misses;
+            acc
+        })
 }
 
 fn read_bridge_request(args: &[String]) -> Result<Option<ControlRequest>, String> {
@@ -113,6 +162,27 @@ fn render_telemetry(stats: datapath::ForwarderStats, request: Option<&ControlReq
     }
 }
 
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
+    format!(
+        concat!(
+            "# HELP mohawk_packets_processed_total Total packets processed by the datapath.\n",
+            "# TYPE mohawk_packets_processed_total counter\n",
+            "mohawk_packets_processed_total {}\n",
+            "# HELP mohawk_metrics_timestamp_seconds Unix timestamp for the current sample.\n",
+            "# TYPE mohawk_metrics_timestamp_seconds gauge\n",
+            "mohawk_metrics_timestamp_seconds {}\n"
+        ),
+        count, timestamp
+    )
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let want_metrics = parse_flag(&args, "--metrics");
@@ -140,11 +210,15 @@ fn main() {
             std::process::exit(1);
         }
 
-        let _forwarder = build_forwarder_from_request(request);
-        let stats = run_demo();
+        let stats = if request.runtime_config.num_workers > 1 {
+            run_pinned_workers(request)
+        } else {
+            run_demo()
+        };
         let telemetry = render_telemetry(stats, Some(request));
         println!("bridge request accepted for iface {}", request.runtime_config.iface);
         println!("bridge datapath initialized with {} route updates", request.route_updates.len());
+        println!("bridge worker count: {}", request.runtime_config.num_workers);
         println!("{}", serde_json::to_string_pretty(&telemetry).expect("telemetry json"));
         return;
     }
@@ -203,9 +277,8 @@ fn main() {
                                 let req = String::from_utf8_lossy(&buf);
                                 if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
                                     let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                                    let body = format!("{{\"timestamp\":{},\"packets_processed\":{}}}\n", now, count);
-                                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                                    let body = render_prometheus_metrics(count, unix_timestamp_secs());
+                                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                                     let _ = s.write_all(resp.as_bytes());
                                 } else {
                                     let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
@@ -233,4 +306,20 @@ fn main() {
         "forwarder demo: received={} forwarded={} encrypted={} route_misses={}",
         stats.received, stats.forwarded, stats.encrypted, stats.route_misses
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_prometheus_metrics;
+
+    #[test]
+    fn prometheus_metrics_render_expected_lines() {
+        let body = render_prometheus_metrics(42, 1234567890);
+
+        assert!(body.contains("# HELP mohawk_packets_processed_total"));
+        assert!(body.contains("# TYPE mohawk_packets_processed_total counter"));
+        assert!(body.contains("mohawk_packets_processed_total 42"));
+        assert!(body.contains("# TYPE mohawk_metrics_timestamp_seconds gauge"));
+        assert!(body.contains("mohawk_metrics_timestamp_seconds 1234567890"));
+    }
 }

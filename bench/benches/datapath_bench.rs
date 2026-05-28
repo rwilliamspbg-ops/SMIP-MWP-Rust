@@ -1,40 +1,46 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use datapath::{Forwarder, XdpSocket};
+use datapath::socket::{SliceRing, XdpSocket};
+use datapath::Forwarder;
 use routing::{RouteEntry, Table};
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
 
-struct MockSocket {
-    frames: Vec<Vec<u8>>,
-    sent: Vec<Box<[u8]>>,
+struct SliceSocket {
+    templates: Vec<Vec<u8>>,
 }
 
-impl MockSocket {
+impl SliceSocket {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            frames: Vec::with_capacity(capacity),
-            sent: Vec::new(),
+            templates: Vec::with_capacity(capacity),
         }
     }
 
     fn reset(&mut self, frames: &[Vec<u8>]) {
-        self.frames.clear();
-        self.frames.extend(frames.iter().cloned());
-        self.sent.clear();
+        self.templates.clear();
+        self.templates.extend(frames.iter().cloned());
     }
 }
 
-impl XdpSocket for MockSocket {
+impl XdpSocket for SliceSocket {
     fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> {
-        self.frames.drain(..).collect()
+        self.templates.clone()
     }
 
-    fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
-        self.sent.clear();
-        for (off, len) in offsets.iter().cloned() {
-            let slice = &buf[off..off+len];
-            self.sent.push(slice.to_vec().into_boxed_slice());
+    fn poll_slices(&mut self, _max: usize, ring: &mut SliceRing) -> usize {
+        ring.clear();
+        for template in &self.templates {
+            let idx = ring.claim();
+            let slot = ring.slot_mut(idx);
+            let len = template.len().min(slot.len());
+            slot[..len].copy_from_slice(&template[..len]);
+            ring.set_len(idx, len);
+            ring.active.push(idx);
         }
+        ring.active.len()
+    }
+
+    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }
@@ -89,12 +95,14 @@ fn build_forwarder() -> Forwarder {
 struct DatapathFixture {
     forwarder: Forwarder,
     templates: Vec<Vec<u8>>,
-    socket: MockSocket,
+    socket: SliceSocket,
+    ring: SliceRing,
 }
 
 impl DatapathFixture {
     fn new(packet_count: usize, payload_len: usize, miss: bool) -> Self {
         let forwarder = build_forwarder();
+        let packet_len = HEADER_SIZE + payload_len;
         let templates = (0..packet_count)
             .map(|seq| {
                 if miss {
@@ -104,18 +112,20 @@ impl DatapathFixture {
                 }
             })
             .collect::<Vec<_>>();
-        let socket = MockSocket::with_capacity(packet_count);
+        let socket = SliceSocket::with_capacity(packet_count);
+        let ring = SliceRing::new(packet_count * 4, packet_len);
 
         Self {
             forwarder,
             templates,
             socket,
+            ring,
         }
     }
 
     fn run(&mut self) {
         self.socket.reset(&self.templates);
-        self.forwarder.process_batch(&mut self.socket);
+        self.forwarder.process_batch_slices(&mut self.socket, &mut self.ring);
     }
 }
 
