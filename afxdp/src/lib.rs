@@ -1,8 +1,8 @@
 //! AF_XDP UMEM and socket abstractions.
 
-pub mod umem;
-pub mod socket;
 pub mod rings;
+pub mod socket;
+pub mod umem;
 
 pub use socket::{AfXdpSocket, MockSocket};
 

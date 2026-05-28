@@ -20,18 +20,25 @@ pub struct MockSocket {
 
 impl MockSocket {
     pub fn new(frames: Vec<Vec<u8>>) -> Self {
-        Self { frames: Arc::new(Mutex::new(frames)), sent: Arc::new(Mutex::new(Vec::new())) }
+        Self {
+            frames: Arc::new(Mutex::new(frames)),
+            sent: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
-    pub fn take_sent(&self) -> Vec<Vec<u8>> { std::mem::take(&mut self.sent.lock().unwrap()) }
+    pub fn take_sent(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.sent.lock().unwrap())
+    }
 }
 
 impl DatapathXdpSocket for MockSocket {
-    fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> { std::mem::take(&mut self.frames.lock().unwrap()) }
+    fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.frames.lock().unwrap())
+    }
     fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
         let mut out = Vec::with_capacity(offsets.len());
         for (off, len) in offsets.iter().cloned() {
-            out.push(buf[off..off+len].to_vec());
+            out.push(buf[off..off + len].to_vec());
         }
         *self.sent.lock().unwrap() = out;
         Ok(())
@@ -51,10 +58,10 @@ pub fn new_mock_socket(frames: Vec<Vec<u8>>) -> AfXdpSocket {
 #[cfg(feature = "real")]
 mod real {
     use super::*;
-    use crate::umem::Umem;
     use crate::rings::RingMmap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::umem::Umem;
     use std::os::unix::io::RawFd;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub struct RealSocket {
         ifname: String,
@@ -71,7 +78,12 @@ mod real {
     }
 
     impl RealSocket {
-        pub fn new(ifname: &str, queue_id: u32, umem_frame_size: usize, umem_pages: usize) -> Result<Self, AfXdpError> {
+        pub fn new(
+            ifname: &str,
+            queue_id: u32,
+            umem_frame_size: usize,
+            umem_pages: usize,
+        ) -> Result<Self, AfXdpError> {
             // Allocate UMEM backing region
             let umem = Umem::new(umem_frame_size * umem_pages, umem_frame_size)
                 .map_err(|e| AfXdpError::Init(format!("umem alloc: {}", e)))?;
@@ -80,15 +92,23 @@ mod real {
             const AF_XDP: libc::c_int = 44; // PF_XDP / AF_XDP
             let fd = unsafe { libc::socket(AF_XDP, libc::SOCK_RAW, 0) };
             if fd < 0 {
-                return Err(AfXdpError::Init(std::io::Error::last_os_error().to_string()));
+                return Err(AfXdpError::Init(
+                    std::io::Error::last_os_error().to_string(),
+                ));
             }
 
             // Resolve interface index
-            let ifc = std::ffi::CString::new(ifname).map_err(|e| AfXdpError::Init(e.to_string()))?;
+            let ifc =
+                std::ffi::CString::new(ifname).map_err(|e| AfXdpError::Init(e.to_string()))?;
             let ifindex = unsafe { libc::if_nametoindex(ifc.as_ptr()) };
             if ifindex == 0 {
-                unsafe { libc::close(fd); }
-                return Err(AfXdpError::Init(format!("if_nametoindex failed for {}", ifname)));
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(AfXdpError::Init(format!(
+                    "if_nametoindex failed for {}",
+                    ifname
+                )));
             }
 
             // Bind the socket to the interface/queue using sockaddr_xdp
@@ -118,7 +138,9 @@ mod real {
             };
             if ret < 0 {
                 let err = std::io::Error::last_os_error().to_string();
-                unsafe { libc::close(fd); }
+                unsafe {
+                    libc::close(fd);
+                }
                 return Err(AfXdpError::Init(format!("bind failed: {}", err)));
             }
 
@@ -154,13 +176,27 @@ mod real {
             };
             if rc < 0 {
                 let err = std::io::Error::last_os_error().to_string();
-                unsafe { libc::close(fd); }
-                return Err(AfXdpError::Init(format!("setsockopt(UmemReg) failed: {}", err)));
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(AfXdpError::Init(format!(
+                    "setsockopt(UmemReg) failed: {}",
+                    err
+                )));
             }
 
             // Query mmap offsets for rings using XDP_MMAP_OFFSETS
             const XDP_MMAP_OFFSETS: libc::c_int = 7;
-            let mut offs = crate::rings::XskMmapOffsets { rx:0, rx_desc:0, tx:0, tx_desc:0, fill:0, fill_desc:0, comp:0, comp_desc:0 };
+            let mut offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 0,
+                tx: 0,
+                tx_desc: 0,
+                fill: 0,
+                fill_desc: 0,
+                comp: 0,
+                comp_desc: 0,
+            };
             let mut optlen = std::mem::size_of::<XskMmapOffsets>() as libc::socklen_t;
             let rc2 = unsafe {
                 libc::getsockopt(
@@ -173,8 +209,13 @@ mod real {
             };
             if rc2 < 0 {
                 let err = std::io::Error::last_os_error().to_string();
-                unsafe { libc::close(fd); }
-                return Err(AfXdpError::Init(format!("getsockopt(MMAP_OFFSETS) failed: {}", err)));
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(AfXdpError::Init(format!(
+                    "getsockopt(MMAP_OFFSETS) failed: {}",
+                    err
+                )));
             }
 
             // mmap the combined area (RX/TX/FILL/COMP rings). The kernel exposes a single
@@ -193,7 +234,9 @@ mod real {
             };
             if map == libc::MAP_FAILED {
                 let err = std::io::Error::last_os_error().to_string();
-                unsafe { libc::close(fd); }
+                unsafe {
+                    libc::close(fd);
+                }
                 return Err(AfXdpError::Init(format!("mmap rings failed: {}", err)));
             }
 
@@ -202,16 +245,30 @@ mod real {
             // provide enqueue/dequeue helpers for RX/TX/FILL/COMP.
 
             let ring = unsafe { RingMmap::new(map, mmap_size, offs) };
-            Ok(RealSocket { ifname: ifname.to_string(), queue_id, fd, _umem: umem, ring_map_ptr: map, ring_map_size: mmap_size, mmap_offsets: Some(offs), ring: Some(ring), next_frame: AtomicUsize::new(0) })
+            Ok(RealSocket {
+                ifname: ifname.to_string(),
+                queue_id,
+                fd,
+                _umem: umem,
+                ring_map_ptr: map,
+                ring_map_size: mmap_size,
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+            })
         }
     }
 
     impl Drop for RealSocket {
         fn drop(&mut self) {
             if !self.ring_map_ptr.is_null() {
-                unsafe { libc::munmap(self.ring_map_ptr, self.ring_map_size); }
+                unsafe {
+                    libc::munmap(self.ring_map_ptr, self.ring_map_size);
+                }
             }
-            unsafe { libc::close(self.fd); }
+            unsafe {
+                libc::close(self.fd);
+            }
         }
     }
 
@@ -245,18 +302,24 @@ mod real {
             let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
             let frames = self._umem.len() / self._umem.frame_size();
             for (off, len) in offsets.iter().cloned() {
-                let slice = &buf[off..off+len];
+                let slice = &buf[off..off + len];
                 let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
                 let mem_off = idx * self._umem.frame_size();
                 unsafe {
                     let dst = self._umem.base_ptr().add(mem_off);
-                    std::ptr::copy_nonoverlapping(slice.as_ptr(), dst, std::cmp::min(slice.len(), self._umem.frame_size()));
+                    std::ptr::copy_nonoverlapping(
+                        slice.as_ptr(),
+                        dst,
+                        std::cmp::min(slice.len(), self._umem.frame_size()),
+                    );
                 }
                 addrs.push(mem_off as u64);
             }
 
             let pushed = ring.tx_push(&addrs);
-            if pushed == 0 { return Err(()); }
+            if pushed == 0 {
+                return Err(());
+            }
             Ok(())
         }
     }

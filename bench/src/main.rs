@@ -6,9 +6,7 @@ fn main() {
         let mebibytes_per_sec = sample.bytes_per_second() / (1024.0 * 1024.0);
         println!(
             "size={} avg_ns={:.2} throughput_mib_s={:.2}",
-            sample.size,
-            avg_ns,
-            mebibytes_per_sec,
+            sample.size, avg_ns, mebibytes_per_sec,
         );
     }
 

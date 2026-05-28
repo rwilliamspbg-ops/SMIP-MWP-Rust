@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use bench::alloc_and_fill;
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
 fn alloc_fill_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("alloc_and_fill");

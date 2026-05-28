@@ -225,41 +225,144 @@ By systematically targeting memory allocations, cache misses, and cryptographic 
 All metrics are backed by rigorous, automated Criterion microbenchmarks (`cargo bench`) running on release builds:
 
 ### Datapath Throughput (Packets / Second)
-* **Hit Path (16-pkt batch):** Scaled from **2.01 Mpps** (scaffold) ➡️ **2.49 Mpps** (+24%)
-* **Miss Path (16-pkt batch):** Scaled from **813 Kpps** (scaffold) ➡️ **2.18 Mpps** (**+168% / ~3× total improvement**)
+# SMIP-MWP Rust
 
-### Memory Copy Throughput (Alloc + Fill)
-* **64 KB Payloads:** Increased from **32.3 GiB/s** ➡️ **45.1 GiB/s** by correcting SIMD vectorization branches to properly fire AVX2 streaming stores.
-
-### Latency Reductions
-* **Session Lookup:** Plometed from **~500 ns to ~10 ns** (**50× faster**) by replacing heavy cryptographic hashing with a localized, low-overhead hashing strategy.
+Lightweight, high-performance Rust implementation of SMIP-MWP components (datapath, crypto, routing, AF_XDP integration and a minimal CLI). This README summarizes the current repository state, how to build and test the workspace locally, the benchmark harness, and licensing.
 
 ---
 
-## 🛠️ Key Engineering Wins & Optimization Strategy
+**Status:** Active development on `perf/param-sweep-routing` branch. Core crates build and unit-test in CI; benchmarks are exercised via the `bench` crate and GitHub Actions.
 
-### 1. Eliminating Per-Packet Heap Allocations (Zero-Alloc Hot Path)
-* **Single-Arena Send Buffer:** Replaced per-packet `Vec` allocations for outgoing packets with a single persistent arena (`Vec<u8>`). Packets are written into the arena, offsets are passed to the socket, and the arena buffer is reused across batches—eliminating allocator noise in flamegraphs.
-* **In-Place AEAD Encryption:** Shifted from standard `aead::encrypt` (which hid internal heap allocations) to `aead::encrypt_in_place`, writing the auth tag directly into the ciphertext buffer.
-* **Stack Allocation:** Hoisted HKDF info concatenation out of the heap by swapping dynamic vectors for fixed-size, stack-allocated `[u8; 256]` arrays during session derivation.
-
-### 2. Zero-Copy Header Parsing
-* Implemented a lifetime-tracked `HeaderViewRef<'a>` in the network wire crate. This allowed the hot path to read incoming fields directly out of the raw packet buffer, completely erasing a 96-byte struct copy and 7 distinct `copy_from_slice` operations per packet.
-
-### 3. Algorithmic & Cryptographic Right-Sizing
-* **Algorithmic Shift:** Discovered the routing table was cloning and sorting a `Vec` on every single write operation. Replaced the architecture with a `BTreeMap`-backed routing table, guaranteeing $O(\log n)$ writes with zero extra allocations.
-* **Hashing Optimization:** Identified that executing a full SHA-256 hash inside `predictive_next_hop` on every route miss and `derive_cache_key()` on every session lookup was choking the CPU. Swapped these out for a stable `DefaultHasher` (SipHash), safely reclaiming massive execution cycles without compromising necessary distribution.
-
-### 4. SIMD Alignment & Branch Profiling
-* Fixed an unaligned outer guard loop condition that was preventing the hardware from utilizing AVX2 streaming-store branches on large payload fills, unlocking an extra **12.8 GiB/s** of memory bandwidth.
+**License (short):** This repository is released under the GNU Affero General Public License v3 (AGPL-3.0). See [LICENSE](LICENSE) for the full text and obligations.
 
 ---
 
-## 💻 Technical Stack & Code Hygiene
-* **Language:** Stable Rust (2021 Edition)
-* **Crates Profiled:** `crypto` (AES-256-GCM / ChaCha20Poly1305), `datapath`, `afxdp`, `routing`, `wire`
-* **Tooling:** Criterion (Microbenchmarking), `perf` (System profiling/Flamegraphs), Python (Data aggregation/Harness analysis)
-* **Code Quality:** Clean compilation across the entire workspace with **zero warnings** under strict `-D warnings` Clippy lints.
-## Sponsorship
+**Repository layout (top-level crates):**
 
-Support this work via GitHub Sponsors: https://github.com/sponsors/rwilliamspbg-ops
+- `crypto/` — key exchange, session derivation, AEAD utilities
+- `datapath/` — forwarding hot path and datapath tests
+- `afxdp/` — AF_XDP ring buffer integration and mocks
+- `routing/` — route table and predictive routing implementations
+- `bench/` — Criterion microbench harness and smoke-run utilities
+- `cli/` — binary entrypoint(s)
+- `wire/` — packet header marshal/parse and zero-copy views
+- `tools/` — bench harness scripts, plotting and post-processing utilities
+
+---
+
+**Quick start (developer machine)**
+
+1. Install Rust toolchain (stable):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustup update stable
+```
+
+2. Clone and build the workspace:
+
+```sh
+git clone https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust.git
+cd SMIP-MWP-Rust
+cargo build --workspace --release
+```
+
+3. Run tests (unit + integration):
+
+```sh
+cargo test --workspace --all-targets
+```
+
+Notes:
+- Use `--workspace` to operate across all crates.
+- Some integration tests and AF_XDP examples require elevated privileges or kernel support.
+
+---
+
+**Benchmarks & harness**
+
+Microbenchmarks use Criterion and are housed in the `bench` crate. A small harness under `tools/bench_harness` automates strategy sweeps and CSV output.
+
+- Run Criterion benches:
+
+```sh
+cargo bench --manifest-path bench/Cargo.toml
+```
+
+- Local harness (smoke):
+
+```sh
+cargo build -p bench --release
+./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv
+```
+
+- Routing miss sweep (example):
+
+```sh
+chmod +x tools/bench_harness/run_routing_miss_sweep.sh
+./tools/bench_harness/run_routing_miss_sweep.sh routing_miss_sweep.csv 10
+python3 tools/bench_harness/plot_routing_miss_sweep.py routing_miss_sweep.csv routing_miss_sweep.svg
+```
+
+For reproducible CI artifacts, the repo uses GitHub Actions workflows that build and upload CSV/SVG outputs.
+
+---
+
+**Development tips & common commands**
+
+- Build and run the CLI (binary name may vary):
+
+```sh
+cargo run -p cli --release -- <cli-args>
+```
+
+- Run the smoke harness used by CI:
+
+```sh
+cargo run --release -p bench
+```
+
+- Run clippy with strict lints:
+
+```sh
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+---
+
+**Continuous integration**
+
+The `ci.yml` workflow runs on push and PRs and executes (roughly):
+
+1. `cargo build --release --workspace`
+2. `cargo test --workspace --all-targets`
+3. `cargo clippy --workspace --all-targets -- -D warnings`
+4. smoke run of the bench harness (`cargo run -p bench`)
+
+Caching is configured for Cargo build artifacts to keep CI fast.
+
+---
+
+**License and distribution**
+
+- This repository is distributed under the GNU Affero General Public License v3 (AGPL-3.0). The full license text is available in [LICENSE](LICENSE).
+- If you need a different license clarification (for example: dual-licensing, third-party subcomponents under different terms, or permissive licensing for specific crates), tell me which crates or files require special treatment and I will update this README and add `LICENSE-<crate>.md` files as needed.
+
+---
+
+**Where to look next**
+
+- Tests and examples: see `datapath/`, `crypto/`, and `afxdp/` for unit and integration tests.
+- Bench scripts and plots: `tools/bench_harness/` and `docs/perf/`.
+- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+---
+
+If you'd like, I can:
+
+- add a short `README` per crate with crate-specific run/test examples,
+- add an abbreviated `LICENSE-summary.md` that lists license for each crate/file,
+- update the GitHub Actions badges in the top-level README to match the default branch.
+
+Please tell me which of these follow-ups you'd like me to do next.

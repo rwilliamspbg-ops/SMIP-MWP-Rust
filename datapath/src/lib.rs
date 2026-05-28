@@ -1,16 +1,16 @@
 use crypto::session::{HybridSession, SessionError, TAG_SIZE};
-#[cfg(target_arch = "x86_64")]
-use std::is_x86_feature_detected;
+use rayon::prelude::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
-use rayon::prelude::*;
+#[cfg(target_arch = "x86_64")]
+use std::is_x86_feature_detected;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Application-level processed packet counter (samples per-second externally)
 pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 use routing::Table;
-use wire::{HeaderViewRef, HEADER_SIZE};
 use std::convert::TryInto;
+use wire::{HeaderViewRef, HEADER_SIZE};
 
 const PARALLEL_BATCH_THRESHOLD: usize = 1024;
 
@@ -45,7 +45,13 @@ impl Forwarder {
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
         let session = HybridSession::new(&session_secret, &session_info).ok();
-        Self { routes, session, arena: Vec::new(), ciphertext: Vec::new(), offsets: Vec::new() }
+        Self {
+            routes,
+            session,
+            arena: Vec::new(),
+            ciphertext: Vec::new(),
+            offsets: Vec::new(),
+        }
     }
 
     fn handle_packet(&mut self, pkt: &[u8], use_avx2: bool, stats: &mut ForwarderStats) -> bool {
@@ -58,7 +64,11 @@ impl Forwarder {
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
-            if self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
+            if self
+                .routes
+                .lookup_or_predict(src_id, dst_id, flow_label)
+                .is_some()
+            {
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
@@ -81,7 +91,8 @@ impl Forwarder {
                                             let start_index = self.arena.len();
                                             self.arena.resize(start_index + ct_len, 0);
                                             unsafe {
-                                                let dst_ptr = self.arena[start_index..].as_mut_ptr();
+                                                let dst_ptr =
+                                                    self.arena[start_index..].as_mut_ptr();
                                                 let src_ptr = self.ciphertext.as_ptr();
                                                 copy_avx2(dst_ptr, src_ptr, ct_len);
                                             }
@@ -136,7 +147,10 @@ impl Forwarder {
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
-            if routes.lookup_or_predict(src_id, dst_id, flow_label).is_some() {
+            if routes
+                .lookup_or_predict(src_id, dst_id, flow_label)
+                .is_some()
+            {
                 if let Some(session) = session {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
@@ -171,7 +185,11 @@ impl Forwarder {
                                     bytes.extend_from_slice(&ciphertext);
                                 }
 
-                                return PacketOutput { bytes, encrypted: true, route_miss: false };
+                                return PacketOutput {
+                                    bytes,
+                                    encrypted: true,
+                                    route_miss: false,
+                                };
                             }
                             Err(SessionError::AuthenticationFailed)
                             | Err(SessionError::PayloadTooLarge)
@@ -179,19 +197,35 @@ impl Forwarder {
                             | Err(SessionError::AeadError)
                             | Err(SessionError::BufferTooSmall)
                             | Err(SessionError::InsufficientCapacity) => {
-                                return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                                return PacketOutput {
+                                    bytes: pkt,
+                                    encrypted: false,
+                                    route_miss: true,
+                                };
                             }
                         }
                     } else if payload_len > 0 {
-                        return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                        return PacketOutput {
+                            bytes: pkt,
+                            encrypted: false,
+                            route_miss: true,
+                        };
                     }
                 }
             } else {
-                return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                return PacketOutput {
+                    bytes: pkt,
+                    encrypted: false,
+                    route_miss: true,
+                };
             }
         }
 
-        PacketOutput { bytes: pkt, encrypted: false, route_miss: false }
+        PacketOutput {
+            bytes: pkt,
+            encrypted: false,
+            route_miss: false,
+        }
     }
 
     fn append_outputs(&mut self, outputs: Vec<PacketOutput>, received: usize) -> ForwarderStats {
@@ -203,7 +237,12 @@ impl Forwarder {
             ..ForwarderStats::default()
         };
 
-        self.arena.reserve(outputs.iter().map(|output| output.bytes.len()).sum::<usize>());
+        self.arena.reserve(
+            outputs
+                .iter()
+                .map(|output| output.bytes.len())
+                .sum::<usize>(),
+        );
         self.offsets.reserve(outputs.len());
 
         for output in outputs {
@@ -241,7 +280,8 @@ impl Forwarder {
         if received < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
             self.arena.clear();
             self.offsets.clear();
-            self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+            self.arena
+                .reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
             let mut stats = ForwarderStats {
                 received,
                 ..ForwarderStats::default()
@@ -282,7 +322,11 @@ impl Forwarder {
         stats
     }
 
-    pub fn process_batch_slices(&mut self, sock: &mut dyn XdpSocket, ring: &mut socket::SliceRing) -> ForwarderStats {
+    pub fn process_batch_slices(
+        &mut self,
+        sock: &mut dyn XdpSocket,
+        ring: &mut socket::SliceRing,
+    ) -> ForwarderStats {
         let received = sock.poll_slices(64, ring);
         self.arena.clear();
         self.offsets.clear();
@@ -298,7 +342,12 @@ impl Forwarder {
         }
 
         self.arena.reserve(
-            ring.active.iter().take(received).map(|&idx| ring.slot(idx).len()).sum::<usize>() + received * TAG_SIZE,
+            ring.active
+                .iter()
+                .take(received)
+                .map(|&idx| ring.slot(idx).len())
+                .sum::<usize>()
+                + received * TAG_SIZE,
         );
 
         #[cfg(target_arch = "x86_64")]
@@ -340,30 +389,30 @@ unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
         // Streaming stores for large, aligned transfers — avoids cache pollution.
         // Threshold matches the outer >= 4096 guard, so this branch actually fires.
         if len >= 4096 && dst_aligned {
-                while off + 128 <= len {
-                let v0 = _mm256_loadu_si256(src.add(off)       as *const __m256i);
-                let v1 = _mm256_loadu_si256(src.add(off + 32)  as *const __m256i);
-                let v2 = _mm256_loadu_si256(src.add(off + 64)  as *const __m256i);
-                let v3 = _mm256_loadu_si256(src.add(off + 96)  as *const __m256i);
-                _mm256_stream_si256(dst.add(off)       as *mut __m256i, v0);
-                _mm256_stream_si256(dst.add(off + 32)  as *mut __m256i, v1);
-                _mm256_stream_si256(dst.add(off + 64)  as *mut __m256i, v2);
-                _mm256_stream_si256(dst.add(off + 96)  as *mut __m256i, v3);
-                        off += 128;
-                    }
-                    _mm_sfence();
-                }
+            while off + 128 <= len {
+                let v0 = _mm256_loadu_si256(src.add(off) as *const __m256i);
+                let v1 = _mm256_loadu_si256(src.add(off + 32) as *const __m256i);
+                let v2 = _mm256_loadu_si256(src.add(off + 64) as *const __m256i);
+                let v3 = _mm256_loadu_si256(src.add(off + 96) as *const __m256i);
+                _mm256_stream_si256(dst.add(off) as *mut __m256i, v0);
+                _mm256_stream_si256(dst.add(off + 32) as *mut __m256i, v1);
+                _mm256_stream_si256(dst.add(off + 64) as *mut __m256i, v2);
+                _mm256_stream_si256(dst.add(off + 96) as *mut __m256i, v3);
+                off += 128;
+            }
+            _mm_sfence();
+        }
 
         // Unrolled 128-byte vector copy for remainder (or all of a non-aligned buffer)
         while off + 128 <= len {
-            let v0 = _mm256_loadu_si256(src.add(off)       as *const __m256i);
-            let v1 = _mm256_loadu_si256(src.add(off + 32)  as *const __m256i);
-            let v2 = _mm256_loadu_si256(src.add(off + 64)  as *const __m256i);
-            let v3 = _mm256_loadu_si256(src.add(off + 96)  as *const __m256i);
-            _mm256_storeu_si256(dst.add(off)       as *mut __m256i, v0);
-            _mm256_storeu_si256(dst.add(off + 32)  as *mut __m256i, v1);
-            _mm256_storeu_si256(dst.add(off + 64)  as *mut __m256i, v2);
-            _mm256_storeu_si256(dst.add(off + 96)  as *mut __m256i, v3);
+            let v0 = _mm256_loadu_si256(src.add(off) as *const __m256i);
+            let v1 = _mm256_loadu_si256(src.add(off + 32) as *const __m256i);
+            let v2 = _mm256_loadu_si256(src.add(off + 64) as *const __m256i);
+            let v3 = _mm256_loadu_si256(src.add(off + 96) as *const __m256i);
+            _mm256_storeu_si256(dst.add(off) as *mut __m256i, v0);
+            _mm256_storeu_si256(dst.add(off + 32) as *mut __m256i, v1);
+            _mm256_storeu_si256(dst.add(off + 64) as *mut __m256i, v2);
+            _mm256_storeu_si256(dst.add(off + 96) as *mut __m256i, v3);
             off += 128;
         }
 
@@ -458,22 +507,29 @@ mod tests {
     use super::*;
     use crate::socket::XdpSocket;
     use routing::{RouteEntry, Table};
-    use wire::Header;
     use std::time::SystemTime;
+    use wire::Header;
 
     struct MockSocket {
         frames: Vec<Vec<u8>>,
         sent: Vec<Box<[u8]>>,
     }
     impl MockSocket {
-        fn new(frames: Vec<Vec<u8>>) -> Self { Self { frames, sent: Vec::new() } }
+        fn new(frames: Vec<Vec<u8>>) -> Self {
+            Self {
+                frames,
+                sent: Vec::new(),
+            }
+        }
     }
     impl XdpSocket for MockSocket {
-        fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> { std::mem::take(&mut self.frames) }
+        fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> {
+            std::mem::take(&mut self.frames)
+        }
         fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
             self.sent.clear();
             for (off, len) in offsets.iter().cloned() {
-                let slice = &buf[off..off+len];
+                let slice = &buf[off..off + len];
                 self.sent.push(slice.to_vec().into_boxed_slice());
             }
             Ok(())
@@ -484,16 +540,24 @@ mod tests {
     fn forwarder_encrypts_and_sends() {
         let rt = Table::new();
         rt.update_route(RouteEntry {
-            dest_id: [2u8;32],
-            next_hop_id: [3u8;32],
+            dest_id: [2u8; 32],
+            next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
         });
         let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
-        let h = Header { src_id: [1u8;32], dst_id: [2u8;32], flow_label: 0x1, seq_num: 1, session_id: [0u8;16], flags: 0, length: 4 };
+        let h = Header {
+            src_id: [1u8; 32],
+            dst_id: [2u8; 32],
+            flow_label: 0x1,
+            seq_num: 1,
+            session_id: [0u8; 16],
+            flags: 0,
+            length: 4,
+        };
         h.marshal_into(&mut buf).unwrap();
-        buf[wire::HEADER_SIZE..wire::HEADER_SIZE+4].copy_from_slice(&[0x1,0x2,0x3,0x4]);
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
         let mut sock = MockSocket::new(vec![buf]);
         let stats = fwd.process_batch(&mut sock);
         assert_eq!(stats.received, 1);
@@ -505,16 +569,24 @@ mod tests {
     fn forwarder_rejects_truncated_payloads() {
         let rt = Table::new();
         rt.update_route(RouteEntry {
-            dest_id: [2u8;32],
-            next_hop_id: [3u8;32],
+            dest_id: [2u8; 32],
+            next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
         });
         let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
-        let h = Header { src_id: [1u8;32], dst_id: [2u8;32], flow_label: 0x1, seq_num: 1, session_id: [0u8;16], flags: 0, length: 8 };
+        let h = Header {
+            src_id: [1u8; 32],
+            dst_id: [2u8; 32],
+            flow_label: 0x1,
+            seq_num: 1,
+            session_id: [0u8; 16],
+            flags: 0,
+            length: 8,
+        };
         h.marshal_into(&mut buf).unwrap();
-        buf[wire::HEADER_SIZE..wire::HEADER_SIZE+4].copy_from_slice(&[0x1,0x2,0x3,0x4]);
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
         let mut sock = MockSocket::new(vec![buf]);
         let stats = fwd.process_batch(&mut sock);
         assert_eq!(stats.received, 1);

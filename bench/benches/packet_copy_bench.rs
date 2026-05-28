@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, black_box, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 fn build_packet(size: usize) -> Vec<u8> {
     let mut packet = vec![0u8; size];
@@ -38,25 +38,37 @@ fn packet_copy_benchmark(c: &mut Criterion) {
         let packet = build_packet(size);
 
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::new("clone_to_vec", size), &packet, |b, packet| {
-            b.iter(|| {
-                black_box(clone_packet(black_box(packet)));
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("clone_to_vec", size),
+            &packet,
+            |b, packet| {
+                b.iter(|| {
+                    black_box(clone_packet(black_box(packet)));
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("extend_from_slice", size), &packet, |b, packet| {
-            let mut arena = Vec::with_capacity(size);
-            b.iter(|| {
-                copy_into_reused_arena(&mut arena, black_box(packet));
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("extend_from_slice", size),
+            &packet,
+            |b, packet| {
+                let mut arena = Vec::with_capacity(size);
+                b.iter(|| {
+                    copy_into_reused_arena(&mut arena, black_box(packet));
+                });
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("copy_nonoverlapping", size), &packet, |b, packet| {
-            let mut arena = Vec::with_capacity(size);
-            b.iter(|| {
-                copy_into_resized_arena(&mut arena, black_box(packet));
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("copy_nonoverlapping", size),
+            &packet,
+            |b, packet| {
+                let mut arena = Vec::with_capacity(size);
+                b.iter(|| {
+                    copy_into_resized_arena(&mut arena, black_box(packet));
+                });
+            },
+        );
     }
 
     group.finish();

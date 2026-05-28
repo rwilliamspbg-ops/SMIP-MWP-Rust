@@ -4,22 +4,15 @@ pub mod session;
 
 pub use kex::HybridKEX;
 pub use security_hardening::{
-    check_sequence_number_overflow,
-    increment_global_seq,
-    DoSThrottle,
-    HybridKEXState,
-    SecurityConfig,
-    SessionState,
-    DEFAULT_SECURITY_CONFIG,
-    HANDSHAKE_TIMEOUT,
-    MAX_REPLAY_WINDOW,
+    check_sequence_number_overflow, increment_global_seq, DoSThrottle, HybridKEXState,
+    SecurityConfig, SessionState, DEFAULT_SECURITY_CONFIG, HANDSHAKE_TIMEOUT, MAX_REPLAY_WINDOW,
 };
 
 #[cfg(test)]
 mod tests {
-    use crate::{DoSThrottle, HybridKEXState};
     use super::kex::*;
     use super::session::*;
+    use crate::{DoSThrottle, HybridKEXState};
 
     #[test]
     fn kex_and_session_flow() {

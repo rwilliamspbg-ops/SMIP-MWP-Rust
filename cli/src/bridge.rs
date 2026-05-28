@@ -123,25 +123,33 @@ impl ControlRequest {
         if self.runtime_config.batch_size == 0 {
             return Err("bridge: runtime_config.batch_size must be positive".into());
         }
-        if let (Some(min), Some(max)) = (self.runtime_config.batch_size_min, self.runtime_config.batch_size_max) {
+        if let (Some(min), Some(max)) = (
+            self.runtime_config.batch_size_min,
+            self.runtime_config.batch_size_max,
+        ) {
             if min > max {
-                return Err("bridge: runtime_config.batch_size_min cannot exceed batch_size_max".into());
+                return Err(
+                    "bridge: runtime_config.batch_size_min cannot exceed batch_size_max".into(),
+                );
             }
         }
         Ok(())
     }
 }
 
-impl FeatureFlags {
-}
+impl FeatureFlags {}
 
 impl SessionUpdate {
     pub fn secret_bytes(&self) -> Option<Vec<u8>> {
-        self.secret.as_ref().and_then(|value| general_purpose::STANDARD.decode(value).ok())
+        self.secret
+            .as_ref()
+            .and_then(|value| general_purpose::STANDARD.decode(value).ok())
     }
 
     pub fn info_bytes(&self) -> Option<Vec<u8>> {
-        self.info.as_ref().and_then(|value| general_purpose::STANDARD.decode(value).ok())
+        self.info
+            .as_ref()
+            .and_then(|value| general_purpose::STANDARD.decode(value).ok())
     }
 }
 
@@ -169,10 +177,10 @@ fn bridge_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidates = [
         manifest_dir.join("..").join("..").join("bridge"), // local dev container layout
-        manifest_dir.join("..").join("bridge"),              // repo root layout
-        manifest_dir.join("bridge"),                          // crate-local layout
-        PathBuf::from("/workspaces/bridge"),                  // Codespaces/workspace root
-        PathBuf::from("bridge"),                              // fallback relative path
+        manifest_dir.join("..").join("bridge"),            // repo root layout
+        manifest_dir.join("bridge"),                       // crate-local layout
+        PathBuf::from("/workspaces/bridge"),               // Codespaces/workspace root
+        PathBuf::from("bridge"),                           // fallback relative path
     ];
 
     for cand in &candidates {
@@ -212,9 +220,14 @@ mod tests {
         let schema_path = bridge_root().join("bridge_contract.schema.json");
         let schema_data = fs::read_to_string(&schema_path).expect("read schema");
         let schema: Value = serde_json::from_str(&schema_data).expect("parse schema");
-        assert_eq!(schema.get("title").and_then(Value::as_str), Some("Mohawk Go-Rust Bridge Contract"));
+        assert_eq!(
+            schema.get("title").and_then(Value::as_str),
+            Some("Mohawk Go-Rust Bridge Contract")
+        );
 
-        let fixture_path = bridge_root().join("examples").join("control_request.example.json");
+        let fixture_path = bridge_root()
+            .join("examples")
+            .join("control_request.example.json");
         let fixture_data = fs::read_to_string(&fixture_path).expect("read example");
         let request: ControlRequest = serde_json::from_str(&fixture_data).expect("parse example");
         request.validate().expect("validate example");
@@ -230,7 +243,8 @@ mod tests {
     fn bridge_contract_manifest_matches_artifacts() {
         let manifest_path = bridge_root().join("bridge_contract.manifest.json");
         let manifest_data = fs::read_to_string(&manifest_path).expect("read manifest");
-        let manifest: BridgeManifest = serde_json::from_str(&manifest_data).expect("parse manifest");
+        let manifest: BridgeManifest =
+            serde_json::from_str(&manifest_data).expect("parse manifest");
 
         assert_eq!(manifest.contract, "Mohawk Go-Rust Bridge Contract");
         assert_eq!(manifest.version, "bridge_contract.manifest.v1");

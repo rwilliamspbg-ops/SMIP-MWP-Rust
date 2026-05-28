@@ -40,8 +40,6 @@ impl Header {
         }
     }
 
-    
-
     pub fn marshal_into(&self, buf: &mut [u8]) -> Result<(), ErrBufferTooSmall> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
@@ -65,7 +63,8 @@ impl Header {
         h.dst_id.copy_from_slice(&buf[DST_OFFSET..DST_OFFSET + 32]);
         h.flow_label = u32::from_be_bytes(buf[FLOW_OFFSET..FLOW_OFFSET + 4].try_into().unwrap());
         h.seq_num = u64::from_be_bytes(buf[SEQ_OFFSET..SEQ_OFFSET + 8].try_into().unwrap());
-        h.session_id.copy_from_slice(&buf[SESSION_OFFSET..SESSION_OFFSET + 16]);
+        h.session_id
+            .copy_from_slice(&buf[SESSION_OFFSET..SESSION_OFFSET + 16]);
         h.flags = u16::from_be_bytes(buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].try_into().unwrap());
         h.length = u16::from_be_bytes(buf[LEN_OFFSET..LEN_OFFSET + 2].try_into().unwrap());
         Ok(h)
@@ -77,7 +76,9 @@ impl Header {
 }
 
 impl Default for Header {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Zero-copy immutable view into a packet buffer — no field copies, no
@@ -94,11 +95,26 @@ impl<'a> HeaderViewRef<'a> {
         }
         Ok(Self { buf })
     }
-    #[inline] pub fn src_id(&self)    -> &[u8] { &self.buf[SRC_OFFSET..SRC_OFFSET+32] }
-    #[inline] pub fn dst_id(&self)    -> &[u8] { &self.buf[DST_OFFSET..DST_OFFSET+32] }
-    #[inline] pub fn flow_label(&self) -> u32  { u32::from_be_bytes(self.buf[FLOW_OFFSET..FLOW_OFFSET+4].try_into().unwrap()) }
-    #[inline] pub fn seq_num(&self)    -> u64  { u64::from_be_bytes(self.buf[SEQ_OFFSET..SEQ_OFFSET+8].try_into().unwrap()) }
-    #[inline] pub fn length(&self)     -> u16  { u16::from_be_bytes(self.buf[LEN_OFFSET..LEN_OFFSET+2].try_into().unwrap()) }
+    #[inline]
+    pub fn src_id(&self) -> &[u8] {
+        &self.buf[SRC_OFFSET..SRC_OFFSET + 32]
+    }
+    #[inline]
+    pub fn dst_id(&self) -> &[u8] {
+        &self.buf[DST_OFFSET..DST_OFFSET + 32]
+    }
+    #[inline]
+    pub fn flow_label(&self) -> u32 {
+        u32::from_be_bytes(self.buf[FLOW_OFFSET..FLOW_OFFSET + 4].try_into().unwrap())
+    }
+    #[inline]
+    pub fn seq_num(&self) -> u64 {
+        u64::from_be_bytes(self.buf[SEQ_OFFSET..SEQ_OFFSET + 8].try_into().unwrap())
+    }
+    #[inline]
+    pub fn length(&self) -> u16 {
+        u16::from_be_bytes(self.buf[LEN_OFFSET..LEN_OFFSET + 2].try_into().unwrap())
+    }
 }
 
 pub struct HeaderView<'a> {
@@ -112,22 +128,50 @@ impl<'a> HeaderView<'a> {
         }
         Ok(Self { buf })
     }
-    pub fn src_id(&self) -> &[u8] { &self.buf[SRC_OFFSET..SRC_OFFSET+32] }
-    pub fn dst_id(&self) -> &[u8] { &self.buf[DST_OFFSET..DST_OFFSET+32] }
-    pub fn flow_label(&self) -> u32 { u32::from_be_bytes(self.buf[FLOW_OFFSET..FLOW_OFFSET+4].try_into().unwrap()) }
-    pub fn seq_num(&self) -> u64 { u64::from_be_bytes(self.buf[SEQ_OFFSET..SEQ_OFFSET+8].try_into().unwrap()) }
-    pub fn session_id(&self) -> &[u8] { &self.buf[SESSION_OFFSET..SESSION_OFFSET+16] }
-    pub fn flags(&self) -> u16 { u16::from_be_bytes(self.buf[FLAGS_OFFSET..FLAGS_OFFSET+2].try_into().unwrap()) }
-    pub fn length(&self) -> u16 { u16::from_be_bytes(self.buf[LEN_OFFSET..LEN_OFFSET+2].try_into().unwrap()) }
+    pub fn src_id(&self) -> &[u8] {
+        &self.buf[SRC_OFFSET..SRC_OFFSET + 32]
+    }
+    pub fn dst_id(&self) -> &[u8] {
+        &self.buf[DST_OFFSET..DST_OFFSET + 32]
+    }
+    pub fn flow_label(&self) -> u32 {
+        u32::from_be_bytes(self.buf[FLOW_OFFSET..FLOW_OFFSET + 4].try_into().unwrap())
+    }
+    pub fn seq_num(&self) -> u64 {
+        u64::from_be_bytes(self.buf[SEQ_OFFSET..SEQ_OFFSET + 8].try_into().unwrap())
+    }
+    pub fn session_id(&self) -> &[u8] {
+        &self.buf[SESSION_OFFSET..SESSION_OFFSET + 16]
+    }
+    pub fn flags(&self) -> u16 {
+        u16::from_be_bytes(self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].try_into().unwrap())
+    }
+    pub fn length(&self) -> u16 {
+        u16::from_be_bytes(self.buf[LEN_OFFSET..LEN_OFFSET + 2].try_into().unwrap())
+    }
 
     // Setters
-    pub fn set_src_id(&mut self, id: [u8;32]) { self.buf[SRC_OFFSET..SRC_OFFSET+32].copy_from_slice(&id); }
-    pub fn set_dst_id(&mut self, id: [u8;32]) { self.buf[DST_OFFSET..DST_OFFSET+32].copy_from_slice(&id); }
-    pub fn set_flow_label(&mut self, v: u32) { self.buf[FLOW_OFFSET..FLOW_OFFSET+4].copy_from_slice(&v.to_be_bytes()); }
-    pub fn set_seq_num(&mut self, v: u64) { self.buf[SEQ_OFFSET..SEQ_OFFSET+8].copy_from_slice(&v.to_be_bytes()); }
-    pub fn set_session_id(&mut self, id: [u8;16]) { self.buf[SESSION_OFFSET..SESSION_OFFSET+16].copy_from_slice(&id); }
-    pub fn set_flags(&mut self, v: u16) { self.buf[FLAGS_OFFSET..FLAGS_OFFSET+2].copy_from_slice(&v.to_be_bytes()); }
-    pub fn set_length(&mut self, v: u16) { self.buf[LEN_OFFSET..LEN_OFFSET+2].copy_from_slice(&v.to_be_bytes()); }
+    pub fn set_src_id(&mut self, id: [u8; 32]) {
+        self.buf[SRC_OFFSET..SRC_OFFSET + 32].copy_from_slice(&id);
+    }
+    pub fn set_dst_id(&mut self, id: [u8; 32]) {
+        self.buf[DST_OFFSET..DST_OFFSET + 32].copy_from_slice(&id);
+    }
+    pub fn set_flow_label(&mut self, v: u32) {
+        self.buf[FLOW_OFFSET..FLOW_OFFSET + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    pub fn set_seq_num(&mut self, v: u64) {
+        self.buf[SEQ_OFFSET..SEQ_OFFSET + 8].copy_from_slice(&v.to_be_bytes());
+    }
+    pub fn set_session_id(&mut self, id: [u8; 16]) {
+        self.buf[SESSION_OFFSET..SESSION_OFFSET + 16].copy_from_slice(&id);
+    }
+    pub fn set_flags(&mut self, v: u16) {
+        self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&v.to_be_bytes());
+    }
+    pub fn set_length(&mut self, v: u16) {
+        self.buf[LEN_OFFSET..LEN_OFFSET + 2].copy_from_slice(&v.to_be_bytes());
+    }
 }
 
 #[cfg(test)]
@@ -135,14 +179,14 @@ mod tests {
     use super::*;
     use rand::RngCore;
 
-    fn random32() -> [u8;32] {
-        let mut b = [0u8;32];
+    fn random32() -> [u8; 32] {
+        let mut b = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut b);
         b
     }
 
-    fn random16() -> [u8;16] {
-        let mut b = [0u8;16];
+    fn random16() -> [u8; 16] {
+        let mut b = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut b);
         b
     }

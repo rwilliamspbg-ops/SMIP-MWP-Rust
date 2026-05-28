@@ -6,14 +6,14 @@ use datapath::Forwarder;
 use routing::{RouteEntry, Table};
 use std::env;
 use std::fs;
-use std::time::SystemTime;
-use wire::{Header, HEADER_SIZE};
-use std::sync::atomic::Ordering;
-use std::thread;
-use std::time::Duration;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use std::time::SystemTime;
+use wire::{Header, HEADER_SIZE};
 
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
@@ -64,7 +64,11 @@ fn build_forwarder_from_request(request: &ControlRequest) -> Forwarder {
 
     let mut secret = vec![0x42; 32];
     let mut info = b"cli-demo".to_vec();
-    if let Some(session_update) = request.session_updates.iter().find(|update| update.action == "add") {
+    if let Some(session_update) = request
+        .session_updates
+        .iter()
+        .find(|update| update.action == "add")
+    {
         if let Some(provided_secret) = session_update.secret_bytes() {
             if !provided_secret.is_empty() {
                 secret = provided_secret;
@@ -103,9 +107,7 @@ fn run_pinned_workers(request: &ControlRequest) -> datapath::ForwarderStats {
         let stats = forwarder.process_batch(&mut sock);
         eprintln!(
             "worker {} pinned to core {} processed {} packets",
-            assignment.worker_index,
-            assignment.core_id,
-            stats.received
+            assignment.worker_index, assignment.core_id, stats.received
         );
         stats
     });
@@ -124,24 +126,40 @@ fn run_pinned_workers(request: &ControlRequest) -> datapath::ForwarderStats {
 
 fn read_bridge_request(args: &[String]) -> Result<Option<ControlRequest>, String> {
     if let Some(index) = args.iter().position(|arg| arg == "--bridge-request") {
-        let path = args.get(index + 1).ok_or_else(|| "missing value for --bridge-request".to_string())?;
+        let path = args
+            .get(index + 1)
+            .ok_or_else(|| "missing value for --bridge-request".to_string())?;
         let data = fs::read_to_string(path).map_err(|err| format!("read bridge request: {err}"))?;
-        let request: ControlRequest = serde_json::from_str(&data).map_err(|err| format!("parse bridge request: {err}"))?;
+        let request: ControlRequest =
+            serde_json::from_str(&data).map_err(|err| format!("parse bridge request: {err}"))?;
         return Ok(Some(request));
     }
 
     if let Ok(data) = env::var("MOHAWK_BRIDGE_REQUEST") {
-        let request: ControlRequest = serde_json::from_str(&data).map_err(|err| format!("parse bridge request: {err}"))?;
+        let request: ControlRequest =
+            serde_json::from_str(&data).map_err(|err| format!("parse bridge request: {err}"))?;
         return Ok(Some(request));
     }
 
     Ok(None)
 }
 
-fn render_telemetry(stats: datapath::ForwarderStats, request: Option<&ControlRequest>) -> TelemetryResponse {
-    let worker_count = request.map(|r| r.runtime_config.num_workers as usize).unwrap_or(0);
-    let queue_target = request.and_then(|r| r.runtime_config.fill_threshold).map(|value| value as usize);
-    let health_state = if stats.route_misses > 0 { "degraded" } else { "ok" }.to_string();
+fn render_telemetry(
+    stats: datapath::ForwarderStats,
+    request: Option<&ControlRequest>,
+) -> TelemetryResponse {
+    let worker_count = request
+        .map(|r| r.runtime_config.num_workers as usize)
+        .unwrap_or(0);
+    let queue_target = request
+        .and_then(|r| r.runtime_config.fill_threshold)
+        .map(|value| value as usize);
+    let health_state = if stats.route_misses > 0 {
+        "degraded"
+    } else {
+        "ok"
+    }
+    .to_string();
 
     TelemetryResponse {
         health_state,
@@ -186,8 +204,16 @@ fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let want_metrics = parse_flag(&args, "--metrics");
-    let metrics_socket = args.iter().position(|a| a == "--metrics-socket").and_then(|i| args.get(i+1)).cloned();
-    let metrics_http = args.iter().position(|a| a == "--metrics-http").and_then(|i| args.get(i+1)).cloned();
+    let metrics_socket = args
+        .iter()
+        .position(|a| a == "--metrics-socket")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let metrics_http = args
+        .iter()
+        .position(|a| a == "--metrics-http")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     if parse_flag(&args, "--help") || parse_flag(&args, "-h") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
@@ -216,25 +242,38 @@ fn main() {
             run_demo()
         };
         let telemetry = render_telemetry(stats, Some(request));
-        println!("bridge request accepted for iface {}", request.runtime_config.iface);
-        println!("bridge datapath initialized with {} route updates", request.route_updates.len());
-        println!("bridge worker count: {}", request.runtime_config.num_workers);
-        println!("{}", serde_json::to_string_pretty(&telemetry).expect("telemetry json"));
+        println!(
+            "bridge request accepted for iface {}",
+            request.runtime_config.iface
+        );
+        println!(
+            "bridge datapath initialized with {} route updates",
+            request.route_updates.len()
+        );
+        println!(
+            "bridge worker count: {}",
+            request.runtime_config.num_workers
+        );
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&telemetry).expect("telemetry json")
+        );
         return;
     }
 
     // metrics reporter: prints per-second pconf when requested. It reads and
     // resets the `datapath::PACKETS_PROCESSED` counter each second.
     if want_metrics {
-        thread::spawn(|| {
-            loop {
-                let now = std::time::SystemTime::now();
-                let secs = now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                let count = datapath::PACKETS_PROCESSED.swap(0, Ordering::Relaxed);
-                println!("{},{}", secs, count);
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-                thread::sleep(Duration::from_secs(1));
-            }
+        thread::spawn(|| loop {
+            let now = std::time::SystemTime::now();
+            let secs = now
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let count = datapath::PACKETS_PROCESSED.swap(0, Ordering::Relaxed);
+            println!("{},{}", secs, count);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            thread::sleep(Duration::from_secs(1));
         });
     }
 
@@ -248,17 +287,28 @@ fn main() {
             }
             let listener = match UnixListener::bind(&sock_path) {
                 Ok(l) => l,
-                Err(e) => { eprintln!("metrics socket bind: {}", e); return; }
+                Err(e) => {
+                    eprintln!("metrics socket bind: {}", e);
+                    return;
+                }
             };
             for stream in listener.incoming() {
                 match stream {
                     Ok(mut s) => {
                         let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                        let msg = format!("{{\"timestamp\":{},\"packets_processed\":{}}}\n", now, count);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let msg = format!(
+                            "{{\"timestamp\":{},\"packets_processed\":{}}}\n",
+                            now, count
+                        );
                         let _ = s.write_all(msg.as_bytes());
                     }
-                    Err(e) => { eprintln!("metrics socket accept: {}", e); }
+                    Err(e) => {
+                        eprintln!("metrics socket accept: {}", e);
+                    }
                 }
             }
         });
@@ -266,30 +316,30 @@ fn main() {
 
     if let Some(addr) = metrics_http {
         let bind_addr = addr.clone();
-        thread::spawn(move || {
-            match TcpListener::bind(&bind_addr) {
-                Ok(listener) => {
-                    for stream in listener.incoming() {
-                        match stream {
-                            Ok(mut s) => {
-                                let mut buf = [0u8; 1024];
-                                let _ = s.read(&mut buf);
-                                let req = String::from_utf8_lossy(&buf);
-                                if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
-                                    let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                                    let body = render_prometheus_metrics(count, unix_timestamp_secs());
-                                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
-                                    let _ = s.write_all(resp.as_bytes());
-                                } else {
-                                    let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-                                }
+        thread::spawn(move || match TcpListener::bind(&bind_addr) {
+            Ok(listener) => {
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(mut s) => {
+                            let mut buf = [0u8; 1024];
+                            let _ = s.read(&mut buf);
+                            let req = String::from_utf8_lossy(&buf);
+                            if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
+                                let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
+                                let body = render_prometheus_metrics(count, unix_timestamp_secs());
+                                let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+                                let _ = s.write_all(resp.as_bytes());
+                            } else {
+                                let _ = s.write_all(
+                                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                                );
                             }
-                            Err(e) => eprintln!("metrics http accept: {}", e),
                         }
+                        Err(e) => eprintln!("metrics http accept: {}", e),
                     }
                 }
-                Err(e) => eprintln!("metrics http bind {}: {}", bind_addr, e),
             }
+            Err(e) => eprintln!("metrics http bind {}: {}", bind_addr, e),
         });
     }
 
