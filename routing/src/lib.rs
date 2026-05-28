@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use ahash::{AHashMap, AHasher};
 use std::time::SystemTime;
-use crossbeam_epoch::{self as epoch, Atomic, Owned};
 use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicU64;
 use std::cell::RefCell;
@@ -14,6 +13,10 @@ pub struct RouteEntry {
     pub next_hop_id: [u8;32],
     pub metric: i32,
     pub last_seen: SystemTime,
+}
+
+impl Default for Table {
+    fn default() -> Self { Self::new() }
 }
 
 #[derive(Debug)]
@@ -30,7 +33,6 @@ struct TableInner {
 }
 
 const HOT_CACHE_SIZE: usize = 16;
-const HOT_CACHE_PROBE: usize = 4;
 const FAST_SHARDS: usize = 16;
 
 static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
@@ -43,7 +45,9 @@ struct CacheEntry {
 }
 
 thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
     static HOT_CACHE: RefCell<[Option<CacheEntry>; HOT_CACHE_SIZE]> = RefCell::new([None; HOT_CACHE_SIZE]);
+    #[allow(clippy::missing_const_for_thread_local)]
     static HOT_CACHE_NEXT: RefCell<usize> = RefCell::new(0);
 }
 
@@ -129,12 +133,10 @@ impl Table {
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
         if let Some(v) = HOT_CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
-            for slot in cache.iter() {
-                if let Some(ent) = slot {
-                    if ent.epoch == cur_epoch && ent.dest_id == dst_id {
-                        return Some(ent.next_hop);
-                    }
+            let cache = c.borrow();
+            for ent in cache.iter().flatten() {
+                if ent.epoch == cur_epoch && ent.dest_id == dst_id {
+                    return Some(ent.next_hop);
                 }
             }
             None
@@ -142,13 +144,6 @@ impl Table {
             return Some(v);
         }
 
-<<<<<<< Updated upstream
-        // Miss -> do normal epoch-protected lookup and populate cache
-        let guard = epoch::pin();
-        let curr = self.inner.load(Ordering::Acquire, &guard);
-        let inner = unsafe { curr.deref() };
-        let res = inner.entries.get(&dst_id).map(|e| e.next_hop_id);
-=======
         // Fast-path shard lookup
         let shard = Self::shard_for(&dst_id);
         {
@@ -163,7 +158,6 @@ impl Table {
             let inner = self.inner.read();
             inner.entries.get(&dst_id).map(|e| e.next_hop_id)
         };
->>>>>>> Stashed changes
         if let Some(nh) = res {
             HOT_CACHE.with(|c| {
                 let mut cache = c.borrow_mut();
@@ -223,6 +217,7 @@ impl Router {
         r.seed_default_policies();
         r
     }
+    
 
     fn seed_default_policies(&self) {
         let mut m = self.inner.write();
@@ -257,6 +252,10 @@ impl Router {
         m.insert(key, RoutePolicy { next_hop_id, queue_id, priority: 1 });
         println!("SUCCESS: Policy updated for key {:x} -> Queue {}", key, queue_id);
     }
+}
+
+impl Default for Router {
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]

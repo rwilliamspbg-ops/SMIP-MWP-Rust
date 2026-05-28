@@ -28,8 +28,7 @@ pub struct BenchReport {
 
 /// Allocate a `Vec<u8>` of `size` bytes and fill it with a deterministic pattern.
 pub fn alloc_and_fill(size: usize) -> Vec<u8> {
-    let mut v = Vec::with_capacity(size);
-    unsafe { v.set_len(size); }
+    let mut v = vec![0u8; size];
     fill_pattern(&mut v);
     v
 }

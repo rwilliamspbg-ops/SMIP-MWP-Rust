@@ -41,6 +41,9 @@ impl Umem {
     pub fn len(&self) -> usize { self.len }
 
     pub fn frame_size(&self) -> usize { self.frame_size }
+
+    /// Return true if the UMEM region has zero length.
+    pub fn is_empty(&self) -> bool { self.len == 0 }
 }
 
 impl Drop for Umem {

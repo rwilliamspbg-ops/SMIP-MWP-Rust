@@ -23,6 +23,12 @@ pub struct RingMmap {
 
 impl RingMmap {
     /// Construct a RingMmap wrapper around an mmap'ed pointer and reported offsets.
+    ///
+    /// # Safety
+    ///
+    /// The provided `map_ptr` must be a valid pointer to an mmap'ed region at
+    /// least `map_size` bytes long. The caller must ensure the memory remains
+    /// valid for the lifetime of the returned `RingMmap`.
     pub unsafe fn new(map_ptr: *mut libc::c_void, map_size: usize, offs: XskMmapOffsets) -> Self {
         RingMmap { base: NonNull::new_unchecked(map_ptr as *mut u8), size: map_size, offsets: offs }
     }
@@ -33,6 +39,8 @@ impl RingMmap {
     /// Return the size of the mapped ring region.
     pub fn len(&self) -> usize { self.size }
 
+    /// Returns true if the mapped region has zero length.
+    pub fn is_empty(&self) -> bool { self.size == 0 }
     /// Report the mmap offsets
     pub fn offsets(&self) -> XskMmapOffsets { self.offsets }
 
@@ -61,8 +69,8 @@ impl RingMmap {
             let rx_meta_off = offs.rx;
             let rx_desc_off = offs.rx_desc;
 
-            let prod = self.read_u32_at(rx_meta_off) as u32;
-            let cons = self.read_u32_at(rx_meta_off + 4) as u32;
+            let prod = self.read_u32_at(rx_meta_off);
+            let cons = self.read_u32_at(rx_meta_off + 4);
             let avail = prod.wrapping_sub(cons) as usize;
             if avail == 0 { return Vec::new(); }
 
@@ -72,7 +80,7 @@ impl RingMmap {
             let to_take = std::cmp::min(avail, max);
             let mut out = Vec::with_capacity(to_take);
             for i in 0..to_take {
-                let idx = ((cons as usize + i) & mask) as usize;
+                let idx = (cons as usize + i) & mask;
                 let d_off = rx_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
                 let desc = self.read_u64_at(d_off);
                 out.push(desc);
@@ -92,8 +100,8 @@ impl RingMmap {
             let tx_meta_off = offs.tx;
             let tx_desc_off = offs.tx_desc;
 
-            let prod = self.read_u32_at(tx_meta_off) as u32;
-            let cons = self.read_u32_at(tx_meta_off + 4) as u32;
+            let prod = self.read_u32_at(tx_meta_off);
+            let cons = self.read_u32_at(tx_meta_off + 4);
 
             let capacity = self.tx_capacity();
             let mask = capacity - 1;
@@ -103,10 +111,10 @@ impl RingMmap {
             if free == 0 { return 0; }
 
             let to_push = std::cmp::min(free, addrs.len());
-            for i in 0..to_push {
-                let idx = ((prod as usize + i) & mask) as usize;
+            for (i, &addr) in addrs.iter().enumerate().take(to_push) {
+                let idx = (prod as usize + i) & mask;
                 let d_off = tx_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
-                self.write_u64_at(d_off, addrs[i]);
+                self.write_u64_at(d_off, addr);
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
@@ -116,6 +124,10 @@ impl RingMmap {
     }
 
     /// Low-level read of a u32 value at an mmap offset (little-endian).
+    /// # Safety
+    ///
+    /// The caller must ensure `off + 4 <= self.len()` and that the memory
+    /// at that offset is valid to read a little-endian u32.
     pub unsafe fn read_u32_at(&self, off: u64) -> u32 {
         assert!((off as usize) + std::mem::size_of::<u32>() <= self.size);
         let p = self.base.as_ptr().add(off as usize) as *const u32;
@@ -123,6 +135,10 @@ impl RingMmap {
     }
 
     /// Low-level read of a u64 value at an mmap offset (little-endian).
+    /// # Safety
+    ///
+    /// The caller must ensure `off + 8 <= self.len()` and that the memory
+    /// at that offset is valid to read a little-endian u64.
     pub unsafe fn read_u64_at(&self, off: u64) -> u64 {
         assert!((off as usize) + std::mem::size_of::<u64>() <= self.size);
         let p = self.base.as_ptr().add(off as usize) as *const u64;
@@ -130,6 +146,10 @@ impl RingMmap {
     }
 
     /// Low-level write of a u64 value at an mmap offset (little-endian).
+    /// # Safety
+    ///
+    /// The caller must ensure `off + 8 <= self.len()` and that the memory
+    /// at that offset is valid to write a little-endian u64.
     pub unsafe fn write_u64_at(&self, off: u64, v: u64) {
         assert!((off as usize) + std::mem::size_of::<u64>() <= self.size);
         let p = self.base.as_ptr().add(off as usize) as *mut u64;
@@ -137,13 +157,22 @@ impl RingMmap {
     }
 
     /// Low-level write of a u32 value at an mmap offset (little-endian).
+    /// # Safety
+    ///
+    /// The caller must ensure `off + 4 <= self.len()` and that the memory
+    /// at that offset is valid to write a little-endian u32.
     pub unsafe fn write_u32_at(&self, off: u64, v: u32) {
         assert!((off as usize) + std::mem::size_of::<u32>() <= self.size);
         let p = self.base.as_ptr().add(off as usize) as *mut u32;
         std::ptr::write_unaligned(p, v.to_le());
     }
     /// Return a borrow of the mapped slice at offset/len.
-    /// Safety: caller must ensure the requested range is valid within the mmap.
+    /// # Safety
+    ///
+    /// The caller must ensure `off + len <= self.len()` and that the underlying
+    /// memory remains valid for the returned borrow. The returned slice has a
+    /// `'static` lifetime for convenience but the caller must not rely on that
+    /// beyond the actual lifetime of the mapping.
     pub unsafe fn slice_at(&self, off: u64, len: usize) -> &'static [u8] {
         assert!((off as usize) + len <= self.size);
         std::slice::from_raw_parts(self.base.as_ptr().add(off as usize), len)
@@ -167,7 +196,7 @@ mod tests {
             ring.write_u32_at(offs.rx + 4, 0);
             // write 4 descriptors
             for i in 0..4u64 {
-                ring.write_u64_at(offs.rx_desc + (i as u64 * 8), 100 + i * 100);
+                ring.write_u64_at(offs.rx_desc + (i * 8), 100 + i * 100);
             }
         }
 
@@ -200,12 +229,12 @@ mod tests {
 
         unsafe {
             // verify descriptors written
-            for i in 0..3usize {
+            for (i, &addr) in addrs.iter().enumerate().take(3) {
                 let v = ring.read_u64_at(offs.tx_desc + (i * 8) as u64);
-                assert_eq!(v, addrs[i]);
+                assert_eq!(v, addr);
             }
-            let prod = ring.read_u32_at(offs.tx) as u32;
-            assert_eq!(prod, 3);
+            let prod = ring.read_u32_at(offs.tx);
+            assert_eq!(prod, 3u32);
         }
         drop(buf);
     }
