@@ -34,6 +34,7 @@ cargo run --release -p bench
 - `cargo run -p cli` exercises the CLI entry point and the usage path.
 - `cargo run -p cli -- --demo` runs the in-process forwarding demo.
 - `cargo run --release -p cli -- --metrics-http 127.0.0.1:9090` starts the Prometheus-text metrics endpoint used by the stress harness.
+- `MOHAWK_WORKER_CORES=0-3 cargo run --release -p cli -- --bridge-request bridge/examples/control_request.example.json` fans bridge workers out across pinned CPU cores when `num_workers > 1`.
 - `cargo run --release -p bench` runs the synthetic allocation benchmark in `bench/src/lib.rs` and prints throughput-style numbers.
 
 ## Current Repository Notes

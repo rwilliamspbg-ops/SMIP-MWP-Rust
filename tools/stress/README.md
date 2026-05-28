@@ -44,5 +44,6 @@ Notes & limitations
 - These scripts can sample NIC counters and, when `--metrics-http` or
   `--metrics-socket` is enabled on the DUT, they can also capture the
   application-level `packets_processed` counter.
+- For bridge-request runs, `MOHAWK_WORKER_CORES=0-3` pins `cli` worker threads to specific cores when `num_workers > 1`.
 - Use a dedicated test host for high-rate tests; disable C-states and frequency
   scaling and pin IRQs/cores for deterministic results.
