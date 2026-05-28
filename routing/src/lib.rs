@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use ahash::{AHashMap, AHasher};
 use std::time::SystemTime;
-use arc_swap::ArcSwap;
+use crossbeam_epoch::{self as epoch, Atomic, Owned};
+use std::sync::atomic::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct RouteEntry {
@@ -16,7 +17,7 @@ pub struct RouteEntry {
 
 #[derive(Debug)]
 pub struct Table {
-    inner: ArcSwap<TableInner>,
+    inner: Atomic<TableInner>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +41,8 @@ fn fast_flow_hash(src_id: &[u8;32], dst_id: &[u8;32], flow_label: u32) -> u64 {
 impl Table {
 
     pub fn new() -> Self {
-        Self { inner: ArcSwap::from_pointee(TableInner { entries: BTreeMap::new(), predictive_entries: Vec::new() }) }
+        let init = TableInner { entries: BTreeMap::new(), predictive_entries: Vec::new() };
+        Self { inner: Atomic::new(init) }
     }
 
     fn rebuild_predictive_entries(inner: &mut TableInner) {
@@ -52,40 +54,55 @@ impl Table {
         e.last_seen = SystemTime::now();
 
         loop {
-            let current = self.inner.load_full();
-            let mut next = (*current).clone();
+            let guard = epoch::pin();
+            let curr = self.inner.load(Ordering::Acquire, &guard);
+            let curr_ref = unsafe { curr.deref() };
+            let mut next = curr_ref.clone();
             next.entries.insert(e.dest_id, e.clone());
             Self::rebuild_predictive_entries(&mut next);
-            let new_arc = std::sync::Arc::new(next);
-            let prev = self.inner.compare_and_swap(&current, new_arc);
-            if Arc::ptr_eq(&prev, &current) {
-                break;
+
+            let new_owned = Owned::new(next);
+            match self.inner.compare_and_set(curr, new_owned, Ordering::AcqRel, &guard) {
+                Ok(_shared) => {
+                    unsafe { guard.defer_destroy(curr); }
+                    break;
+                }
+                Err(_) => continue,
             }
-            // else, retry
         }
     }
 
     pub fn remove_route(&self, dest: [u8;32]) {
         loop {
-            let current = self.inner.load_full();
-            let mut next = (*current).clone();
+            let guard = epoch::pin();
+            let curr = self.inner.load(Ordering::Acquire, &guard);
+            let curr_ref = unsafe { curr.deref() };
+            let mut next = curr_ref.clone();
             next.entries.remove(&dest);
             Self::rebuild_predictive_entries(&mut next);
-            let new_arc = std::sync::Arc::new(next);
-            let prev = self.inner.compare_and_swap(&current, new_arc);
-            if Arc::ptr_eq(&prev, &current) {
-                break;
+
+            let new_owned = Owned::new(next);
+            match self.inner.compare_and_set(curr, new_owned, Ordering::AcqRel, &guard) {
+                Ok(_shared) => {
+                    unsafe { guard.defer_destroy(curr); }
+                    break;
+                }
+                Err(_) => continue,
             }
         }
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8;32], _flow_label: u32) -> Option<[u8;32]> {
-        let inner = self.inner.load();
+        let guard = epoch::pin();
+        let curr = self.inner.load(Ordering::Acquire, &guard);
+        let inner = unsafe { curr.deref() };
         inner.entries.get(&dst_id).map(|e| e.next_hop_id)
     }
 
     pub fn predictive_next_hop(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        let inner = self.inner.load();
+        let guard = epoch::pin();
+        let curr = self.inner.load(Ordering::Acquire, &guard);
+        let inner = unsafe { curr.deref() };
         if inner.entries.is_empty() {
             return None;
         }
@@ -100,7 +117,9 @@ impl Table {
     }
 
     pub fn lookup_or_predict(&self, src_id: [u8;32], dst_id: [u8;32], flow_label: u32) -> Option<[u8;32]> {
-        let inner = self.inner.load();
+        let guard = epoch::pin();
+        let curr = self.inner.load(Ordering::Acquire, &guard);
+        let inner = unsafe { curr.deref() };
         if let Some(e) = inner.entries.get(&dst_id) {
             return Some(e.next_hop_id);
         }
