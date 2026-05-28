@@ -75,21 +75,31 @@ echo "[ci-chaos] generating averaged chaos report"
 # compute aggregated metrics across reps (median by default)
 if [ "$AGG_METHOD" = "median" ]; then
   median_throughput=$(awk -F',' 'NR>1{print $8}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1} END{ if(NR==0) print "0"; else if(NR%2==1) print a[(NR+1)/2]; else printf("%.2f", (a[NR/2]+a[(NR/2)+1])/2) }')
+  median_p50=$(awk -F',' 'NR>1{print $9}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1} END{ if(NR==0) print "0"; else if(NR%2==1) print a[(NR+1)/2]; else printf("%.0f", (a[NR/2]+a[(NR/2)+1])/2) }')
   median_p99=$(awk -F',' 'NR>1{print $10}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1} END{ if(NR==0) print "0"; else if(NR%2==1) print a[(NR+1)/2]; else printf("%.0f", (a[NR/2]+a[(NR/2)+1])/2) }')
+  median_p999=$(awk -F',' 'NR>1{print $11}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1} END{ if(NR==0) print "0"; else if(NR%2==1) print a[(NR+1)/2]; else printf("%.0f", (a[NR/2]+a[(NR/2)+1])/2) }')
   agg_throughput="$median_throughput"
+  agg_p50="$median_p50"
   agg_p99="$median_p99"
+  agg_p999="$median_p999"
 else
   # fallback to mean
   mean_throughput=$(awk -F',' 'NR>1{sum+=$8;cnt+=1}END{if(cnt>0)printf("%.2f",sum/cnt);else print "0"}' "$OUT_CSV")
+  mean_p50=$(awk -F',' 'NR>1{sum+=$9;cnt+=1}END{if(cnt>0)printf("%.0f",sum/cnt);else print "0"}' "$OUT_CSV")
   mean_p99=$(awk -F',' 'NR>1{sum+=$10;cnt+=1}END{if(cnt>0)printf("%.2f",sum/cnt);else print "0"}' "$OUT_CSV")
+  mean_p999=$(awk -F',' 'NR>1{sum+=$11;cnt+=1}END{if(cnt>0)printf("%.0f",sum/cnt);else print "0"}' "$OUT_CSV")
   agg_throughput="$mean_throughput"
+  agg_p50="$mean_p50"
   agg_p99="$mean_p99"
+  agg_p999="$mean_p999"
 fi
 
 if [ "$AGG_METHOD" = "trimmed" ]; then
   # trimmed mean: drop min and max if count>2
   agg_throughput=$(awk -F',' 'NR>1{print $8}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1; s+=$1} END{ if(NR==0) print "0"; else if(NR<=2) print s/NR; else printf("%.2f", (s - a[1] - a[NR])/(NR-2)) }')
+  agg_p50=$(awk -F',' 'NR>1{print $9}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1; s+=$1} END{ if(NR==0) print "0"; else if(NR<=2) print int(s/NR); else printf("%.0f", (s - a[1] - a[NR])/(NR-2)) }')
   agg_p99=$(awk -F',' 'NR>1{print $10}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1; s+=$1} END{ if(NR==0) print "0"; else if(NR<=2) print int(s/NR); else printf("%.0f", (s - a[1] - a[NR])/(NR-2)) }')
+  agg_p999=$(awk -F',' 'NR>1{print $11}' "$OUT_CSV" | sort -n | awk '{a[NR]=$1; s+=$1} END{ if(NR==0) print "0"; else if(NR<=2) print int(s/NR); else printf("%.0f", (s - a[1] - a[NR])/(NR-2)) }')
 fi
 
 echo "[ci-chaos] agg_throughput=${agg_throughput} agg_p99_ns=${agg_p99} (method=${AGG_METHOD})"
@@ -99,13 +109,21 @@ p99_delta_ns=$(awk -v b="$BASELINE_P99" -v a="$agg_p99" 'BEGIN{printf("%.0f",(a-
 
 echo "[ci-chaos] Throughput drop pct=${throughput_drop_pct}% p99 delta_ns=${p99_delta_ns}"
 
+tmp_report_csv=$(mktemp)
+cat > "$tmp_report_csv" <<EOF
+timestamp,core_set,packets,payload_len,loss_percent,corrupt_percent,duplicate_percent,throughput_pkt_s,p50_ns,p99_ns,p99_9_ns
+aggregated,0-1,$PACKETS,$PAYLOAD_LEN,$LOSS_PERCENT,$CORRUPT_PERCENT,$DUPLICATE_PERCENT,$agg_throughput,$agg_p50,$agg_p99,$agg_p999
+EOF
+
 python3 tools/benchmark/generate_chaos_report.py \
-  --input "$OUT_CSV" \
+  --input "$tmp_report_csv" \
   --output "$OUT_REPORT" \
   --baseline-throughput "$BASELINE_THROUGHPUT" \
   --baseline-p99-ns "$BASELINE_P99" \
   --goal-max-throughput-drop-pct "$GOAL_MAX_THROUGHPUT_DROP_PCT" \
   --goal-max-p99-increase-ns "$GOAL_MAX_P99_INCREASE_NS"
+
+rm -f "$tmp_report_csv"
 
 echo "[ci-chaos] report status:"
 grep -E '^Status:' "$OUT_REPORT"

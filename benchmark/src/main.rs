@@ -149,10 +149,12 @@ fn main() {
             continue;
         }
 
-        pending_frames.push(packet.clone());
+        pending_frames.push(packet);
         if rng.gen_bool((config.duplicate_percent / 100.0).clamp(0.0, 1.0)) {
             counters.duplicated += 1;
-            pending_frames.push(packet);
+            if let Some(duplicate) = pending_frames.last().cloned() {
+                pending_frames.push(duplicate);
+            }
         }
 
         if pending_frames.len() < config.batch_size.max(1) {
