@@ -425,6 +425,8 @@ mod real {
 
                 // track backpressure events
                 self.tx_backpressure_count.fetch_add(1, Ordering::Relaxed);
+                // global counters for metrics
+                crate::AF_XDP_BACKPRESSURE_COUNT.fetch_add(1, Ordering::Relaxed);
 
                 // Return all allocated frames back to free list
                 for &a in &addrs {
@@ -437,6 +439,7 @@ mod real {
 
                 // count this retry (attempts > 0 indicate retries)
                 self.retry_count.fetch_add(1, Ordering::Relaxed);
+                crate::AF_XDP_RETRY_COUNT.fetch_add(1, Ordering::Relaxed);
 
                 // Small backoff to let kernel or background threads consume TX ring
                 thread::sleep(Duration::from_millis(1));

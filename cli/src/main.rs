@@ -14,6 +14,24 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
+// Helper to construct an AF_XDP socket: attempt real socket when available,
+// otherwise fall back to the in-process mock.
+fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
+    #[cfg(feature = "real")]
+    {
+        use std::env;
+        if let Ok(iface) = env::var("MOHAWK_IFACE") {
+            let queue_id = env::var("MOHAWK_QUEUE_ID").ok().and_then(|s| s.parse().ok()).unwrap_or(0u32);
+            let frame_size = env::var("MOHAWK_FRAME_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(2048usize);
+            let pages = env::var("MOHAWK_UMEM_PAGES").ok().and_then(|s| s.parse().ok()).unwrap_or(1024usize);
+            match afxdp::socket::RealSocket::new(&iface, queue_id, frame_size, pages) {
+                Ok(sock) => return Box::new(sock),
+                Err(e) => eprintln!("AF_XDP real socket init failed: {}. Falling back to mock.", e),
+            }
+        }
+    }
+    afxdp::socket::new_mock_socket(frames)
+}
 
 fn parse_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
@@ -47,8 +65,8 @@ fn run_demo() -> datapath::ForwarderStats {
 
     let mut forwarder = Forwarder::with_session(routes, vec![0x42; 32], b"cli-demo".to_vec());
 
-    let mut sock = afxdp::MockSocket::new(vec![demo_packet()]);
-    forwarder.process_batch(&mut sock)
+    let mut sock = build_socket(vec![demo_packet()]);
+    forwarder.process_batch(&mut *sock)
 }
 
 fn build_forwarder_from_request(request: &ControlRequest) -> Forwarder {
@@ -103,8 +121,8 @@ fn run_pinned_workers(request: &ControlRequest) -> datapath::ForwarderStats {
 
     let handles = worker::spawn_pinned_workers(&plan, move |assignment| {
         let mut forwarder = build_forwarder_from_request(&request);
-        let mut sock = afxdp::MockSocket::new(vec![packet.clone()]);
-        let stats = forwarder.process_batch(&mut sock);
+        let mut sock = build_socket(vec![packet.clone()]);
+        let stats = forwarder.process_batch(&mut *sock);
         eprintln!(
             "worker {} pinned to core {} processed {} packets",
             assignment.worker_index, assignment.core_id, stats.received
@@ -203,6 +221,21 @@ fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    // CLI convenience: allow `--real` to opt into AF_XDP mode and `--iface <if>`
+    // to specify the interface. These set environment variables consumed by
+    // `build_socket()` so callers can opt-in without exporting env vars.
+    if parse_flag(&args, "--real") {
+        if let Some(i) = args.iter().position(|a| a == "--iface") {
+            if let Some(iface) = args.get(i + 1) {
+                env::set_var("MOHAWK_IFACE", iface);
+            }
+        }
+        // If iface not provided and env var missing, help the user.
+        if env::var("MOHAWK_IFACE").is_err() {
+            eprintln!("--real requires --iface <ifname> or MOHAWK_IFACE to be set");
+            std::process::exit(2);
+        }
+    }
     let want_metrics = parse_flag(&args, "--metrics");
     let metrics_socket = args
         .iter()
@@ -326,7 +359,17 @@ fn main() {
                             let req = String::from_utf8_lossy(&buf);
                             if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
                                 let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                                let body = render_prometheus_metrics(count, unix_timestamp_secs());
+                                let af_retry = afxdp::AF_XDP_RETRY_COUNT.load(Ordering::Relaxed);
+                                let af_back = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(Ordering::Relaxed);
+                                let mut body = render_prometheus_metrics(count, unix_timestamp_secs());
+                                body.push_str(&format!(
+                                    "# HELP afxdp_retry_total AF_XDP send retry attempts.\n# TYPE afxdp_retry_total counter\nafxdp_retry_total {}\n",
+                                    af_retry
+                                ));
+                                body.push_str(&format!(
+                                    "# HELP afxdp_backpressure_total AF_XDP tx backpressure events.\n# TYPE afxdp_backpressure_total counter\nafxdp_backpressure_total {}\n",
+                                    af_back
+                                ));
                                 let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                                 let _ = s.write_all(resp.as_bytes());
                             } else {
