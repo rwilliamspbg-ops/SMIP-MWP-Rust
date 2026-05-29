@@ -118,6 +118,7 @@ mod real {
     static SOCKET_INSTANCE_REGISTRY: Lazy<Mutex<Vec<Weak<Mutex<RealSocket>>>>> =
         Lazy::new(|| Mutex::new(Vec::new()));
 
+    #[allow(dead_code)]
     pub struct RealSocket {
         ifname: String,
         queue_id: u32,
@@ -521,6 +522,7 @@ mod real {
     // Provide a small wrapper type around `Arc<Mutex<RealSocket>>` which
     // implements the `datapath::socket::XdpSocket` trait. This avoids orphan
     // rule issues by making a local type.
+    #[allow(dead_code)]
     pub struct RealSocketHandle(pub std::sync::Arc<std::sync::Mutex<RealSocket>>);
 
     impl datapath::socket::XdpSocket for RealSocketHandle {
@@ -754,7 +756,7 @@ mod real {
             // Setup umem with 16 frames
             let frame_size = 2048usize;
             let frames = 16usize;
-            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+            let _umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
 
             // Prepare a ring buffer area large enough for descriptors
             let mut buf = vec![0u8; 16384].into_boxed_slice();
@@ -1072,9 +1074,9 @@ mod real {
             eprintln!("[test] all threads joined");
 
             let guard = socket.lock().unwrap();
-            // ensure we observed some backpressure or retries under stress
-            assert!(guard.retry_count() >= 0);
-            assert!(guard.tx_backpressure_count() >= 0);
+            // touch counters to ensure they are readable (avoid useless comparison)
+            let _ = guard.retry_count();
+            let _ = guard.tx_backpressure_count();
         }
 
         #[test]
