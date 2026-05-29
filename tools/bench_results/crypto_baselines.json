@@ -1,0 +1,10 @@
+{
+  "symmetric_encrypt_in_place": 145.2407907073964,
+  "symmetric_decrypt_in_place": 192.05009959774216,
+  "worst_case_hybrid_kex": 398207.06134441204
+}
+{
+  "symmetric_encrypt_in_place": 145.2407907073964,
+  "symmetric_decrypt_in_place": 192.05009959774216,
+  "worst_case_hybrid_kex": 398207.06134441204
+}
