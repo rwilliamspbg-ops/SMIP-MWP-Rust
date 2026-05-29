@@ -237,6 +237,20 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // allow tuning FreeList headroom at CLI startup
+    if let Some(i) = args.iter().position(|a| a == "--freelist-headroom") {
+        if let Some(v) = args.get(i + 1) {
+            if let Ok(_) = v.parse::<usize>() {
+                env::set_var("MOHAWK_FREELIST_HEADROOM", v);
+            } else {
+                eprintln!("invalid value for --freelist-headroom: {}", v);
+                std::process::exit(2);
+            }
+        } else {
+            eprintln!("--freelist-headroom requires a numeric value");
+            std::process::exit(2);
+        }
+    }
     let want_metrics = parse_flag(&args, "--metrics");
     let metrics_socket = args
         .iter()
