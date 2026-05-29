@@ -66,5 +66,5 @@ jobs:
           echo 'To change the SLA baselines you must:'
           echo '  - attach measurement artifacts and rationale in the PR description'
           echo '  - add the label "perf-approval" to this PR (maintainer approval)'
-          echo '
-If you believe this change is safe, request the maintainer to add the label.'
+          echo ''
+          echo 'If you believe this change is safe, request the maintainer to add the label.'
