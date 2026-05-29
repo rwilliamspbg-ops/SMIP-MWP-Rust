@@ -1,0 +1,39 @@
+name: Metrics smoke test
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  metrics-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Build CLI
+        run: cargo build --workspace --package cli --release
+
+      - name: Start metrics HTTP endpoint
+        run: |
+          nohup target/release/mohawk-node --metrics-http 127.0.0.1:9184 &
+          # give the binary a moment to start and register metrics
+          sleep 2
+
+      - name: Scrape and validate metrics
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -sSf http://127.0.0.1:9184/metrics -o /tmp/metrics.txt; then
+              break
+            fi
+            sleep 1
+          done
+          echo "--- /metrics ---"
+          sed -n '1,200p' /tmp/metrics.txt || true
+          # ensure our key metrics are present
+          grep -E 'afxdp_retry_total|afxdp_backpressure_total|mohawk_packets_processed_total' /tmp/metrics.txt
