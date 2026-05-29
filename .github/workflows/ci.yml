@@ -51,6 +51,7 @@ jobs:
         path: |
           benchmark/chaos_report.md
           tools/bench_results/chaos_epyc_profile.csv
+          tools/bench_results/ci_baseline.txt
           tools/bench_results/datapath_profile.csv
           tools/bench_results/datapath_alloc_events.csv
           tools/bench_results/datapath_handle_events.csv
