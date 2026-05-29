@@ -1,32 +1,14 @@
-# Final Performance Expectation Envelope: SMIP-MWP-Rust
+# Performance Envelope Report
+**Throughput CSV not found:** tools/bench_results/throughput_from_ethtool.csv
 
-This document defines the validation contract for final dataplane performance claims.
+## Chaos EPYC Profile
+(timestamp, core_set, packets, payload_len, loss, corrupt, duplicate, throughput_pkt_s, p50, p99, p99_9)
 
-## 1) Target Hardware Baseline Assumption
+timestamp,core_set,packets,payload_len,loss_percent,corrupt_percent,duplicate_percent,throughput_pkt_s,p50_ns,p99_ns,p99_9_ns
+2026-05-29T12:49:47Z,"2-3",50000,1024,3,1,1,1074884.04,49913,81712,94235
+2026-05-29T12:49:47Z,"2-5",50000,1024,3,1,1,1109765.37,49783,74659,103864
+2026-05-29T12:49:47Z,"2-7",50000,1024,3,1,1,1101614.50,49803,73878,85831
 
-Deployment target is a modern high core-count server platform (for example, 2nd/3rd Gen AMD EPYC or Intel Sapphire Rapids), with:
+**Routing miss sweep CSV not found:** tools/bench_results/routing_miss_sweep.csv
 
-- Linux
-- Hugepages enabled
-- CPU pinning enforced via cgroup/cpuset mechanisms
-- Isolated benchmark cores for reproducibility
-
-## 2) Performance Matrix by Operational Mode
-
-| Metric | Goal value range | Measurement context/profile | Limiting factor | Validation artifact |
-|---|---|---|---|---|
-| Max Throughput (Ideal) | >95% of link capacity (for example >95 Gbps on 100G) | Sustained lossless flow test, zero-copy path only | NIC capability / kernel-bypass limits | `benchmark/report_throughput.md` |
-| Latency (p99) | <2 µs | End-to-end packet path: ingress → process → egress | Cache misses / context switching | `benchmark/report_latency.png` |
-| Packet Processing Rate | >50 Mpps | Minimal payload (header-only) sustained mode | Core clock and fast-path instruction efficiency | `benchmark/report_mpps.txt` |
-| Crypto Overhead (worst case) | <15% p99-latency increase vs baseline | Hybrid KEX encrypt/decrypt on every packet header | Crypto implementation and HW acceleration | `benchmark/crypto_overhead.md` |
-| Fault Tolerance Overhead | <5% throughput degradation and p99 increase <1 µs vs ideal mode | Sustained load under Byzantine faults (drop/malformed/divergence attempts) | Consensus/reconciliation complexity on fast path | `benchmark/chaos_report.md` |
-
-## 3) Contract Interpretation
-
-- Final performance is a **validated contract**, not a marketing claim.
-- p99 latency and variance stability are first-class release gates.
-- Any datapath dependency on Go control-plane interaction during forwarding must be flagged in deployment readiness artifacts.
-
-## 4) Mandatory Next Step
-
-Before any final performance figure is claimed, complete and review `benchmark/chaos_report.md` from reproducible hostile-network runs.
+**Crypto overhead console not found:** tools/bench_results/crypto_overhead.txt

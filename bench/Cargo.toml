@@ -8,6 +8,7 @@ rand = "0.8"
 datapath = { path = "../datapath" }
 routing = { path = "../routing" }
 wire = { path = "../wire" }
+crypto = { path = "../crypto" }
 
 [dev-dependencies]
 criterion = "0.4"
@@ -30,4 +31,8 @@ harness = false
 
 [[bench]]
 name = "routing_miss_bench"
+harness = false
+
+[[bench]]
+name = "crypto_overhead_bench"
 harness = false

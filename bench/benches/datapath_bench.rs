@@ -1,4 +1,49 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+struct CountingAlloc;
+
+static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = System.alloc(layout);
+        if !ptr.is_null() {
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout);
+        ALLOC_COUNT.fetch_add(0, Ordering::Relaxed); // keep count of allocs only
+        // We avoid subtracting bytes on dealloc to keep accounting simple and monotonic
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let ptr2 = System.realloc(ptr, layout, new_size);
+        if !ptr2.is_null() {
+            ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        ptr2
+    }
+}
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
+
+fn reset_alloc_counters() {
+    ALLOC_COUNT.store(0, Ordering::Relaxed);
+    ALLOC_BYTES.store(0, Ordering::Relaxed);
+}
+
+fn snapshot_alloc_counters() -> (u64, u64) {
+    (ALLOC_COUNT.load(Ordering::Relaxed), ALLOC_BYTES.load(Ordering::Relaxed))
+}
 use datapath::socket::{SliceRing, XdpSocket};
 use datapath::Forwarder;
 use routing::{RouteEntry, Table};
@@ -133,18 +178,20 @@ impl DatapathFixture {
 fn datapath_forwarder_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("datapath_forwarder");
     let packet_counts = [16usize, 64, 256];
-    let payload_len = 256usize;
+    let payload_sizes = [64usize, 128, 256, 512, 1024];
 
     for &packet_count in &packet_counts {
-        group.throughput(Throughput::Elements(packet_count as u64));
-        group.bench_with_input(
-            format!("packets_{}", packet_count),
-            &packet_count,
-            |b, &count| {
-                let mut fixture = DatapathFixture::new(count, payload_len, false);
-                b.iter(|| fixture.run());
-            },
-        );
+        for &payload_len in &payload_sizes {
+            group.throughput(Throughput::Elements(packet_count as u64));
+            group.bench_with_input(
+                format!("packets_{}_payload_{}", packet_count, payload_len),
+                &(packet_count, payload_len),
+                |b, &(count, payload)| {
+                    let mut fixture = DatapathFixture::new(count, payload, false);
+                    b.iter(|| fixture.run());
+                },
+            );
+        }
     }
 
     group.finish();
@@ -153,18 +200,46 @@ fn datapath_forwarder_benchmark(c: &mut Criterion) {
 fn datapath_forwarder_miss_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("datapath_forwarder_miss");
     let packet_counts = [16usize, 64, 256];
-    let payload_len = 256usize;
+    let payload_sizes = [64usize, 128, 256, 512, 1024];
 
     for &packet_count in &packet_counts {
-        group.throughput(Throughput::Elements(packet_count as u64));
-        group.bench_with_input(
-            format!("packets_{}", packet_count),
-            &packet_count,
-            |b, &count| {
-                let mut fixture = DatapathFixture::new(count, payload_len, true);
-                b.iter(|| fixture.run());
-            },
-        );
+        for &payload_len in &payload_sizes {
+            group.throughput(Throughput::Elements(packet_count as u64));
+            group.bench_with_input(
+                format!("packets_{}_payload_{}", packet_count, payload_len),
+                &(packet_count, payload_len),
+                |b, &(count, payload)| {
+                    let mut fixture = DatapathFixture::new(count, payload, true);
+                    b.iter(|| fixture.run());
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn datapath_alloc_tracking_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("datapath_alloc_events");
+    let packet_counts = [16usize, 64, 256];
+    let payload_sizes = [64usize, 128, 256, 512, 1024];
+
+    for &packet_count in &packet_counts {
+        for &payload_len in &payload_sizes {
+            group.bench_with_input(
+                format!("allocs_packets_{}_payload_{}", packet_count, payload_len),
+                &(packet_count, payload_len),
+                |b, &(count, payload)| {
+                    let mut fixture = DatapathFixture::new(count, payload, false);
+                    b.iter(|| {
+                        reset_alloc_counters();
+                        fixture.run();
+                        let (calls, bytes) = snapshot_alloc_counters();
+                        std::hint::black_box((calls, bytes));
+                    });
+                },
+            );
+        }
     }
 
     group.finish();
@@ -174,5 +249,7 @@ criterion_group!(
     benches,
     datapath_forwarder_benchmark,
     datapath_forwarder_miss_benchmark
+    ,
+    datapath_alloc_tracking_benchmark
 );
 criterion_main!(benches);
