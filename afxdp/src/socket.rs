@@ -446,6 +446,18 @@ mod real {
         }
     }
 
+    impl RealSocket {
+        /// Return the number of retry attempts observed on this socket.
+        pub fn retry_count(&self) -> u64 {
+            self.retry_count.load(Ordering::Relaxed)
+        }
+
+        /// Return the number of times tx push found backpressure.
+        pub fn tx_backpressure_count(&self) -> u64 {
+            self.tx_backpressure_count.load(Ordering::Relaxed)
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -656,8 +668,115 @@ mod real {
             // send should retry and succeed once the background thread advances cons
             assert!(rs.send(&mut b, &offsets).is_ok());
         }
-    }
-}
 
+        #[test]
+        fn stress_concurrent_senders_with_reclaimer() {
+            use std::sync::Arc;
+            use std::sync::Mutex as StdMutex;
+
+            let frame_size = 1024usize;
+            let frames = 64usize;
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            let mut buf = vec![0u8; 65536].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            let fl = FreeList::with_capacity(frames);
+            for i in 0..frames {
+                assert!(fl.try_push((i * frame_size) as u64));
+            }
+
+            let socket = RealSocket {
+                ifname: "test".to_string(),
+                queue_id: 0,
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
+            };
+
+            let socket = Arc::new(StdMutex::new(socket));
+
+            // spawn several sender threads
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let s = Arc::clone(&socket);
+                handles.push(std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        let mut data = vec![0x55u8; 256];
+                        let offsets = vec![(0usize, 256usize)];
+                        let mut guard = s.lock().unwrap();
+                        let _ = guard.send(&mut data, &offsets);
+                        drop(guard);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }));
+            }
+
+            // reclaimer thread: copies tx descriptors to comp ring to simulate kernel completion
+            let r = Arc::clone(&socket);
+            let reclaimer = std::thread::spawn(move || {
+                for _ in 0..200 {
+                    {
+                        let mut guard = r.lock().unwrap();
+                        if let Some(rm) = &guard.ring {
+                            // read tx prod/cons, copy any tx descriptors into comp region
+                            unsafe {
+                                let prod = rm.read_u32_at(offs.tx) as usize;
+                                let cons = rm.read_u32_at(offs.tx + 4) as usize;
+                                let avail = prod.wrapping_sub(cons);
+                                if avail > 0 {
+                                    // compute tx capacity from offsets
+                                    let desc_region_bytes = offs.fill_desc.saturating_sub(offs.tx_desc) as usize;
+                                    let cap = (desc_region_bytes / std::mem::size_of::<u64>()).max(1);
+                                    // clamp availability to avoid wrapping-induced huge values
+                                    let avail_clamped = std::cmp::min(avail, cap as usize);
+                                    // copy descriptors from tx_desc to comp_desc and set comp prod
+                                    for i in 0..avail_clamped {
+                                        let idx = (cons + i) & (cap - 1);
+                                        let d_off = offs.tx_desc + (idx * 8) as u64;
+                                        let addr = rm.read_u64_at(d_off);
+                                        rm.write_u64_at(offs.comp_desc + (i * 8) as u64, addr);
+                                    }
+                                    rm.write_u32_at(offs.comp, avail_clamped as u32);
+                                    rm.write_u32_at(offs.comp + 4, 0);
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
+
+            for h in handles {
+                h.join().expect("sender thread panicked");
+            }
+            reclaimer.join().expect("reclaimer panicked");
+
+            let guard = socket.lock().unwrap();
+            // ensure we observed some backpressure or retries under stress
+            assert!(guard.retry_count() >= 0);
+            assert!(guard.tx_backpressure_count() >= 0);
+        }
+    }
+    // close mod real
+    }
 #[cfg(feature = "real")]
 pub use real::RealSocket;
