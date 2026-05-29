@@ -428,7 +428,7 @@ impl Forwarder {
         let spray_mode = mcr_config::get_mcr_spray_mode();
 
         // Phase 1: single-threaded channel selection and packet duplication
-        let mut duplicated: Vec<Vec<u8>> = Vec::with_capacity(received);
+        let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
         let mut route_miss_count: usize = 0;
         for pkt in frames {
             if let Ok(h) = HeaderViewRef::new(&pkt) {
@@ -438,7 +438,7 @@ impl Forwarder {
                 let channels = self.routes.lookup_spray(dst_id, flow_label);
                 if channels.is_empty() {
                     // route miss: forward unchanged
-                    duplicated.push(pkt);
+                    duplicated.push((pkt, dst_id));
                     route_miss_count += 1;
                     continue;
                 }
@@ -447,17 +447,17 @@ impl Forwarder {
                     for (nh, _is_primary) in channels.iter() {
                         let mut modified = pkt.clone();
                         modified[32..64].copy_from_slice(nh);
-                        duplicated.push(modified);
+                        duplicated.push((modified, dst_id));
                     }
                 } else {
                     // primary only
                     let nh = channels[0].0;
                     let mut modified = pkt.clone();
                     modified[32..64].copy_from_slice(&nh);
-                    duplicated.push(modified);
+                    duplicated.push((modified, dst_id));
                 }
             } else {
-                duplicated.push(pkt);
+                duplicated.push((pkt, [0u8; 32]));
                 route_miss_count += 1;
             }
         }
@@ -465,10 +465,24 @@ impl Forwarder {
         // Phase 2: parallel encryption/processing of duplicated packets
         let routes_ref = &self.routes;
         let session_ref = self.session.as_ref();
-        let outputs: Vec<PacketOutput> = duplicated
+        let outputs_with_orig: Vec<(PacketOutput, [u8; 32])> = duplicated
             .into_par_iter()
-            .map(|pkt| Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2))
+            .map(|(pkt, orig)| (Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2), orig))
             .collect();
+
+        // update routing per-channel stats based on outputs
+        for (out, orig_dest) in outputs_with_orig.iter() {
+            if let Ok(h) = HeaderViewRef::new(&out.bytes) {
+                let nh: [u8; 32] = h.dst_id().try_into().unwrap();
+                if out.encrypted {
+                    routes_ref.inc_channel_forwarded(*orig_dest, nh);
+                } else if out.route_miss {
+                    routes_ref.inc_channel_dropped(*orig_dest);
+                }
+            }
+        }
+
+        let outputs: Vec<PacketOutput> = outputs_with_orig.into_iter().map(|(o, _)| o).collect();
 
         // append outputs and update telemetry
         let stats = self.append_outputs(outputs, received);

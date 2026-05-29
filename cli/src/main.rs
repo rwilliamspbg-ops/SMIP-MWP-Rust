@@ -61,6 +61,9 @@ fn run_demo() -> datapath::ForwarderStats {
         next_hop_id: [3u8; 32],
         metric: 1,
         last_seen: SystemTime::now(),
+        channel_count: 1,
+        alternate_channels: Vec::new(),
+        mcr_epoch: 1,
     });
 
     let mut forwarder = Forwarder::with_session(routes, vec![0x42; 32], b"cli-demo".to_vec());
@@ -77,6 +80,9 @@ fn build_forwarder_from_request(request: &ControlRequest) -> Forwarder {
             next_hop_id: update.next_hop_id,
             metric: update.metric.unwrap_or(1),
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
     }
 
@@ -228,6 +234,19 @@ pub fn start_metrics_http(bind_addr: &str) {
     ).unwrap();
     registry.register(Box::new(afxdp_gauges.clone())).ok();
 
+    // Register MCR routing gauges: per-destination per-next-hop forwarded counters
+    let mcr_forwarded = GaugeVec::new(
+        prometheus::opts!("mohawk_mcr_forwarded_total", "MCR forwarded packets per dest/next_hop"),
+        &["dest", "next_hop"],
+    ).unwrap();
+    registry.register(Box::new(mcr_forwarded.clone())).ok();
+
+    let mcr_dropped = GaugeVec::new(
+        prometheus::opts!("mohawk_mcr_dropped_total", "MCR dropped packets per dest"),
+        &["dest"],
+    ).unwrap();
+    registry.register(Box::new(mcr_dropped.clone())).ok();
+
     // Background updater to sync atomic globals into the prometheus gauges
     {
         let g = afxdp_gauges.clone();
@@ -256,6 +275,25 @@ pub fn start_metrics_http(bind_addr: &str) {
                     g.with_label_values(&["alloc_from_freelist_total", label]).set(*alloc_from as f64);
                     g.with_label_values(&["alloc_fallback_total", label]).set(*alloc_fb as f64);
                     g.with_label_values(&["free_push_drop_total", label]).set(*free_drop as f64);
+                }
+
+                // Optionally read routing metrics emitted to a file by the datapath process.
+                if let Ok(path) = std::env::var("MOHAWK_ROUTING_METRICS_FILE") {
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        // Expect CSV lines: dest_hex,next_hop_hex,count  OR dest_hex,dropped,count
+                        for line in contents.lines() {
+                            let parts: Vec<&str> = line.split(',').collect();
+                            if parts.len() != 3 { continue; }
+                            let dest = parts[0];
+                            let key = parts[1];
+                            let cnt = parts[2].parse::<f64>().unwrap_or(0.0);
+                            if key == "dropped" {
+                                mcr_dropped.with_label_values(&[dest]).set(cnt);
+                            } else {
+                                mcr_forwarded.with_label_values(&[dest, key]).set(cnt);
+                            }
+                        }
+                    }
                 }
 
                 // Remove stale labels that were previously present but are no longer reported

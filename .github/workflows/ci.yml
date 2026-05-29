@@ -20,6 +20,27 @@ jobs:
         chmod +x tools/benchmark/*.sh || true
     - name: Run workspace tests
       run: cargo test --workspace --all-targets
+    - name: Run MCR smoke benchmark and enforce regression threshold
+      run: |
+        set -euo pipefail
+        mkdir -p tools/bench_results
+        # Run a fast smoke benchmark exercising MCR (small packet count)
+        cargo run --release -p benchmark -- --packets 2000 --payload-len 64 --loss-percent 0 --corrupt-percent 0 --duplicate-percent 0 --seed 42 --mcr-channels 3 --mcr-spray-mode primary 2>&1 | tee tools/bench_results/mcr_smoke.txt
+        # Extract throughput value from output (throughput_pkt_s=FLOAT)
+        th=$(grep -oE 'throughput_pkt_s=[0-9]+\.?[0-9]+' tools/bench_results/mcr_smoke.txt | head -n1 | cut -d'=' -f2)
+        if [ -z "${th:-}" ]; then
+          echo "Failed to extract throughput" >&2; exit 2
+        fi
+        echo "throughput=$th" > tools/bench_results/mcr_smoke_result.txt
+        # Baseline (packets/s) is stored in repo; fail if current < baseline * 0.8 (20% regression)
+        baseline=$(cat tools/bench_results/ci_baseline_mcr.txt)
+        min=$(awk -v b=$baseline 'BEGIN{printf("%d", b*0.8)}')
+        echo "baseline=$baseline, min_allowed=$min, measured=$th"
+        bc_res=$(awk -v t=$th -v m=$min 'BEGIN{print (t+0 >= m ? 0 : 1)}')
+        if [ "$bc_res" -ne 0 ]; then
+          echo "MCR smoke benchmark below allowed threshold" >&2
+          exit 3
+        fi
     - name: Run metrics smoke test
       run: cargo run --release -p bench --bin bench
     - name: Run bridge validation gate

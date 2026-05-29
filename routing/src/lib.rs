@@ -21,12 +21,25 @@ pub struct RouteEntry {
     pub mcr_epoch: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct ChannelStats {
-    pub packets_forwarded: u64,
-    pub packets_dropped: u64,
+    /// Per-next-hop forwarded packet counters
+    pub per_channel_forwarded: AHashMap<[u8; 32], AtomicU64>,
+    /// Dropped packets for this destination
+    pub packets_dropped: AtomicU64,
     pub last_failure: Option<SystemTime>,
     pub failure_count: u32,
+}
+
+impl Default for ChannelStats {
+    fn default() -> Self {
+        ChannelStats {
+            per_channel_forwarded: AHashMap::new(),
+            packets_dropped: AtomicU64::new(0),
+            last_failure: None,
+            failure_count: 0,
+        }
+    }
 }
 
 impl Default for Table {
@@ -139,6 +152,44 @@ impl Table {
         }
         // Invalidate per-thread caches
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Increment per-channel forwarded counter for `dest_id` and `next_hop`.
+    pub fn inc_channel_forwarded(&self, dest_id: [u8; 32], next_hop: [u8; 32]) {
+        let mut stats = self.mcr_channel_stats.write();
+        let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
+        use std::sync::atomic::Ordering;
+        if let Some(counter) = entry.per_channel_forwarded.get(&next_hop) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entry
+                .per_channel_forwarded
+                .insert(next_hop, AtomicU64::new(1));
+        }
+    }
+
+    /// Increment dropped counter for `dest_id`.
+    pub fn inc_channel_dropped(&self, dest_id: [u8; 32]) {
+        let mut stats = self.mcr_channel_stats.write();
+        let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
+        entry.packets_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Collect MCR metrics snapshot as triples (dest_hex, next_hop_hex, count).
+    pub fn collect_mcr_metrics(&self) -> Vec<(String, String, u64)> {
+        let stats = self.mcr_channel_stats.read();
+        let mut out = Vec::new();
+        for (dest, ch_stats) in stats.iter() {
+            for (nh, counter) in ch_stats.per_channel_forwarded.iter() {
+                let count = counter.load(std::sync::atomic::Ordering::Relaxed);
+                out.push((hex::encode(dest), hex::encode(nh), count));
+            }
+            let dropped = ch_stats.packets_dropped.load(std::sync::atomic::Ordering::Relaxed);
+            if dropped > 0 {
+                out.push((hex::encode(dest), "dropped".to_string(), dropped));
+            }
+        }
+        out
     }
 
     pub fn remove_route(&self, dest: [u8; 32]) {
