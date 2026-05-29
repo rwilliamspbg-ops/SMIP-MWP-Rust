@@ -441,8 +441,15 @@ mod real {
                 self.retry_count.fetch_add(1, Ordering::Relaxed);
                 crate::AF_XDP_RETRY_COUNT.fetch_add(1, Ordering::Relaxed);
 
-                // Small backoff to let kernel or background threads consume TX ring
-                thread::sleep(Duration::from_millis(1));
+                // Wait for socket to become writable or fallback to short sleep
+                // (tests use fd == -1, so fallback sleep keeps existing behavior).
+                if self.fd >= 0 {
+                    let mut pfd = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
+                    // timeout 100ms to avoid long blocking in normal cases
+                    unsafe { let _ = libc::poll(&mut pfd as *mut libc::pollfd, 1, 100); }
+                } else {
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
 
             Err(())
