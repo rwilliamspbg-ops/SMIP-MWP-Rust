@@ -721,6 +721,7 @@ mod real {
                 assert!(fl.try_push((i * frame_size) as u64));
             }
 
+            eprintln!("[test] creating RealSocket for stress test");
             let socket = RealSocket {
                 ifname: "test".to_string(),
                 queue_id: 0,
@@ -737,7 +738,9 @@ mod real {
             };
 
             let socket = Arc::new(StdMutex::new(socket));
+            eprintln!("[test] RealSocket wrapped in Arc<Mutex>");
 
+            eprintln!("[test] spawning sender threads");
             // spawn several sender threads
             let mut handles = Vec::new();
             for _ in 0..4 {
@@ -754,6 +757,7 @@ mod real {
                 }));
             }
 
+            eprintln!("[test] spawning reclaimer thread");
             // reclaimer thread: copies tx descriptors to comp ring to simulate kernel completion
             let r = Arc::clone(&socket);
             let reclaimer = std::thread::spawn(move || {
@@ -789,10 +793,13 @@ mod real {
                 }
             });
 
+            eprintln!("[test] joining sender threads");
             for h in handles {
                 h.join().expect("sender thread panicked");
             }
+            eprintln!("[test] joining reclaimer thread");
             reclaimer.join().expect("reclaimer panicked");
+            eprintln!("[test] all threads joined");
 
             let guard = socket.lock().unwrap();
             // ensure we observed some backpressure or retries under stress
