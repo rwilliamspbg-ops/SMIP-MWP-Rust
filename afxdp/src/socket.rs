@@ -102,11 +102,16 @@ mod real {
 
     impl FreeList {
         pub fn with_capacity(mut n: usize) -> Self {
-            // round up to the next power-of-two (capacity >= n)
+            // Provide some headroom to the free-list to avoid immediate
+            // contention when the datapath briefly needs extra frames.
+            // We compute a small headroom fraction and round up to the next
+            // power-of-two so the ring mask arithmetic stays efficient.
             if n == 0 {
                 n = 1;
             }
-            let cap = n.next_power_of_two();
+            // headroom is 1/8th of the requested frames, minimum 8
+            let headroom = (n / 8).max(8);
+            let cap = (n + headroom).next_power_of_two();
             let mut buf = Vec::with_capacity(cap);
             for _ in 0..cap {
                 buf.push(AtomicU64::new(0));
