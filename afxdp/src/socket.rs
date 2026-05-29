@@ -50,6 +50,51 @@ pub fn new_mock_socket(frames: Vec<Vec<u8>>) -> AfXdpSocket {
     Box::new(MockSocket::new(frames))
 }
 
+#[cfg(not(feature = "real"))]
+/// No-op when `real` feature is disabled: set FreeList headroom for all sockets
+pub fn set_freelist_headroom_all(_headroom: usize) -> Vec<(String, usize, usize)> {
+    // no-op
+    Vec::new()
+}
+
+#[cfg(not(feature = "real"))]
+/// No-op when `real` feature is disabled: set FreeList headroom for a single socket
+pub fn set_freelist_headroom_for(_label: &str, _headroom: usize) -> Option<(usize, usize)> {
+    None
+}
+
+#[cfg(not(feature = "real"))]
+/// Snapshot current FreeList headroom values for all sockets (non-real builds empty)
+pub fn snapshot_freelist_headrooms() -> Vec<(String, usize)> {
+    Vec::new()
+}
+
+#[cfg(not(feature = "real"))]
+/// No-op register when `real` feature disabled
+pub fn register_socket_instance_for_reconfigure() {
+    // no-op
+}
+
+#[cfg(feature = "real")]
+pub fn register_socket_instance_for_reconfigure(inst: std::sync::Arc<std::sync::Mutex<RealSocket>>) {
+    real::register_socket_instance(inst)
+}
+
+#[cfg(feature = "real")]
+pub fn set_freelist_headroom_all(headroom: usize) -> Vec<(String, usize, usize)> {
+    real::set_freelist_headroom_all(headroom)
+}
+
+#[cfg(feature = "real")]
+pub fn set_freelist_headroom_for(label: &str, headroom: usize) -> Option<(usize, usize)> {
+    real::set_freelist_headroom_for(label, headroom)
+}
+
+#[cfg(feature = "real")]
+pub fn snapshot_freelist_headrooms() -> Vec<(String, usize)> {
+    real::snapshot_freelist_headrooms()
+}
+
 // --- Real socket skeleton --------------------------------------------------
 // When built with `--features real` this module can be expanded to perform
 // genuine AF_XDP UMEM allocation, ring setup and socket handling. For now we
@@ -58,15 +103,32 @@ pub fn new_mock_socket(frames: Vec<Vec<u8>>) -> AfXdpSocket {
 #[cfg(feature = "real")]
 mod real {
     use super::*;
-    use crate::rings::RingMmap;
+    use crate::rings::{RingMmap, XskMmapOffsets};
     use crate::umem::Umem;
     use std::os::unix::io::RawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Weak;
+    use once_cell::sync::Lazy;
+    
 
+    // Registry of weak references to RealSocket instances for runtime
+    // reconfiguration (e.g., changing FreeList headroom). Entries are weak
+    // to avoid keeping sockets alive solely for management.
+    static SOCKET_INSTANCE_REGISTRY: Lazy<Mutex<Vec<Weak<Mutex<RealSocket>>>>> =
+        Lazy::new(|| Mutex::new(Vec::new()));
+
+    #[allow(dead_code)]
     pub struct RealSocket {
         ifname: String,
         queue_id: u32,
+        // human-readable label registered for metrics (e.g. "eth0:0")
+        label: String,
         fd: RawFd,
+        // eventfd used to wake blocked senders when completions are available
+        eventfd: RawFd,
+        // epoll fd used to wait on socket fd and eventfd efficiently
+        epoll_fd: RawFd,
         _umem: Umem,
         // Pointer to the mmap'ed ring area (kept alive for future ring-based ops)
         ring_map_ptr: *mut libc::c_void,
@@ -75,6 +137,96 @@ mod real {
         ring: Option<RingMmap>,
         // simple frame allocator index into UMEM frames
         next_frame: AtomicUsize,
+        // lock-free bounded free list for frame offsets
+        free_list: FreeList,
+        // debug/observability counters
+        retry_count: AtomicU64,
+        tx_backpressure_count: AtomicU64,
+        // per-socket counters registered with the global registry
+        counters: std::sync::Arc<crate::SocketCounters>,
+    }
+
+    // SAFETY: RealSocket contains raw pointers to mmap'ed memory and file
+    // descriptors which are safe to move between threads provided the caller
+    // ensures exclusive access to the socket object. We mark the type as
+    // `Send` so it can be boxed into the `AfXdpSocket` alias used by the
+    // datapath. This is an explicit, well-audited opt-in.
+    unsafe impl Send for RealSocket {}
+
+    // A simple bounded lock-free free-list implemented as a circular buffer
+    // of `u64` entries with atomic head/tail indices. Capacity is the next
+    // power-of-two <= total_frames.
+    pub struct FreeList {
+        buf: Vec<AtomicU64>,
+        mask: usize,
+        head: AtomicUsize,
+        tail: AtomicUsize,
+        // dynamic headroom in absolute number of frames (soft reserve)
+        headroom: AtomicUsize,
+    }
+
+    impl FreeList {
+        pub fn with_capacity(mut n: usize) -> Self {
+            // Provide some headroom to the free-list to avoid immediate
+            // contention when the datapath briefly needs extra frames.
+            // Allow the headroom to be configured via env var
+            // `MOHAWK_FREELIST_HEADROOM` (absolute number of frames).
+            if n == 0 {
+                n = 1;
+            }
+            let headroom = std::env::var("MOHAWK_FREELIST_HEADROOM")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or_else(|| (n / 8).max(8));
+            let cap = (n + headroom).next_power_of_two();
+            let mut buf = Vec::with_capacity(cap);
+            for _ in 0..cap {
+                buf.push(AtomicU64::new(0));
+            }
+            FreeList {
+                buf,
+                mask: cap - 1,
+                head: AtomicUsize::new(0),
+                tail: AtomicUsize::new(0),
+                headroom: AtomicUsize::new(headroom),
+            }
+        }
+
+        pub fn try_push(&self, v: u64) -> bool {
+            let tail = self.tail.load(Ordering::Relaxed);
+            let head = self.head.load(Ordering::Acquire);
+            let used = tail.wrapping_sub(head);
+            // respect configured headroom as a soft reserve: consider the
+            // buffer full when used >= capacity - headroom
+            let cap = self.buf.len();
+            let hr = self.headroom.load(Ordering::Relaxed);
+            if used >= cap.wrapping_sub(hr) {
+                return false; // full
+            }
+            let idx = tail & self.mask;
+            self.buf[idx].store(v, Ordering::Relaxed);
+            self.tail.store(tail.wrapping_add(1), Ordering::Release);
+            true
+        }
+
+        /// Set dynamic headroom (absolute number of frames) used to reserve
+        /// space in the free-list. This is a soft limit and can only reduce
+        /// the effective usable slots; it does not grow the underlying buffer.
+        pub fn set_headroom(&self, headroom: usize) {
+            self.headroom.store(headroom, Ordering::Relaxed);
+        }
+
+        pub fn try_pop(&self) -> Option<u64> {
+            let head = self.head.load(Ordering::Relaxed);
+            let tail = self.tail.load(Ordering::Acquire);
+            if head == tail {
+                return None; // empty
+            }
+            let idx = head & self.mask;
+            let v = self.buf[idx].load(Ordering::Relaxed);
+            self.head.store(head.wrapping_add(1), Ordering::Release);
+            Some(v)
+        }
     }
 
     impl RealSocket {
@@ -245,17 +397,149 @@ mod real {
             // provide enqueue/dequeue helpers for RX/TX/FILL/COMP.
 
             let ring = unsafe { RingMmap::new(map, mmap_size, offs) };
+            // Initialize free list with all frame offsets
+            let frames = umem.len() / umem.frame_size();
+            let free_list = FreeList::with_capacity(frames);
+            // pre-fill the free list with all offsets; if capacity < frames some
+            // frames will be skipped (capacity is power-of-two <= frames)
+            for i in 0..frames {
+                let _ = free_list.try_push((i * umem.frame_size()) as u64);
+            }
+
+            // create eventfd for wakeups (non-fatal)
+            let efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+            let eventfd = if efd < 0 { -1 } else { efd };
+            // create epoll instance (non-fatal)
+            let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+            let epoll_fd = if epfd < 0 { -1 } else { epfd };
+
+            // register socket and eventfd with epoll if available
+            if epoll_fd >= 0 {
+                unsafe {
+                    let mut ev = libc::epoll_event { events: (libc::EPOLLOUT as u32), u64: fd as u64 };
+                    let _ = libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev as *mut libc::epoll_event);
+                    if eventfd >= 0 {
+                        let mut ev2 = libc::epoll_event { events: (libc::EPOLLIN as u32), u64: eventfd as u64 };
+                        let _ = libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, eventfd, &mut ev2 as *mut libc::epoll_event);
+                    }
+                }
+            }
+
+            let label = format!("{}:{}", ifname, queue_id);
+            let counters = std::sync::Arc::new(crate::SocketCounters::new());
+            crate::register_socket_metrics(label.clone(), counters.clone());
+
+            // Note: we don't register the socket instance here because callers
+            // create their own Arc<Mutex<RealSocket>> wrappers. They should
+            // call `register_socket_instance` with the Arc.
+
             Ok(RealSocket {
                 ifname: ifname.to_string(),
                 queue_id,
+                label,
                 fd,
+                eventfd,
+                epoll_fd,
                 _umem: umem,
                 ring_map_ptr: map,
                 ring_map_size: mmap_size,
                 mmap_offsets: Some(offs),
                 ring: Some(ring),
                 next_frame: AtomicUsize::new(0),
+                free_list,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
+                counters,
             })
+        }
+    }
+
+    /// Register a `RealSocket` instance (wrapped in `Arc<Mutex<...>>`) so it
+    /// can be reconfigured at runtime by management APIs.
+    pub fn register_socket_instance(inst: std::sync::Arc<std::sync::Mutex<RealSocket>>) {
+        let weak = Arc::downgrade(&inst);
+        let mut reg = SOCKET_INSTANCE_REGISTRY.lock().unwrap();
+        reg.push(weak);
+        // prune dead entries occasionally
+        if reg.len() > 1024 {
+            reg.retain(|w| w.strong_count() > 0);
+        }
+    }
+
+    /// Set FreeList headroom for all registered sockets (best-effort).
+    /// Returns a list of tuples: (socket_label, old_headroom, new_headroom).
+    pub fn set_freelist_headroom_all(headroom: usize) -> Vec<(String, usize, usize)> {
+        use std::sync::atomic::Ordering;
+        let reg = SOCKET_INSTANCE_REGISTRY.lock().unwrap();
+        let mut applied = Vec::new();
+        for weak in reg.iter() {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(guard) = arc.lock() {
+                    let old = guard.free_list.headroom.load(Ordering::Relaxed);
+                    guard.free_list.set_headroom(headroom);
+                    applied.push((guard.label.clone(), old, headroom));
+                }
+            }
+        }
+        applied
+    }
+
+    /// Set FreeList headroom for a single registered socket identified by label.
+    /// Returns (old, new) if the socket was found and updated.
+    pub fn set_freelist_headroom_for(label: &str, headroom: usize) -> Option<(usize, usize)> {
+        use std::sync::atomic::Ordering;
+        let reg = SOCKET_INSTANCE_REGISTRY.lock().unwrap();
+        for weak in reg.iter() {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(guard) = arc.lock() {
+                    if guard.label == label {
+                        let old = guard.free_list.headroom.load(Ordering::Relaxed);
+                        guard.free_list.set_headroom(headroom);
+                        return Some((old, headroom));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Snapshot current FreeList headroom values for all registered sockets.
+    pub fn snapshot_freelist_headrooms() -> Vec<(String, usize)> {
+        use std::sync::atomic::Ordering;
+        let reg = SOCKET_INSTANCE_REGISTRY.lock().unwrap();
+        let mut vec = Vec::new();
+        for weak in reg.iter() {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(guard) = arc.lock() {
+                    let hr = guard.free_list.headroom.load(Ordering::Relaxed);
+                    vec.push((guard.label.clone(), hr));
+                }
+            }
+        }
+        vec
+    }
+
+    // Provide a small wrapper type around `Arc<Mutex<RealSocket>>` which
+    // implements the `datapath::socket::XdpSocket` trait. This avoids orphan
+    // rule issues by making a local type.
+    #[allow(dead_code)]
+    pub struct RealSocketHandle(pub std::sync::Arc<std::sync::Mutex<RealSocket>>);
+
+    impl datapath::socket::XdpSocket for RealSocketHandle {
+        fn poll(&mut self, max: usize) -> Vec<Vec<u8>> {
+            if let Ok(mut g) = self.0.lock() {
+                g.poll(max)
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
+            if let Ok(mut g) = self.0.lock() {
+                g.send(buf, offsets)
+            } else {
+                Err(())
+            }
         }
     }
 
@@ -266,8 +550,23 @@ mod real {
                     libc::munmap(self.ring_map_ptr, self.ring_map_size);
                 }
             }
-            unsafe {
-                libc::close(self.fd);
+            // unregister metrics before closing fds
+            crate::unregister_socket_metrics(&self.label);
+            // close only valid fds
+            if self.fd >= 0 {
+                unsafe {
+                    libc::close(self.fd);
+                }
+            }
+            if self.eventfd >= 0 {
+                unsafe {
+                    libc::close(self.eventfd);
+                }
+            }
+            if self.epoll_fd >= 0 {
+                unsafe {
+                    libc::close(self.epoll_fd);
+                }
             }
         }
     }
@@ -299,31 +598,564 @@ mod real {
                 Some(r) => r,
                 None => return Err(()),
             };
-            let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
-            let frames = self._umem.len() / self._umem.frame_size();
-            for (off, len) in offsets.iter().cloned() {
-                let slice = &buf[off..off + len];
-                let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
-                let mem_off = idx * self._umem.frame_size();
-                unsafe {
-                    let dst = self._umem.base_ptr().add(mem_off);
-                    std::ptr::copy_nonoverlapping(
-                        slice.as_ptr(),
-                        dst,
-                        std::cmp::min(slice.len(), self._umem.frame_size()),
-                    );
+            // Implement bounded retry/backpressure: try to reclaim completions and
+            // retry a few times before failing. We avoid spinning indefinitely.
+            const MAX_RETRIES: usize = 8;
+            use std::thread;
+            use std::time::Duration;
+
+            for attempt in 0..=MAX_RETRIES {
+                // Reclaim completed frames from comp ring into free list
+                let comps = ring.comp_pop(64);
+                let mut reclaimed_any = false;
+                for a in comps {
+                    if self.free_list.try_push(a) {
+                        reclaimed_any = true;
+                    }
                 }
-                addrs.push(mem_off as u64);
+                // If we reclaimed any frames, notify waiters via eventfd (best-effort)
+                if reclaimed_any && self.eventfd >= 0 {
+                    let one: u64 = 1;
+                    unsafe {
+                        let _ = libc::write(self.eventfd, &one as *const u64 as *const libc::c_void, std::mem::size_of::<u64>());
+                    }
+                }
+
+                // Allocate frames from free list first, falling back to next_frame
+                let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
+                for (off, len) in offsets.iter().cloned() {
+                    let mem_off = if let Some(f) = self.free_list.try_pop() {
+                        // allocated from free list
+                        crate::AF_XDP_ALLOC_FROM_FREELIST_COUNT.fetch_add(1, Ordering::Relaxed);
+                        self.counters.alloc_from_freelist.fetch_add(1, Ordering::Relaxed);
+                        f
+                    } else {
+                        // fallback to bumping next_frame
+                        crate::AF_XDP_ALLOC_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                        self.counters.alloc_fallback.fetch_add(1, Ordering::Relaxed);
+                        let frames = self._umem.len() / self._umem.frame_size();
+                        let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
+                        (idx * self._umem.frame_size()) as u64
+                    };
+
+                    let slice = &buf[off..off + len];
+                    unsafe {
+                        let dst = self._umem.base_ptr().add(mem_off as usize);
+                        std::ptr::copy_nonoverlapping(
+                            slice.as_ptr(),
+                            dst,
+                            std::cmp::min(slice.len(), self._umem.frame_size()),
+                        );
+                    }
+                    addrs.push(mem_off as u64);
+                }
+
+                let pushed = ring.tx_push(&addrs);
+                if pushed == addrs.len() {
+                    return Ok(());
+                }
+
+                // track backpressure events
+                self.tx_backpressure_count.fetch_add(1, Ordering::Relaxed);
+                self.counters.backpressure.fetch_add(1, Ordering::Relaxed);
+                // global counters for metrics
+                crate::AF_XDP_BACKPRESSURE_COUNT.fetch_add(1, Ordering::Relaxed);
+
+                // Return all allocated frames back to free list
+                for &a in &addrs {
+                    if !self.free_list.try_push(a) {
+                        // free-list push failed (likely full); record and drop
+                        crate::AF_XDP_FREE_PUSH_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+                        self.counters.free_push_drop.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                if attempt == MAX_RETRIES {
+                    return Err(());
+                }
+
+                // count this retry (attempts > 0 indicate retries)
+                self.retry_count.fetch_add(1, Ordering::Relaxed);
+                self.counters.retry.fetch_add(1, Ordering::Relaxed);
+                crate::AF_XDP_RETRY_COUNT.fetch_add(1, Ordering::Relaxed);
+
+                // Wait for socket to become writable or fallback to short sleep
+                // Prefer epoll on (socket fd, eventfd) when available; fallback to poll.
+                if self.epoll_fd >= 0 {
+                    let mut events: [libc::epoll_event; 4] = unsafe { std::mem::zeroed() };
+                    let nfds = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), events.len() as i32, 100) };
+                    if nfds < 0 {
+                        // fallback to a tiny sleep on error
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                } else if self.fd >= 0 {
+                    let mut pfd = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
+                    // timeout 100ms to avoid long blocking in normal cases
+                    unsafe { let _ = libc::poll(&mut pfd as *mut libc::pollfd, 1, 100); }
+                } else {
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
 
-            let pushed = ring.tx_push(&addrs);
-            if pushed == 0 {
-                return Err(());
-            }
-            Ok(())
+            Err(())
         }
     }
-}
 
+    impl RealSocket {
+        /// Return the number of retry attempts observed on this socket.
+        pub fn retry_count(&self) -> u64 {
+            self.retry_count.load(Ordering::Relaxed)
+        }
+
+        /// Return the number of times tx push found backpressure.
+        pub fn tx_backpressure_count(&self) -> u64 {
+            self.tx_backpressure_count.load(Ordering::Relaxed)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn freelist_push_pop_roundtrip() {
+            let fl = FreeList::with_capacity(8);
+            assert!(fl.try_push(100));
+            assert!(fl.try_push(200));
+            assert_eq!(fl.try_pop(), Some(100));
+            assert_eq!(fl.try_pop(), Some(200));
+            assert_eq!(fl.try_pop(), None);
+        }
+
+        #[test]
+        fn freelist_dynamic_headroom_adjust() {
+            let fl = FreeList::with_capacity(8);
+            // fill until full under default headroom
+            let mut pushed = 0usize;
+            for i in 0..(fl.buf.len() * 2) {
+                if fl.try_push(i as u64) {
+                    pushed += 1;
+                } else {
+                    break;
+                }
+            }
+            // increase headroom to reserve half the buffer
+            let cap = fl.buf.len();
+            let new_headroom = cap / 2;
+            fl.set_headroom(new_headroom);
+            // popping all should yield the same number previously pushed
+            let mut popped = 0usize;
+            while let Some(_) = fl.try_pop() {
+                popped += 1;
+            }
+            assert_eq!(popped, pushed);
+        }
+
+        #[test]
+        fn lifecycle_reclaim_under_churn() {
+            // Setup umem with 16 frames
+            let frame_size = 2048usize;
+            let frames = 16usize;
+            let _umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            // Prepare a ring buffer area large enough for descriptors
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+            let fl = FreeList::with_capacity(frames);
+            for i in 0..frames {
+                let _ = fl.try_push((i * frame_size) as u64);
+            }
+            let mut next_idx = 0usize;
+            for _round in 0..64 {
+                // allocate up to half the frames
+                let mut allocated = Vec::new();
+                for _ in 0..(frames / 2) {
+                    if let Some(f) = fl.try_pop() {
+                        allocated.push(f);
+                    } else {
+                        let off = (next_idx * frame_size) as u64;
+                        allocated.push(off);
+                        next_idx = (next_idx + 1) % frames;
+                    }
+                }
+
+                // simulate kernel completion: write descriptors into comp_desc and bump prod
+                unsafe {
+                    let comp_meta_off = offs.comp;
+                    let comp_desc_off = offs.comp_desc;
+                    // set prod = count, cons = 0
+                    ring.write_u32_at(comp_meta_off, allocated.len() as u32);
+                    ring.write_u32_at(comp_meta_off + 4, 0);
+                    for (i, &addr) in allocated.iter().enumerate() {
+                        ring.write_u64_at(comp_desc_off + (i * 8) as u64, addr as u64);
+                    }
+                }
+
+                // reclaim via comp_pop -> push back into free list
+                let reclaimed = ring.comp_pop(frames);
+                for a in reclaimed {
+                    let _ = fl.try_push(a);
+                }
+            }
+
+            // After cycles, pop all frames and ensure we recovered at most `frames` values
+            let mut seen = Vec::new();
+            while let Some(v) = fl.try_pop() {
+                seen.push(v);
+                if seen.len() > frames { break; }
+            }
+            assert!(!seen.is_empty());
+        }
+
+        #[test]
+        fn real_send_copies_into_umem() {
+            let frame_size = 2048usize;
+            let frames = 4usize;
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            // simple in-memory ring backing
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            // empty free list to force next_frame allocation
+            let fl = FreeList::with_capacity(frames);
+
+            let counters = std::sync::Arc::new(crate::SocketCounters::new());
+            let label = "test:0".to_string();
+            crate::register_socket_metrics(label.clone(), counters.clone());
+            let rs = RealSocket {
+                ifname: "test".to_string(),
+                queue_id: 0,
+                label: label.clone(),
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
+                eventfd: -1,
+                epoll_fd: -1,
+                counters: counters.clone(),
+            };
+
+            // prepare buffer and call send
+            let mut rs = rs; // make mutable
+            let payload = b"hello_afxdp".to_vec();
+            let mut buf = payload.clone();
+            let offsets = vec![(0usize, payload.len())];
+
+            assert!(rs.send(&mut buf, &offsets).is_ok());
+
+            // verify data was copied into UMEM at frame 0
+            let base = rs._umem.base_ptr();
+            unsafe {
+                let slice = std::slice::from_raw_parts(base, rs._umem.frame_size());
+                assert_eq!(&slice[..payload.len()], &payload[..]);
+            }
+            // counters should be zero for the simple send
+            assert_eq!(rs.tx_backpressure_count.load(Ordering::Relaxed), 0);
+            assert_eq!(rs.retry_count.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn send_retries_when_tx_is_full_then_succeeds() {
+            let frame_size = 2048usize;
+            let frames = 4usize;
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            // Make tx capacity = 1 by setting tx_desc/fill_desc region small
+            unsafe {
+                // set tx prod=1, cons=0 -> full
+                ring.write_u32_at(offs.tx, 1);
+                ring.write_u32_at(offs.tx + 4, 0);
+            }
+
+            let fl = FreeList::with_capacity(frames);
+
+            let counters = std::sync::Arc::new(crate::SocketCounters::new());
+            let label = "test:0".to_string();
+            crate::register_socket_metrics(label.clone(), counters.clone());
+            let mut rs = RealSocket {
+                ifname: "test".to_string(),
+                queue_id: 0,
+                label: label.clone(),
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
+                eventfd: -1,
+                epoll_fd: -1,
+                counters: counters.clone(),
+            };
+
+            // spawn a thread that will free the TX ring after a short delay
+            if let Some(r) = &rs.ring {
+                let rptr_usize = r.base_ptr() as usize;
+                let map_size = rs.ring.as_ref().unwrap().len();
+                let offs_copy = offs;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    unsafe {
+                        let rptr = rptr_usize as *mut libc::c_void;
+                        let rm = crate::rings::RingMmap::new(rptr, map_size, offs_copy);
+                        let prodv = rm.read_u32_at(offs_copy.tx);
+                        rm.write_u32_at(offs_copy.tx + 4, prodv);
+                    }
+                });
+            }
+
+            let payload = b"retry_payload".to_vec();
+            let mut b = payload.clone();
+            let offsets = vec![(0usize, payload.len())];
+
+            // send should retry and succeed once the background thread advances cons
+            assert!(rs.send(&mut b, &offsets).is_ok());
+        }
+
+        #[test]
+        fn stress_concurrent_senders_with_reclaimer() {
+            use std::sync::Arc;
+            use std::sync::Mutex as StdMutex;
+
+            let frame_size = 1024usize;
+            let frames = 64usize;
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            let mut buf = vec![0u8; 65536].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            let fl = FreeList::with_capacity(frames);
+            for i in 0..frames {
+                assert!(fl.try_push((i * frame_size) as u64));
+            }
+
+            eprintln!("[test] creating RealSocket for stress test");
+            let counters = std::sync::Arc::new(crate::SocketCounters::new());
+            let label = "test:0".to_string();
+            crate::register_socket_metrics(label.clone(), counters.clone());
+            let socket = RealSocket {
+                ifname: "test".to_string(),
+                queue_id: 0,
+                label: label.clone(),
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
+                eventfd: -1,
+                epoll_fd: -1,
+                counters: counters.clone(),
+            };
+
+            let socket = Arc::new(StdMutex::new(socket));
+            eprintln!("[test] RealSocket wrapped in Arc<Mutex>");
+
+            eprintln!("[test] spawning sender threads");
+            // spawn several sender threads
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let s = Arc::clone(&socket);
+                handles.push(std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        let mut data = vec![0x55u8; 256];
+                        let offsets = vec![(0usize, 256usize)];
+                        let mut guard = s.lock().unwrap();
+                        let _ = guard.send(&mut data, &offsets);
+                        drop(guard);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }));
+            }
+
+            eprintln!("[test] spawning reclaimer thread");
+            // reclaimer thread: copies tx descriptors to comp ring to simulate kernel completion
+            let r = Arc::clone(&socket);
+            let reclaimer = std::thread::spawn(move || {
+                for _ in 0..200 {
+                    {
+                        let guard = r.lock().unwrap();
+                        if let Some(rm) = &guard.ring {
+                            // read tx prod/cons, copy any tx descriptors into comp region
+                            unsafe {
+                                let prod = rm.read_u32_at(offs.tx) as usize;
+                                let cons = rm.read_u32_at(offs.tx + 4) as usize;
+                                let avail = prod.wrapping_sub(cons);
+                                if avail > 0 {
+                                    // compute tx capacity from offsets
+                                    let desc_region_bytes = offs.fill_desc.saturating_sub(offs.tx_desc) as usize;
+                                    let cap = (desc_region_bytes / std::mem::size_of::<u64>()).max(1);
+                                    // clamp availability to avoid wrapping-induced huge values
+                                    let avail_clamped = std::cmp::min(avail, cap as usize);
+                                    // copy descriptors from tx_desc to comp_desc and set comp prod
+                                    for i in 0..avail_clamped {
+                                        let idx = (cons + i) & (cap - 1);
+                                        let d_off = offs.tx_desc + (idx * 8) as u64;
+                                        let addr = rm.read_u64_at(d_off);
+                                        rm.write_u64_at(offs.comp_desc + (i * 8) as u64, addr);
+                                    }
+                                    rm.write_u32_at(offs.comp, avail_clamped as u32);
+                                    rm.write_u32_at(offs.comp + 4, 0);
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
+
+            eprintln!("[test] joining sender threads");
+            for h in handles {
+                h.join().expect("sender thread panicked");
+            }
+            eprintln!("[test] joining reclaimer thread");
+            reclaimer.join().expect("reclaimer panicked");
+            eprintln!("[test] all threads joined");
+
+            let guard = socket.lock().unwrap();
+            // touch counters to ensure they are readable (avoid useless comparison)
+            let _ = guard.retry_count();
+            let _ = guard.tx_backpressure_count();
+        }
+
+        #[test]
+        fn register_and_reconfigure_runtime() {
+            use std::sync::Arc as StdArc;
+            // create small umem and ring backing
+            let frame_size = 1024usize;
+            let frames = 8usize;
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            let fl = FreeList::with_capacity(frames);
+            for i in 0..frames {
+                let _ = fl.try_push((i * frame_size) as u64);
+            }
+
+            let counters = StdArc::new(crate::SocketCounters::new());
+            let label = "rt-test:0".to_string();
+            crate::register_socket_metrics(label.clone(), counters.clone());
+
+            let rs = RealSocket {
+                ifname: "rt-test".to_string(),
+                queue_id: 0,
+                label: label.clone(),
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
+                eventfd: -1,
+                epoll_fd: -1,
+                counters: counters.clone(),
+            };
+
+            let arc = StdArc::new(std::sync::Mutex::new(rs));
+            // register instance for runtime reconfigure
+            register_socket_instance(arc.clone());
+
+            // snapshot headrooms should include our label
+            let snaps = snapshot_freelist_headrooms();
+            assert!(snaps.iter().any(|(l, _)| l == &label));
+
+            // set per-socket headroom
+            let new = 64usize;
+            let res = set_freelist_headroom_for(&label, new);
+            assert!(res.is_some());
+            let (_old, got) = res.unwrap();
+            assert_eq!(got, new);
+
+            // global set should include our label
+            let applied = set_freelist_headroom_all(128);
+            assert!(applied.iter().any(|(l,_,_)| l == &label));
+
+            // drop the strong Arc and ensure snapshot no longer returns the label
+            std::mem::drop(arc);
+            // give a moment for the weak ref to become unusable
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let snaps2 = snapshot_freelist_headrooms();
+            assert!(!snaps2.iter().any(|(l, _)| l == &label));
+        }
+    }
+    // close mod real
+    }
 #[cfg(feature = "real")]
 pub use real::RealSocket;

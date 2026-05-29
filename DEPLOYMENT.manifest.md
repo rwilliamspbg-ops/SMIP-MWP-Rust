@@ -14,6 +14,13 @@ This manifest captures performance-risk flags that must be reviewed before produ
 
 If forwarding relies on Go control-plane interaction at runtime, mark release **AT RISK** and document expected context-switching/locking overhead with mitigation plan.
 
+### Current Status: AT RISK
+
+- Reason: chaos benchmark SLA failure observed during CI-style run: measured `p99_ns=56235` exceeds service-level `p99_ns=46000`.
+- Action: Regenerate `benchmark/chaos_report.md` on target hardware for each release candidate and attach artifacts to the release PR. Investigate control-plane interaction on forwarding hot path and isolate or async the control calls.
+
+See `benchmark/chaos_report.md` and CI artifacts for details.
+
 ## Validation Links
 
 - Throughput: `benchmark/report_throughput.md`

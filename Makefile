@@ -24,6 +24,34 @@ setup-hardware:
 verify-bridge:
 	./tools/validation/verify_bridge.sh
 
+.PHONY: verify-bridge-smoke
+verify-bridge-smoke:
+	@echo "Building hardware smoke test (does not run it). Set MOHAWK_IFACE and run manually on a host with the NIC."
+	@cargo build --manifest-path tools/hardware/smoke/Cargo.toml --release || true
+
+.PHONY: bench-harness
+bench-harness:
+	@echo "Run benchmark harness script"
+	@bash tools/bench_harness/run_bench_harness.sh
+
+.PHONY: verify-bridge-run-smoke
+verify-bridge-run-smoke:
+	@if [ -z "$$MOHAWK_IFACE" ]; then \
+		echo "MOHAWK_IFACE is required to run smoke test"; exit 2; \
+	fi
+	@echo "Running hardware smoke test...";
+	@sh tools/hardware/smoke/run_smoke.sh
+
+.PHONY: run-smoke-safe
+run-smoke-safe:
+	@echo "Dry-run of hardware smoke test (no NIC actions)"
+	@bash tools/hardware/run_smoke_safe.sh --dry-run
+
+.PHONY: run-smoke-traffic
+run-smoke-traffic:
+	@echo "Dry-run of smoke+traffic orchestration"
+	@bash tools/hardware/run_smoke_with_traffic.sh --dry-run
+
 ## Run EPYC-oriented chaos benchmark matrix and export CSV.
 chaos-epyc-profile:
 	./tools/benchmark/run_chaos_epyc_profile.sh
@@ -47,6 +75,8 @@ performance-envelope: chaos-epyc-profile report-latency chaos-report
 ## Run a real hardware-backed benchmark using the stress harness.
 ## Expects env vars: DUT_BIN, GEN_CMD, IFACE, DURATION, OUT
 real-bench: build
+	@echo "Running AF_XDP hardware smoke test"
+	./tools/benchmark/real_smoke.sh
 	./tools/stress/run_stress.sh --dut "$$DUT_BIN" --gen "$$GEN_CMD" --iface "$$IFACE" --duration "$$DURATION" --out "$$OUT"
 
 clean:

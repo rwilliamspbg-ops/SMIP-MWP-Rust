@@ -1,0 +1,68 @@
+routing_miss_path/lookup_or_predict_miss/1
+                        time:   [16.950 µs 17.655 µs 18.867 µs]
+                        thrpt:  [13.568 Melem/s 14.500 Melem/s 15.103 Melem/s]
+                 change:
+                        time:   [-17.325% -13.390% -8.5064%] (p = 0.00 < 0.05)
+                        thrpt:  [+9.2973% +15.460% +20.956%]
+                        Performance has improved.
+routing_miss_path/lookup_or_predict_miss/2
+                        time:   [16.747 µs 17.172 µs 17.644 µs]
+                        thrpt:  [14.509 Melem/s 14.908 Melem/s 15.286 Melem/s]
+                 change:
+                        time:   [-20.462% -18.754% -17.180%] (p = 0.00 < 0.05)
+                        thrpt:  [+20.744% +23.083% +25.726%]
+                        Performance has improved.
+routing_miss_path/lookup_or_predict_miss/3
+                        time:   [17.116 µs 18.620 µs 19.690 µs]
+                        thrpt:  [13.001 Melem/s 13.749 Melem/s 14.957 Melem/s]
+                 change:
+                        time:   [-24.126% -19.487% -14.928%] (p = 0.00 < 0.05)
+                        thrpt:  [+17.547% +24.204% +31.797%]
+                        Performance has improved.
+routing_miss_path/lookup_or_predict_miss/4
+                        time:   [17.507 µs 17.805 µs 18.274 µs]
+                        thrpt:  [14.009 Melem/s 14.378 Melem/s 14.623 Melem/s]
+                 change:
+                        time:   [-22.188% -19.799% -17.054%] (p = 0.00 < 0.05)
+                        thrpt:  [+20.560% +24.687% +28.516%]
+                        Performance has improved.
+routing_miss_path/lookup_or_predict_miss/5
+                        time:   [18.157 µs 18.507 µs 18.781 µs]
+                        thrpt:  [13.631 Melem/s 13.832 Melem/s 14.100 Melem/s]
+                 change:
+                        time:   [-23.776% -21.464% -19.430%] (p = 0.00 < 0.05)
+                        thrpt:  [+24.115% +27.330% +31.193%]
+                        Performance has improved.
+routing_miss_path/lookup_or_predict_miss/6
+                        time:   [19.314 µs 19.636 µs 19.842 µs]
+                        thrpt:  [12.902 Melem/s 13.037 Melem/s 13.254 Melem/s]
+                 change:
+                        time:   [-26.409% -22.666% -19.004%] (p = 0.00 < 0.05)
+                        thrpt:  [+23.462% +29.309% +35.886%]
+                        Performance has improved.
+routing_miss_path/lookup_or_predict_miss/7
+                        time:   [19.716 µs 20.257 µs 20.702 µs]
+                        thrpt:  [12.366 Melem/s 12.637 Melem/s 12.984 Melem/s]
+                 change:
+                        time:   [-20.260% -18.001% -15.662%] (p = 0.00 < 0.05)
+                        thrpt:  [+18.570% +21.952% +25.408%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+routing_miss_path/lookup_or_predict_miss/8
+                        time:   [20.411 µs 20.813 µs 21.288 µs]
+                        thrpt:  [12.025 Melem/s 12.300 Melem/s 12.542 Melem/s]
+                 change:
+                        time:   [-27.147% -24.098% -21.044%] (p = 0.00 < 0.05)
+                        thrpt:  [+26.653% +31.748% +37.263%]
+                        Performance has improved.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+routing_miss_path/lookup_or_predict_miss/16
+                        time:   [21.596 µs 22.153 µs 23.265 µs]
+                        thrpt:  [11.003 Melem/s 11.556 Melem/s 11.854 Melem/s]
+                 change:
+                        time:   [-29.335% -25.246% -20.751%] (p = 0.00 < 0.05)
+                        thrpt:  [+26.184% +33.772% +41.512%]
+                        Performance has improved.
+

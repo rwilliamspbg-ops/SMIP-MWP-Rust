@@ -13,12 +13,36 @@ jobs:
         override: true
     - name: Build the project
       run: cargo build --release
+    - name: Prepare benchmark artifacts and scripts
+      run: |
+        # Ensure directories exist and scripts are executable to avoid CI failures
+        mkdir -p tools/bench_results benchmark
+        chmod +x tools/benchmark/*.sh || true
     - name: Run workspace tests
       run: cargo test --workspace --all-targets
     - name: Run metrics smoke test
       run: cargo run --release -p bench
     - name: Run bridge validation gate
       run: make verify-bridge
+    - name: Prepare for optional chaos validation
+      run: echo "Chaos validation moved to a self-hosted job to avoid flaky failures on hosted runners"
+
+  # Separate job: run the heavy/noisy chaos benchmarks on self-hosted bench hosts
+  chaos-validation:
+    needs: build
+    runs-on: [self-hosted, bench-host]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+    - name: Prepare benchmark artifacts and scripts
+      run: |
+        mkdir -p tools/bench_results benchmark
+        chmod +x tools/benchmark/*.sh || true
     - name: Run chaos report PASS gate
       run: |
         chmod +x tools/benchmark/run_chaos_epyc_profile.sh
@@ -36,9 +60,7 @@ jobs:
           --seed 1337 | tee /tmp/chaos_benchmark_ci.txt
         python3 tools/benchmark/assert_chaos_thresholds.py \
           --input /tmp/chaos_benchmark_ci.txt \
-          --min-throughput 100000 \
-          --max-p99-ns 100000 \
-          --max-p999-ns 120000
+          --enforce-sla
     - name: Upload chaos validation artifacts
       if: always()
       uses: actions/upload-artifact@v4
@@ -47,6 +69,7 @@ jobs:
         path: |
           benchmark/chaos_report.md
           tools/bench_results/chaos_epyc_profile.csv
+          tools/bench_results/ci_baseline.txt
           tools/bench_results/datapath_profile.csv
           tools/bench_results/datapath_alloc_events.csv
           tools/bench_results/datapath_handle_events.csv

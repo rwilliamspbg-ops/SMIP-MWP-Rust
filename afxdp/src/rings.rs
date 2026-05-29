@@ -75,6 +75,17 @@ impl RingMmap {
         (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
     }
 
+    fn fill_capacity(&self) -> usize {
+        let desc_region_bytes =
+            self.offsets.comp_desc.saturating_sub(self.offsets.fill_desc) as usize;
+        (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
+    }
+
+    fn comp_capacity(&self) -> usize {
+        let desc_region_bytes = self.size.saturating_sub(self.offsets.comp_desc as usize);
+        (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
+    }
+
     /// Pop up to `max` RX frame descriptors and return their offsets.
     pub fn rx_pop(&self, max: usize) -> Vec<u64> {
         unsafe {
@@ -105,6 +116,71 @@ impl RingMmap {
             self.write_u32_at(rx_meta_off + 4, new_cons);
 
             out
+        }
+    }
+
+    /// Pop up to `max` completion descriptors from the comp ring and return addresses.
+    pub fn comp_pop(&self, max: usize) -> Vec<u64> {
+        unsafe {
+            let offs = self.offsets;
+            let comp_meta_off = offs.comp;
+            let comp_desc_off = offs.comp_desc;
+
+            let prod = self.read_u32_at(comp_meta_off);
+            let cons = self.read_u32_at(comp_meta_off + 4);
+            let avail = prod.wrapping_sub(cons) as usize;
+            if avail == 0 {
+                return Vec::new();
+            }
+
+            let capacity = self.comp_capacity();
+            let mask = capacity - 1;
+
+            let to_take = std::cmp::min(avail, max);
+            let mut out = Vec::with_capacity(to_take);
+            for i in 0..to_take {
+                let idx = (cons as usize + i) & mask;
+                let d_off = comp_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
+                let desc = self.read_u64_at(d_off);
+                out.push(desc);
+            }
+
+            let new_cons = cons.wrapping_add(to_take as u32);
+            self.write_u32_at(comp_meta_off + 4, new_cons);
+
+            out
+        }
+    }
+
+    /// Push `addrs` into the fill ring for the kernel to use as RX buffers.
+    pub fn fill_push(&self, addrs: &[u64]) -> usize {
+        unsafe {
+            let offs = self.offsets;
+            let fill_meta_off = offs.fill;
+            let fill_desc_off = offs.fill_desc;
+
+            let prod = self.read_u32_at(fill_meta_off);
+            let cons = self.read_u32_at(fill_meta_off + 4);
+
+            let capacity = self.fill_capacity();
+            let mask = capacity - 1;
+
+            let used = prod.wrapping_sub(cons) as usize;
+            let free = capacity.saturating_sub(used);
+            if free == 0 {
+                return 0;
+            }
+
+            let to_push = std::cmp::min(free, addrs.len());
+            for (i, &addr) in addrs.iter().enumerate().take(to_push) {
+                let idx = (prod as usize + i) & mask;
+                let d_off = fill_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
+                self.write_u64_at(d_off, addr);
+            }
+
+            let new_prod = prod.wrapping_add(to_push as u32);
+            self.write_u32_at(fill_meta_off, new_prod);
+            to_push
         }
     }
 
@@ -271,6 +347,62 @@ mod tests {
             let prod = ring.read_u32_at(offs.tx);
             assert_eq!(prod, 3u32);
         }
+        drop(buf);
+    }
+
+    #[test]
+    fn test_comp_pop_and_fill_push() {
+        let mut buf = vec![0u8; 8192].into_boxed_slice();
+        let ptr = buf.as_mut_ptr();
+        let offs = XskMmapOffsets {
+            rx: 0,
+            rx_desc: 128,
+            tx: 64,
+            tx_desc: 256,
+            fill: 512,
+            fill_desc: 512 + 16,
+            comp: 1024,
+            comp_desc: 1024 + 16,
+        };
+        let ring = unsafe { RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+        unsafe {
+            // setup comp: prod=3, cons=0, write 3 descriptors
+            ring.write_u32_at(offs.comp, 3);
+            ring.write_u32_at(offs.comp + 4, 0);
+            for i in 0..3u64 {
+                ring.write_u64_at(offs.comp_desc + (i * 8), 1000 + i * 100);
+            }
+
+            // setup fill: prod=0, cons=0
+            ring.write_u32_at(offs.fill, 0);
+            ring.write_u32_at(offs.fill + 4, 0);
+        }
+
+        let popped = ring.comp_pop(2);
+        assert_eq!(popped.len(), 2);
+        assert_eq!(popped[0], 1000);
+        assert_eq!(popped[1], 1100);
+
+        unsafe {
+            let cons = ring.read_u32_at(offs.comp + 4);
+            assert_eq!(cons, 2);
+        }
+
+        // push some fill addresses
+        let addrs = vec![2000u64, 3000u64];
+        let pushed = ring.fill_push(&addrs);
+        assert_eq!(pushed, 2);
+
+        unsafe {
+            for (i, &addr) in addrs.iter().enumerate().take(2) {
+                let v = ring.read_u64_at(offs.fill_desc + (i * 8) as u64);
+                assert_eq!(v, addr);
+            }
+            let prod = ring.read_u32_at(offs.fill);
+            assert_eq!(prod, 2u32);
+        }
+
         drop(buf);
     }
 }
