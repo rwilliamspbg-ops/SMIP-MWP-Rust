@@ -21,7 +21,7 @@ jobs:
     - name: Run workspace tests
       run: cargo test --workspace --all-targets
     - name: Run metrics smoke test
-      run: cargo run --release -p bench
+      run: cargo run --release -p bench --bin bench
     - name: Run bridge validation gate
       run: make verify-bridge
     - name: Prepare for optional chaos validation
@@ -43,6 +43,8 @@ jobs:
       run: |
         mkdir -p tools/bench_results benchmark
         chmod +x tools/benchmark/*.sh || true
+    - name: Benchmark-mode preflight
+      run: make benchmark-mode-enforce
     - name: Run chaos report PASS gate
       run: |
         chmod +x tools/benchmark/run_chaos_epyc_profile.sh
@@ -104,6 +106,8 @@ jobs:
       run: |
         python3 tools/benchmark/parse_crypto_overhead.py
       continue-on-error: false
+    - name: Run post-benchmark verification gate
+      run: make verify
     - name: Generate performance envelope
       run: |
         python3 tools/benchmark/generate_performance_envelope.py || true

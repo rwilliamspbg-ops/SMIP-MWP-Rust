@@ -1,9 +1,14 @@
 ## Makefile - stress and profiling helpers
 
-.PHONY: build stress-test real-bench profile setup-hardware verify-bridge chaos-epyc-profile chaos-report report-latency performance-envelope clean
+.PHONY: build stress-test real-bench profile setup-hardware benchmark-mode-check benchmark-mode-enforce verify verify-bridge chaos-epyc-profile chaos-report report-latency performance-envelope clean
 
 build:
 	cargo build --release
+
+## Run the workspace validation gate after benchmarks or other perf-sensitive runs.
+verify:
+	cargo test --workspace --all-targets
+	$(MAKE) verify-bridge
 
 ## Run a stress test. Expects env vars: DUT_BIN, GEN_CMD, IFACE, RATE, DURATION, OUT
 stress-test:
@@ -19,6 +24,14 @@ profile: build
 ## Expects optional env vars: HUGE_PAGES (default 1024), PIN_CORES (default 2-3), DRY_RUN (0|1)
 setup-hardware:
 	./tools/hardware/setup_hardware.sh
+
+## Print or enforce the benchmark-mode CPU pinning and hugepages checklist.
+benchmark-mode-check:
+	./tools/benchmark/benchmark_mode.sh --cores "$${PIN_CORES:-2-3}" --hugepages "$${HUGE_PAGES:-1024}"
+
+## Enforce the benchmark-mode CPU pinning and hugepages checklist.
+benchmark-mode-enforce:
+	./tools/benchmark/benchmark_mode.sh --cores "$${PIN_CORES:-2-3}" --hugepages "$${HUGE_PAGES:-1024}" --strict
 
 ## Validate bridge contract and cross-language compatibility checks.
 verify-bridge:

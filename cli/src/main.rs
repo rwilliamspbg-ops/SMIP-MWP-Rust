@@ -200,6 +200,7 @@ fn render_telemetry(
 
 
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
     format!(
         concat!(

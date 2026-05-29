@@ -63,7 +63,7 @@ impl XdpSocket for CloneSocket {
         std::mem::take(&mut self.frames)
     }
 
-    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, _buf: &[u8], _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }
@@ -98,7 +98,7 @@ impl XdpSocket for ZeroCopySocket {
         ring.active.len()
     }
 
-    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, _buf: &[u8], _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }
@@ -128,7 +128,7 @@ impl XdpSocket for DefaultFallbackSocket {
         std::mem::take(&mut self.frames)
     }
 
-    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, _buf: &[u8], _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }

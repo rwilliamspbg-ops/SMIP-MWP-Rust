@@ -1,7 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::env;
 use std::process::Command;
-use std::time::Duration;
 use std::hint::black_box;
 
 fn line_rate_benchmark(c: &mut Criterion) {
@@ -29,7 +28,7 @@ fn line_rate_benchmark(c: &mut Criterion) {
                     iface
                 ))
                 .status();
-            black_box(status);
+            let _ = black_box(status);
         })
     });
 

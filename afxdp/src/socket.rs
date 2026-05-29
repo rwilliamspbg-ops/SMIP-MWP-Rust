@@ -35,9 +35,9 @@ impl DatapathXdpSocket for MockSocket {
     fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.frames.lock().unwrap())
     }
-    fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, buf: &[u8], offsets: &[(usize, usize)]) -> Result<(), ()> {
         let mut out = Vec::with_capacity(offsets.len());
-        for (off, len) in offsets.iter().cloned() {
+            for (off, len) in offsets.iter().cloned() {
             out.push(buf[off..off + len].to_vec());
         }
         *self.sent.lock().unwrap() = out;
@@ -592,7 +592,7 @@ mod real {
             // fallback to empty
             Vec::new()
         }
-        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
+        fn send(&mut self, buf: &[u8], offsets: &[(usize, usize)]) -> Result<(), ()> {
             // Use ring-based TX if available
             let ring = match &self.ring {
                 Some(r) => r,
@@ -624,7 +624,7 @@ mod real {
                 // Allocate frames from free list first, falling back to next_frame
                 let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
                 for (off, len) in offsets.iter().cloned() {
-                    let mem_off = if let Some(f) = self.free_list.try_pop() {
+                        let mem_off = if let Some(f) = self.free_list.try_pop() {
                         // allocated from free list
                         crate::AF_XDP_ALLOC_FROM_FREELIST_COUNT.fetch_add(1, Ordering::Relaxed);
                         self.counters.alloc_from_freelist.fetch_add(1, Ordering::Relaxed);
