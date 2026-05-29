@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Simple bench harness runner for local development.
+# Usage:
+#   MOHAWK_IFACE=ens1f0 ./tools/bench_harness/run_bench_harness.sh
+
+if [ -z "${MOHAWK_IFACE:-}" ]; then
+  echo "Warning: MOHAWK_IFACE not set — benches that require a real NIC may fail or be skipped."
+fi
+
+echo "Building bench crate..."
+cargo build --manifest-path bench/Cargo.toml
+
+echo "To run benches: cargo bench --manifest-path bench/Cargo.toml"
+echo "If you need AF_XDP real feature enabled, run with: --features real"
+
+exit 0
+#!/usr/bin/env bash
+set -euo pipefail
+
 # Usage: run_bench_harness.sh [ITERATIONS] [OUTPUT_CSV]
 # ITERATIONS: how many times to run each strategy (default 20)
 # OUTPUT_CSV: path to write CSV (default: ./bench_results.csv)

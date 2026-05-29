@@ -1,0 +1,10 @@
+{
+  "smoke": {
+    "min_throughput": 100000,
+    "max_p99_ns": 100000,
+    "max_p999_ns": 120000
+  },
+  "service_level": {
+    "p99_ns": 46000
+  }
+}

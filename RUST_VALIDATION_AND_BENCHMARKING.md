@@ -62,7 +62,24 @@ Then validate on real hardware with:
 - hugepages configured if the implementation requires them
 - root privileges for binding and socket setup
 
-At that point, add a Rust-native AF_XDP smoke test and a benchmark harness that measures packet throughput and latency against the actual datapath implementation.
+Run `/tools/benchmark/run_chaos_epyc_profile.sh` to execute the chaos profile.
+
+AF_XDP Hardware Smoke Test
+--------------------------
+To run the AF_XDP hardware smoke test (requires hugepages and appropriate NIC drivers):
+
+1. Ensure hugepages are configured and you have permissions to bind AF_XDP sockets.
+2. Export or pass `--real --iface <ifname>` to the CLI. Example:
+
+```bash
+export MOHAWK_IFACE=eth0
+export MOHAWK_QUEUE_ID=0
+export MOHAWK_FRAME_SIZE=2048
+export MOHAWK_UMEM_PAGES=1024
+make real-bench
+```
+
+The `make real-bench` target will run `./tools/benchmark/real_smoke.sh`, which invokes the `cli` with `--features real` and a sample bridge request to validate basic forwarding.
 
 ## Pinned Benchmarking Notes
 

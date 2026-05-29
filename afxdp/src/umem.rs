@@ -30,11 +30,14 @@ impl Umem {
                 ));
             }
             let nn = NonNull::new_unchecked(p as *mut u8);
+            // Compute number of frames available in this UMEM region and store
+            // it in the atomic `frames` counter for use by simple allocators.
+            let total_frames = if frame_size == 0 { 0 } else { len / frame_size };
             Ok(Umem {
                 ptr: nn,
                 len,
                 frame_size,
-                frames: AtomicUsize::new(0),
+                frames: AtomicUsize::new(total_frames),
             })
         }
     }
@@ -42,6 +45,11 @@ impl Umem {
     /// Number of frames available (simple counter for demo use)
     pub fn frame_count(&self) -> usize {
         self.frames.load(Ordering::SeqCst)
+    }
+
+    /// Return the total number of frames (computed from region length/frame size).
+    pub fn total_frames(&self) -> usize {
+        if self.frame_size == 0 { 0 } else { self.len / self.frame_size }
     }
 
     /// A pointer to the base of the UMEM region

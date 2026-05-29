@@ -1,0 +1,27 @@
+datapath_forwarder/packets_16
+                        time:   [4.6431 µs 4.7035 µs 4.7883 µs]
+                        thrpt:  [3.3415 Melem/s 3.4017 Melem/s 3.4460 Melem/s]
+datapath_forwarder/packets_64
+                        time:   [19.226 µs 19.647 µs 20.192 µs]
+                        thrpt:  [3.1696 Melem/s 3.2576 Melem/s 3.3288 Melem/s]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+datapath_forwarder/packets_256
+                        time:   [78.005 µs 78.774 µs 79.800 µs]
+                        thrpt:  [3.2080 Melem/s 3.2498 Melem/s 3.2818 Melem/s]
+
+datapath_forwarder_miss/packets_16
+                        time:   [4.8118 µs 4.8852 µs 4.9675 µs]
+                        thrpt:  [3.2209 Melem/s 3.2752 Melem/s 3.3252 Melem/s]
+datapath_forwarder_miss/packets_64
+                        time:   [19.621 µs 19.994 µs 20.445 µs]
+                        thrpt:  [3.1304 Melem/s 3.2009 Melem/s 3.2619 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+datapath_forwarder_miss/packets_256
+                        time:   [79.491 µs 80.276 µs 81.175 µs]
+                        thrpt:  [3.1537 Melem/s 3.1890 Melem/s 3.2205 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+
