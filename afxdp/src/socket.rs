@@ -399,8 +399,12 @@ mod real {
                 let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
                 for (off, len) in offsets.iter().cloned() {
                     let mem_off = if let Some(f) = self.free_list.try_pop() {
+                        // allocated from free list
+                        crate::AF_XDP_ALLOC_FROM_FREELIST_COUNT.fetch_add(1, Ordering::Relaxed);
                         f
                     } else {
+                        // fallback to bumping next_frame
+                        crate::AF_XDP_ALLOC_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
                         let frames = self._umem.len() / self._umem.frame_size();
                         let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
                         (idx * self._umem.frame_size()) as u64
@@ -430,7 +434,10 @@ mod real {
 
                 // Return all allocated frames back to free list
                 for &a in &addrs {
-                    let _ = self.free_list.try_push(a);
+                    if !self.free_list.try_push(a) {
+                        // free-list push failed (likely full); record and drop
+                        crate::AF_XDP_FREE_PUSH_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
 
                 if attempt == MAX_RETRIES {

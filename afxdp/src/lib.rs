@@ -12,6 +12,9 @@ use std::sync::atomic::Ordering;
 /// Global counters exported for diagnostics and metrics.
 pub static AF_XDP_RETRY_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static AF_XDP_BACKPRESSURE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static AF_XDP_ALLOC_FROM_FREELIST_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static AF_XDP_ALLOC_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static AF_XDP_FREE_PUSH_DROP_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn available() -> bool {
     cfg!(feature = "real")

@@ -354,18 +354,33 @@ fn main() {
         let registry = prometheus::Registry::new();
         let afxdp_retry = prometheus::IntGauge::new("afxdp_retry_total", "AF_XDP send retry attempts").unwrap();
         let afxdp_back = prometheus::IntGauge::new("afxdp_backpressure_total", "AF_XDP tx backpressure events").unwrap();
+        let af_alloc_from_fl = prometheus::IntGauge::new("afxdp_alloc_from_freelist_total", "AF_XDP allocations served from free list").unwrap();
+        let af_alloc_fallback = prometheus::IntGauge::new("afxdp_alloc_fallback_total", "AF_XDP allocations using fallback allocator").unwrap();
+        let af_free_push_drop = prometheus::IntGauge::new("afxdp_free_push_drop_total", "AF_XDP drops when returning frames to free list").unwrap();
         registry.register(Box::new(afxdp_retry.clone())).ok();
         registry.register(Box::new(afxdp_back.clone())).ok();
+        registry.register(Box::new(af_alloc_from_fl.clone())).ok();
+        registry.register(Box::new(af_alloc_fallback.clone())).ok();
+        registry.register(Box::new(af_free_push_drop.clone())).ok();
 
         // Background updater to sync atomic globals into the prometheus gauges
         {
             let g_retry = afxdp_retry.clone();
             let g_back = afxdp_back.clone();
+            let g_af_alloc_from = af_alloc_from_fl.clone();
+            let g_af_alloc_fb = af_alloc_fallback.clone();
+            let g_af_free_drop = af_free_push_drop.clone();
             std::thread::spawn(move || loop {
                 let r = afxdp::AF_XDP_RETRY_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
                 let b = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let af_from = afxdp::AF_XDP_ALLOC_FROM_FREELIST_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let af_fb = afxdp::AF_XDP_ALLOC_FALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let af_drop = afxdp::AF_XDP_FREE_PUSH_DROP_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
                 g_retry.set(r);
                 g_back.set(b);
+                g_af_alloc_from.set(af_from);
+                g_af_alloc_fb.set(af_fb);
+                g_af_free_drop.set(af_drop);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             });
         }
