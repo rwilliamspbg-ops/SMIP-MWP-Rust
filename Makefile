@@ -94,3 +94,29 @@ real-bench: build
 
 clean:
 	cargo clean
+
+.PHONY: mcr-build mcr-test mcr-benchmark mcr-report clean-mcr
+
+mcr-build:
+	@echo "Building MCR-enabled datapath stack"
+	@cargo build --release -p routing -p datapath
+
+mcr-test: mcr-build
+	@echo "Testing MCR routing and forwarding logic"
+	@cargo test -p routing --lib || true
+	@cargo test -p datapath --lib || true
+
+mcr-benchmark: mcr-build
+	@echo "Running MCR chaos benchmark matrix"
+	@MOHAWK_MCR_CHANNELS=1 ./tools/benchmark/run_chaos_epyc_profile.sh
+	@MOHAWK_MCR_CHANNELS=3 ./tools/benchmark/run_chaos_epyc_profile.sh
+	@MOHAWK_MCR_CHANNELS=5 ./tools/benchmark/run_chaos_epyc_profile.sh
+
+mcr-report: mcr-benchmark
+	@python3 tools/benchmark/generate_mcr_report.py \
+		--input tools/bench_results/chaos_epyc_profile.csv \
+		--output benchmark/mcr_chaos_report.md
+	@echo "Generated: benchmark/mcr_chaos_report.md"
+
+clean-mcr:
+	@cargo clean -p routing -p datapath

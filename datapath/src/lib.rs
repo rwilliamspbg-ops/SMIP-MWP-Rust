@@ -17,6 +17,7 @@ pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 use routing::Table;
 use std::convert::TryInto;
 use wire::{HeaderViewRef, HEADER_SIZE};
+mod mcr_config;
 
 const PARALLEL_BATCH_THRESHOLD: usize = 1024;
 const ALIGNMENT: usize = 256;
@@ -102,6 +103,10 @@ pub struct Forwarder {
     session: Option<HybridSession>,
     arena: AlignedBuffer,
     offsets: Vec<(usize, usize)>,
+    /// MCR spray buffer for multi-channel outputs
+    spray_buffer: Vec<Vec<u8>>,
+    /// Track which channels were used in this batch
+    channel_usage: AtomicU64,
 }
 
 struct PacketOutput {
@@ -131,6 +136,8 @@ impl Forwarder {
             // Pre-reserve aligned scratch/output storage to avoid mid-run allocations.
             arena: AlignedBuffer::with_capacity(262144),
             offsets: Vec::with_capacity(4096),
+            spray_buffer: Vec::new(),
+            channel_usage: AtomicU64::new(mcr_config::get_mcr_channels() as u64),
         }
     }
 
@@ -387,6 +394,20 @@ impl Forwarder {
         stats
     }
 
+    /// MCR-aware processing: for now delegates to `process_batch` while
+    /// preserving a stable API for future MCR spray behavior.
+    pub fn process_batch_mcr(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        // TODO: implement batched lookup_spray and multi-channel outputs
+        self.process_batch(sock)
+    }
+
+    /// Full-spray mode: duplicate to all channels. Currently a stub that
+    /// behaves like the normal path until spray is implemented.
+    pub fn process_batch_spray_full(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        // TODO: build outputs for all channels per-packet
+        self.process_batch(sock)
+    }
+
     pub fn process_batch_slices(
         &mut self,
         sock: &mut dyn XdpSocket,
@@ -607,6 +628,9 @@ mod tests {
             next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
@@ -636,6 +660,9 @@ mod tests {
             next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
@@ -679,6 +706,9 @@ mod tests {
             next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let mut fwd = Forwarder::new(rt);
 

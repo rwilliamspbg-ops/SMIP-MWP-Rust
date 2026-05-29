@@ -9,6 +9,8 @@ This file tracks notable repository-level changes on the current `main` branch.
 - The datapath serial hot path now encrypts payloads directly inside the output arena instead of bouncing through an intermediate ciphertext buffer.
 - The README and benchmark docs were refreshed to match the current workspace, workflows, and artifact layout.
 
+- Added Multi-Channel Routing (MCR) spraying integration: routing table extensions, datapath hooks, and benchmark/reporting scripts. See [docs/mcr_architecture.md](docs/mcr_architecture.md).
+
 ## v1.0.0
 
 - Stabilized workspace layout and core crate scaffolding.

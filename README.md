@@ -6,8 +6,12 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![Edition: 2021](https://img.shields.io/badge/edition-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/)
+[![MCR: experimental](https://img.shields.io/badge/MCR-experimental-yellow.svg)](docs/mcr_architecture.md)
+[![Bench: ready](https://img.shields.io/badge/bench-ready-brightgreen.svg)](tools/benchmark/run_chaos_epyc_profile.sh)
 
 SMIP-MWP-Rust is the Rust workspace for the SMIP-MWP datapath stack: crypto, routing, AF_XDP integration, CLI control-plane glue, and benchmark tooling. The repository is currently in active development on `main`. CI builds the workspace, runs tests, validates the bridge contract, and exercises the chaos benchmark/report gates.
+
+This patch branch adds Multi-Channel Routing (MCR) spraying integration: routing table extensions, datapath hooks, bench harness flags, and documentation. See [docs/mcr_architecture.md](docs/mcr_architecture.md) for details.
 
 ## Current State
 
@@ -23,9 +27,38 @@ SMIP-MWP-Rust is the Rust workspace for the SMIP-MWP datapath stack: crypto, rou
 git clone https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust.git
 cd SMIP-MWP-Rust
 source $HOME/.cargo/env
+# Run the full test suite and bridge validation
 cargo test --workspace --all-targets
 make verify-bridge
+
+# Run the chaos benchmark validation (CI-style)
 REPS=7 AGG_METHOD=median ./tools/benchmark/ci_validate_chaos_report.sh
+
+# Build and run the MCR chaos profile locally (requires NIC/hardware)
+MOHAWK_MCR_CHANNELS=3 MOHAWK_MCR_SPRAY_MODE=primary ./tools/benchmark/run_chaos_epyc_profile.sh
+```
+
+## Installation & Usage
+
+Prerequisites:
+- Rust toolchain (stable), Cargo
+- For AF_XDP runs: Linux with AF_XDP-capable NIC and root privileges
+- Optional: Python3 for report generation
+
+Install and run locally:
+
+```sh
+# Build workspace
+cargo build --release
+
+# Run the datapath binary (example):
+# METRICS_SOCKET=/tmp/mohawk.metrics.sock MOHAWK_IFACE=ens1f0 target/release/mohawk-node
+
+# Enable/disable MCR and tune channels via environment variables:
+export MOHAWK_MCR_ENABLED=1           # 0|1 (default: 1)
+export MOHAWK_MCR_SPRAY_MODE=primary  # primary|full (default: primary)
+export MOHAWK_MCR_CHANNELS=3          # 1|3|5 (default: 3)
+export MOHAWK_MCR_HASH_SEED=0xDEADBEEF
 ```
 
 ## Repository Layout
