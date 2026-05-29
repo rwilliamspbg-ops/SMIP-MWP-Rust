@@ -110,7 +110,7 @@ mod real {
     use std::sync::atomic::AtomicU64;
     use std::sync::Weak;
     use once_cell::sync::Lazy;
-    use std::collections::VecDeque;
+    
 
     // Registry of weak references to RealSocket instances for runtime
     // reconfiguration (e.g., changing FreeList headroom). Entries are weak
@@ -473,7 +473,7 @@ mod real {
         let mut applied = Vec::new();
         for weak in reg.iter() {
             if let Some(arc) = weak.upgrade() {
-                if let Ok(mut guard) = arc.lock() {
+                if let Ok(guard) = arc.lock() {
                     let old = guard.free_list.headroom.load(Ordering::Relaxed);
                     guard.free_list.set_headroom(headroom);
                     applied.push((guard.label.clone(), old, headroom));
@@ -490,7 +490,7 @@ mod real {
         let reg = SOCKET_INSTANCE_REGISTRY.lock().unwrap();
         for weak in reg.iter() {
             if let Some(arc) = weak.upgrade() {
-                if let Ok(mut guard) = arc.lock() {
+                if let Ok(guard) = arc.lock() {
                     if guard.label == label {
                         let old = guard.free_list.headroom.load(Ordering::Relaxed);
                         guard.free_list.set_headroom(headroom);
@@ -820,7 +820,7 @@ mod real {
         fn real_send_copies_into_umem() {
             let frame_size = 2048usize;
             let frames = 4usize;
-            let mut umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
 
             // simple in-memory ring backing
             let mut buf = vec![0u8; 16384].into_boxed_slice();
@@ -885,7 +885,7 @@ mod real {
         fn send_retries_when_tx_is_full_then_succeeds() {
             let frame_size = 2048usize;
             let frames = 4usize;
-            let mut umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
 
             let mut buf = vec![0u8; 16384].into_boxed_slice();
             let ptr = buf.as_mut_ptr();
@@ -1033,7 +1033,7 @@ mod real {
             let reclaimer = std::thread::spawn(move || {
                 for _ in 0..200 {
                     {
-                        let mut guard = r.lock().unwrap();
+                        let guard = r.lock().unwrap();
                         if let Some(rm) = &guard.ring {
                             // read tx prod/cons, copy any tx descriptors into comp region
                             unsafe {
@@ -1138,7 +1138,7 @@ mod real {
             let new = 64usize;
             let res = set_freelist_headroom_for(&label, new);
             assert!(res.is_some());
-            let (old, got) = res.unwrap();
+            let (_old, got) = res.unwrap();
             assert_eq!(got, new);
 
             // global set should include our label
