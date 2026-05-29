@@ -14,11 +14,9 @@ GOAL_MAX_P99_INCREASE_NS=${GOAL_MAX_P99_INCREASE_NS:-1000}
 REPS=${REPS:-7}
 AGG_METHOD=${AGG_METHOD:-median}
 
-TMP_BASELINE=$(mktemp)
-cleanup() {
-  rm -f "$TMP_BASELINE"
-}
-trap cleanup EXIT
+BASELINE_FILE=tools/bench_results/ci_baseline.txt
+mkdir -p $(dirname "$BASELINE_FILE")
+rm -f "$BASELINE_FILE" || true
 
 echo "[ci-chaos] running ideal-mode baseline"
 cargo run --release -p benchmark -- \
@@ -28,13 +26,16 @@ cargo run --release -p benchmark -- \
   --loss-percent 0 \
   --corrupt-percent 0 \
   --duplicate-percent 0 \
-  --seed "$BASELINE_SEED" | tee "$TMP_BASELINE"
+  --seed "$BASELINE_SEED" | tee "$BASELINE_FILE"
 
-BASELINE_THROUGHPUT=$(grep -Eo 'throughput_pkt_s=[0-9.]+' "$TMP_BASELINE" | head -n1 | cut -d= -f2)
-BASELINE_P99=$(grep -Eo 'latency_ns p50=[0-9]+ p99=[0-9]+' "$TMP_BASELINE" | head -n1 | sed -E 's/.*p99=([0-9]+).*/\1/')
+BASELINE_THROUGHPUT=$(grep -Eo 'throughput_pkt_s=[0-9.]+' "$BASELINE_FILE" | head -n1 | cut -d= -f2 || true)
+BASELINE_P99=$(grep -Eo 'latency_ns p50=[0-9]+ p99=[0-9]+' "$BASELINE_FILE" | head -n1 | sed -E 's/.*p99=([0-9]+).*/\1/' || true)
 
 if [[ -z "${BASELINE_THROUGHPUT}" || -z "${BASELINE_P99}" ]]; then
   echo "[ci-chaos] failed to parse baseline metrics" >&2
+  echo "----- baseline output (for debugging) -----" >&2
+  sed -n '1,200p' "$BASELINE_FILE" >&2 || true
+  echo "------------------------------------------" >&2
   exit 1
 fi
 
