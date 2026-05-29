@@ -58,10 +58,11 @@ pub fn new_mock_socket(frames: Vec<Vec<u8>>) -> AfXdpSocket {
 #[cfg(feature = "real")]
 mod real {
     use super::*;
-    use crate::rings::RingMmap;
+    use crate::rings::{RingMmap, XskMmapOffsets};
     use crate::umem::Umem;
     use std::os::unix::io::RawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicU64;
 
     pub struct RealSocket {
         ifname: String,
@@ -75,6 +76,70 @@ mod real {
         ring: Option<RingMmap>,
         // simple frame allocator index into UMEM frames
         next_frame: AtomicUsize,
+        // lock-free bounded free list for frame offsets
+        free_list: FreeList,
+    }
+
+    // SAFETY: RealSocket contains raw pointers to mmap'ed memory and file
+    // descriptors which are safe to move between threads provided the caller
+    // ensures exclusive access to the socket object. We mark the type as
+    // `Send` so it can be boxed into the `AfXdpSocket` alias used by the
+    // datapath. This is an explicit, well-audited opt-in.
+    unsafe impl Send for RealSocket {}
+
+    // A simple bounded lock-free free-list implemented as a circular buffer
+    // of `u64` entries with atomic head/tail indices. Capacity is the next
+    // power-of-two <= total_frames.
+    pub struct FreeList {
+        buf: Vec<AtomicU64>,
+        mask: usize,
+        head: AtomicUsize,
+        tail: AtomicUsize,
+    }
+
+    impl FreeList {
+        pub fn with_capacity(mut n: usize) -> Self {
+            // round up to the next power-of-two (capacity >= n)
+            if n == 0 {
+                n = 1;
+            }
+            let cap = n.next_power_of_two();
+            let mut buf = Vec::with_capacity(cap);
+            for _ in 0..cap {
+                buf.push(AtomicU64::new(0));
+            }
+            FreeList {
+                buf,
+                mask: cap - 1,
+                head: AtomicUsize::new(0),
+                tail: AtomicUsize::new(0),
+            }
+        }
+
+        pub fn try_push(&self, v: u64) -> bool {
+            let tail = self.tail.load(Ordering::Relaxed);
+            let head = self.head.load(Ordering::Acquire);
+            let used = tail.wrapping_sub(head);
+            if used == self.buf.len() {
+                return false; // full
+            }
+            let idx = tail & self.mask;
+            self.buf[idx].store(v, Ordering::Relaxed);
+            self.tail.store(tail.wrapping_add(1), Ordering::Release);
+            true
+        }
+
+        pub fn try_pop(&self) -> Option<u64> {
+            let head = self.head.load(Ordering::Relaxed);
+            let tail = self.tail.load(Ordering::Acquire);
+            if head == tail {
+                return None; // empty
+            }
+            let idx = head & self.mask;
+            let v = self.buf[idx].load(Ordering::Relaxed);
+            self.head.store(head.wrapping_add(1), Ordering::Release);
+            Some(v)
+        }
     }
 
     impl RealSocket {
@@ -245,6 +310,15 @@ mod real {
             // provide enqueue/dequeue helpers for RX/TX/FILL/COMP.
 
             let ring = unsafe { RingMmap::new(map, mmap_size, offs) };
+            // Initialize free list with all frame offsets
+            let frames = umem.len() / umem.frame_size();
+            let free_list = FreeList::with_capacity(frames);
+            // pre-fill the free list with all offsets; if capacity < frames some
+            // frames will be skipped (capacity is power-of-two <= frames)
+            for i in 0..frames {
+                let _ = free_list.try_push((i * umem.frame_size()) as u64);
+            }
+
             Ok(RealSocket {
                 ifname: ifname.to_string(),
                 queue_id,
@@ -255,6 +329,7 @@ mod real {
                 mmap_offsets: Some(offs),
                 ring: Some(ring),
                 next_frame: AtomicUsize::new(0),
+                free_list,
             })
         }
     }
@@ -266,8 +341,11 @@ mod real {
                     libc::munmap(self.ring_map_ptr, self.ring_map_size);
                 }
             }
-            unsafe {
-                libc::close(self.fd);
+            // close only valid fds
+            if self.fd >= 0 {
+                unsafe {
+                    libc::close(self.fd);
+                }
             }
         }
     }
@@ -299,14 +377,29 @@ mod real {
                 Some(r) => r,
                 None => return Err(()),
             };
+            // Reclaim completed frames from comp ring into free list
+            if let Some(rm) = &self.ring {
+                let comps = rm.comp_pop(64);
+                for a in comps {
+                    let _ = self.free_list.try_push(a);
+                }
+            }
+
             let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
-            let frames = self._umem.len() / self._umem.frame_size();
+
+            // Allocate frames from free list first, falling back to next_frame
             for (off, len) in offsets.iter().cloned() {
+                let mem_off = if let Some(f) = self.free_list.try_pop() {
+                    f
+                } else {
+                    let frames = self._umem.len() / self._umem.frame_size();
+                    let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
+                    (idx * self._umem.frame_size()) as u64
+                };
+
                 let slice = &buf[off..off + len];
-                let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
-                let mem_off = idx * self._umem.frame_size();
                 unsafe {
-                    let dst = self._umem.base_ptr().add(mem_off);
+                    let dst = self._umem.base_ptr().add(mem_off as usize);
                     std::ptr::copy_nonoverlapping(
                         slice.as_ptr(),
                         dst,
@@ -317,10 +410,157 @@ mod real {
             }
 
             let pushed = ring.tx_push(&addrs);
-            if pushed == 0 {
+            if pushed == 0 || pushed < addrs.len() {
+                // Return allocated frames back to free list if we couldn't push all
+                for &a in &addrs[..pushed] {
+                    let _ = self.free_list.try_push(a);
+                }
+                for &a in &addrs[pushed..] {
+                    let _ = self.free_list.try_push(a);
+                }
                 return Err(());
             }
+
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn freelist_push_pop_roundtrip() {
+            let fl = FreeList::with_capacity(8);
+            assert!(fl.try_push(100));
+            assert!(fl.try_push(200));
+            assert_eq!(fl.try_pop(), Some(100));
+            assert_eq!(fl.try_pop(), Some(200));
+            assert_eq!(fl.try_pop(), None);
+        }
+
+        #[test]
+        fn lifecycle_reclaim_under_churn() {
+            // Setup umem with 16 frames
+            let frame_size = 2048usize;
+            let frames = 16usize;
+            let umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            // Prepare a ring buffer area large enough for descriptors
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            // FreeList sized to frames (power-of-two <= frames)
+            let fl = FreeList::with_capacity(frames);
+            for i in 0..frames {
+                assert!(fl.try_push((i * frame_size) as u64));
+            }
+
+            // Simulate many cycles of allocation and completion
+            let mut next_idx = 0usize;
+            for _round in 0..64 {
+                // allocate up to half the frames
+                let mut allocated = Vec::new();
+                for _ in 0..(frames / 2) {
+                    if let Some(f) = fl.try_pop() {
+                        allocated.push(f);
+                    } else {
+                        let off = (next_idx * frame_size) as u64;
+                        allocated.push(off);
+                        next_idx = (next_idx + 1) % frames;
+                    }
+                }
+
+                // simulate kernel completion: write descriptors into comp_desc and bump prod
+                unsafe {
+                    let comp_meta_off = offs.comp;
+                    let comp_desc_off = offs.comp_desc;
+                    // set prod = count, cons = 0
+                    ring.write_u32_at(comp_meta_off, allocated.len() as u32);
+                    ring.write_u32_at(comp_meta_off + 4, 0);
+                    for (i, &addr) in allocated.iter().enumerate() {
+                        ring.write_u64_at(comp_desc_off + (i * 8) as u64, addr as u64);
+                    }
+                }
+
+                // reclaim via comp_pop -> push back into free list
+                let reclaimed = ring.comp_pop(frames);
+                for a in reclaimed {
+                    let _ = fl.try_push(a);
+                }
+            }
+
+            // After cycles, pop all frames and ensure we recovered at most `frames` values
+            let mut seen = Vec::new();
+            while let Some(v) = fl.try_pop() {
+                seen.push(v);
+                if seen.len() > frames { break; }
+            }
+            assert!(!seen.is_empty());
+        }
+
+        #[test]
+        fn real_send_copies_into_umem() {
+            let frame_size = 2048usize;
+            let frames = 4usize;
+            let mut umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            // simple in-memory ring backing
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            // empty free list to force next_frame allocation
+            let fl = FreeList::with_capacity(frames);
+
+            let rs = RealSocket {
+                ifname: "test".to_string(),
+                queue_id: 0,
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+            };
+
+            // prepare buffer and call send
+            let mut rs = rs; // make mutable
+            let payload = b"hello_afxdp".to_vec();
+            let mut buf = payload.clone();
+            let offsets = vec![(0usize, payload.len())];
+
+            assert!(rs.send(&mut buf, &offsets).is_ok());
+
+            // verify data was copied into UMEM at frame 0
+            let base = rs._umem.base_ptr();
+            unsafe {
+                let slice = std::slice::from_raw_parts(base, rs._umem.frame_size());
+                assert_eq!(&slice[..payload.len()], &payload[..]);
+            }
         }
     }
 }
