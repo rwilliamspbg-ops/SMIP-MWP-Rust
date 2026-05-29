@@ -7,14 +7,13 @@ use routing::{RouteEntry, Table};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
-use prometheus::{Registry, IntGauge, Encoder, TextEncoder, GaugeVec};
+use prometheus::{Encoder, GaugeVec};
 // Helper to construct an AF_XDP socket: attempt real socket when available,
 // otherwise fall back to the in-process mock.
 fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
