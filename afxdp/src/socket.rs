@@ -78,6 +78,9 @@ mod real {
         next_frame: AtomicUsize,
         // lock-free bounded free list for frame offsets
         free_list: FreeList,
+        // debug/observability counters
+        retry_count: AtomicU64,
+        tx_backpressure_count: AtomicU64,
     }
 
     // SAFETY: RealSocket contains raw pointers to mmap'ed memory and file
@@ -330,6 +333,8 @@ mod real {
                 ring: Some(ring),
                 next_frame: AtomicUsize::new(0),
                 free_list,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
             })
         }
     }
@@ -418,6 +423,9 @@ mod real {
                     return Ok(());
                 }
 
+                // track backpressure events
+                self.tx_backpressure_count.fetch_add(1, Ordering::Relaxed);
+
                 // Return all allocated frames back to free list
                 for &a in &addrs {
                     let _ = self.free_list.try_push(a);
@@ -426,6 +434,9 @@ mod real {
                 if attempt == MAX_RETRIES {
                     return Err(());
                 }
+
+                // count this retry (attempts > 0 indicate retries)
+                self.retry_count.fetch_add(1, Ordering::Relaxed);
 
                 // Small backoff to let kernel or background threads consume TX ring
                 thread::sleep(Duration::from_millis(1));
@@ -555,6 +566,8 @@ mod real {
                 ring: Some(ring),
                 next_frame: AtomicUsize::new(0),
                 free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
             };
 
             // prepare buffer and call send
@@ -571,6 +584,9 @@ mod real {
                 let slice = std::slice::from_raw_parts(base, rs._umem.frame_size());
                 assert_eq!(&slice[..payload.len()], &payload[..]);
             }
+            // counters should be zero for the simple send
+            assert_eq!(rs.tx_backpressure_count.load(Ordering::Relaxed), 0);
+            assert_eq!(rs.retry_count.load(Ordering::Relaxed), 0);
         }
 
         #[test]
@@ -613,6 +629,8 @@ mod real {
                 ring: Some(ring),
                 next_frame: AtomicUsize::new(0),
                 free_list: fl,
+                retry_count: AtomicU64::new(0),
+                tx_backpressure_count: AtomicU64::new(0),
             };
 
             // spawn a thread that will free the TX ring after a short delay
