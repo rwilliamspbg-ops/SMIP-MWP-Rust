@@ -68,8 +68,6 @@ mod real {
         ifname: String,
         queue_id: u32,
         fd: RawFd,
-        // eventfd used to wake blocked senders when completions are available
-        eventfd: RawFd,
         _umem: Umem,
         // Pointer to the mmap'ed ring area (kept alive for future ring-based ops)
         ring_map_ptr: *mut libc::c_void,
@@ -331,10 +329,6 @@ mod real {
                 let _ = free_list.try_push((i * umem.frame_size()) as u64);
             }
 
-            // try to create an eventfd to allow low-latency wakeups; non-fatal
-            let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_SEMAPHORE) };
-            let eventfd = if efd < 0 { -1 } else { efd };
-
             Ok(RealSocket {
                 ifname: ifname.to_string(),
                 queue_id,
@@ -348,7 +342,6 @@ mod real {
                 free_list,
                 retry_count: AtomicU64::new(0),
                 tx_backpressure_count: AtomicU64::new(0),
-                eventfd,
             })
         }
     }
@@ -405,16 +398,8 @@ mod real {
             for attempt in 0..=MAX_RETRIES {
                 // Reclaim completed frames from comp ring into free list
                 let comps = ring.comp_pop(64);
-                for a in &comps {
-                    let _ = self.free_list.try_push(*a);
-                }
-                // If we reclaimed any frames, notify any blocked senders via eventfd
-                if !comps.is_empty() && self.eventfd >= 0 {
-                    let one: u64 = 1;
-                    unsafe {
-                        let p = &one as *const u64 as *const libc::c_void;
-                        let _ = libc::write(self.eventfd, p, std::mem::size_of::<u64>() as libc::size_t);
-                    }
+                for a in comps {
+                    let _ = self.free_list.try_push(a);
                 }
 
                 // Allocate frames from free list first, falling back to next_frame
@@ -473,17 +458,9 @@ mod real {
                 // Wait for socket to become writable or fallback to short sleep
                 // (tests use fd == -1, so fallback sleep keeps existing behavior).
                 if self.fd >= 0 {
-                    if self.eventfd >= 0 {
-                        let mut pfds = [
-                            libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 },
-                            libc::pollfd { fd: self.eventfd, events: libc::POLLIN, revents: 0 },
-                        ];
-                        unsafe { let _ = libc::poll(pfds.as_mut_ptr(), 2, 100); }
-                    } else {
-                        let mut pfd = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
-                        // timeout 100ms to avoid long blocking in normal cases
-                        unsafe { let _ = libc::poll(&mut pfd as *mut libc::pollfd, 1, 100); }
-                    }
+                    let mut pfd = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
+                    // timeout 100ms to avoid long blocking in normal cases
+                    unsafe { let _ = libc::poll(&mut pfd as *mut libc::pollfd, 1, 100); }
                 } else {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -627,7 +604,6 @@ mod real {
                 free_list: fl,
                 retry_count: AtomicU64::new(0),
                 tx_backpressure_count: AtomicU64::new(0),
-                eventfd: -1,
             };
 
             // prepare buffer and call send
@@ -691,7 +667,6 @@ mod real {
                 free_list: fl,
                 retry_count: AtomicU64::new(0),
                 tx_backpressure_count: AtomicU64::new(0),
-                eventfd: -1,
             };
 
             // spawn a thread that will free the TX ring after a short delay
@@ -759,7 +734,6 @@ mod real {
                 free_list: fl,
                 retry_count: AtomicU64::new(0),
                 tx_backpressure_count: AtomicU64::new(0),
-                eventfd: -1,
             };
 
             let socket = Arc::new(StdMutex::new(socket));
