@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
+use prometheus::{Registry, IntGauge, Encoder, TextEncoder};
 // Helper to construct an AF_XDP socket: attempt real socket when available,
 // otherwise fall back to the in-process mock.
 fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
@@ -349,27 +350,40 @@ fn main() {
 
     if let Some(addr) = metrics_http {
         let bind_addr = addr.clone();
-        thread::spawn(move || match TcpListener::bind(&bind_addr) {
+        // Setup a prometheus registry and gauges for AF_XDP counters
+        let registry = prometheus::Registry::new();
+        let afxdp_retry = prometheus::IntGauge::new("afxdp_retry_total", "AF_XDP send retry attempts").unwrap();
+        let afxdp_back = prometheus::IntGauge::new("afxdp_backpressure_total", "AF_XDP tx backpressure events").unwrap();
+        registry.register(Box::new(afxdp_retry.clone())).ok();
+        registry.register(Box::new(afxdp_back.clone())).ok();
+
+        // Background updater to sync atomic globals into the prometheus gauges
+        {
+            let g_retry = afxdp_retry.clone();
+            let g_back = afxdp_back.clone();
+            std::thread::spawn(move || loop {
+                let r = afxdp::AF_XDP_RETRY_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                let b = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
+                g_retry.set(r);
+                g_back.set(b);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            });
+        }
+
+        std::thread::spawn(move || match std::net::TcpListener::bind(&bind_addr) {
             Ok(listener) => {
                 for stream in listener.incoming() {
                     match stream {
                         Ok(mut s) => {
-                            let mut buf = [0u8; 1024];
+                            let mut buf = [0u8; 4096];
                             let _ = s.read(&mut buf);
                             let req = String::from_utf8_lossy(&buf);
                             if req.starts_with("GET /metrics") || req.starts_with("GET / ") {
-                                let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                                let af_retry = afxdp::AF_XDP_RETRY_COUNT.load(Ordering::Relaxed);
-                                let af_back = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(Ordering::Relaxed);
-                                let mut body = render_prometheus_metrics(count, unix_timestamp_secs());
-                                body.push_str(&format!(
-                                    "# HELP afxdp_retry_total AF_XDP send retry attempts.\n# TYPE afxdp_retry_total counter\nafxdp_retry_total {}\n",
-                                    af_retry
-                                ));
-                                body.push_str(&format!(
-                                    "# HELP afxdp_backpressure_total AF_XDP tx backpressure events.\n# TYPE afxdp_backpressure_total counter\nafxdp_backpressure_total {}\n",
-                                    af_back
-                                ));
+                                let metric_families = registry.gather();
+                                let mut buffer = Vec::new();
+                                let encoder = prometheus::TextEncoder::new();
+                                encoder.encode(&metric_families, &mut buffer).ok();
+                                let body = String::from_utf8_lossy(&buffer);
                                 let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                                 let _ = s.write_all(resp.as_bytes());
                             } else {
