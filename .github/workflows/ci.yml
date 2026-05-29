@@ -114,6 +114,25 @@ jobs:
         name: performance-envelope
         path: benchmark/PERFORMANCE_ENVELOPE.md
         if-no-files-found: warn
+    - name: Capture datapath allocation peaks (focused probe)
+      run: |
+        mkdir -p tools/bench_results
+        # Build the probe binary and run a focused config (packets=64,payload=512) by default
+        cargo build --release -p bench --bin datapath_alloc_probe
+        ./target/release/datapath_alloc_probe ${PROBE_PACKETS:-64} ${PROBE_PAYLOAD:-512} > tools/bench_results/datapath_alloc_peaks.csv || true
+    - name: Optionally run full datapath sweep
+      if: env.RUN_FULL_DATAPATH_SWEEP == 'true'
+      run: |
+        mkdir -p tools/bench_results
+        # This is expensive; only enabled via RUN_FULL_DATAPATH_SWEEP=true
+        cargo bench -p bench --bench datapath_bench 2>&1 | tee tools/bench_results/datapath_bench_output.txt || true
+    - name: Upload datapath allocation peaks
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: datapath-alloc-peaks
+        path: tools/bench_results/datapath_alloc_peaks.csv
+        if-no-files-found: warn
     - name: Capture benchmark flamegraph on failure
       if: failure()
       run: |
