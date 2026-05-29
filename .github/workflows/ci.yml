@@ -13,6 +13,11 @@ jobs:
         override: true
     - name: Build the project
       run: cargo build --release
+    - name: Prepare benchmark artifacts and scripts
+      run: |
+        # Ensure directories exist and scripts are executable to avoid CI failures
+        mkdir -p tools/bench_results benchmark
+        chmod +x tools/benchmark/*.sh || true
     - name: Run workspace tests
       run: cargo test --workspace --all-targets
     - name: Run metrics smoke test
