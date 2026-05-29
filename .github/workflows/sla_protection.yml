@@ -1,0 +1,70 @@
+name: Protect SLA Baselines
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check-sla-baselines:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PR files and labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = github.context.payload.pull_request;
+            if (!pr) {
+              core.setFailed('No pull_request context available');
+              return;
+            }
+            const owner = github.context.repo.owner;
+            const repo = github.context.repo.repo;
+            const prNumber = pr.number;
+
+            // Fetch files modified in the PR
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+            const changed = files.map(f => f.filename);
+
+            const slaPath = 'tools/benchmark/sla_baselines.json';
+            if (!changed.includes(slaPath)) {
+              core.info('SLA baselines file not modified. OK.');
+              return;
+            }
+
+            // check for perf-approval label
+            const labels = pr.labels.map(l => l.name);
+            core.info(`PR labels: ${labels}`);
+            if (labels.includes('perf-approval')) {
+              core.info('Found perf-approval label; SLA change allowed.');
+              return;
+            }
+
+            // Optionally allow maintainers to bypass: check if author is in a trusted list
+            const trusted = core.getInput('trusted_maintainers') || '';
+            const trustedList = trusted.split(',').map(s => s.trim()).filter(Boolean);
+            if (trustedList.includes(pr.user.login)) {
+              core.info(`Author ${pr.user.login} is a trusted maintainer; allowing SLA change.`);
+              return;
+            }
+
+            core.setFailed(`Modifying ${slaPath} requires the 'perf-approval' label and measurement artifacts attached to the PR.`);
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Guidance on SLA changes
+        if: failure()
+        run: |
+          echo 'To change the SLA baselines you must:'
+          echo '  - attach measurement artifacts and rationale in the PR description'
+          echo '  - add the label "perf-approval" to this PR (maintainer approval)'
+          echo '
+If you believe this change is safe, request the maintainer to add the label.'

@@ -17,6 +17,11 @@ Review process
 
 - PRs will be reviewed by maintainers and may request changes. Please address review comments promptly.
 
+Performance baseline changes
+
+- Changes to `tools/benchmark/sla_baselines.json` are gated and require explicit performance review.
+- To change SLA baselines: attach measurement artifacts, explain the rationale in the PR description, and request a `perf-approval` label from maintainers. A dedicated CI check will block PRs that modify the baselines without this label.
+
 License and DCO
 
 - By contributing you agree that your contributions will be licensed under the project's AGPL-3.0 license.
