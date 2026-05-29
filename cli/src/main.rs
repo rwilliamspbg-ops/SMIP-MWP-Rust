@@ -524,6 +524,18 @@ fn main() {
         start_metrics_http(&addr);
     }
 
+    // If any metrics endpoint was requested, keep the process alive so the
+    // background threads (HTTP server / unix socket / metrics reporter) remain
+    // running for smoke tests. This mirrors the previous CI expectation that
+    // launching the binary with `--metrics-http` would produce a long-lived
+    // server suitable for scraping.
+    let server_mode = metrics_http.is_some() || metrics_socket.is_some() || want_metrics;
+    if server_mode && !parse_flag(&args, "--demo") {
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
     if !parse_flag(&args, "--demo") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
