@@ -104,13 +104,15 @@ mod real {
         pub fn with_capacity(mut n: usize) -> Self {
             // Provide some headroom to the free-list to avoid immediate
             // contention when the datapath briefly needs extra frames.
-            // We compute a small headroom fraction and round up to the next
-            // power-of-two so the ring mask arithmetic stays efficient.
+            // Allow the headroom to be configured via env var
+            // `MOHAWK_FREELIST_HEADROOM` (absolute number of frames).
             if n == 0 {
                 n = 1;
             }
-            // headroom is 1/8th of the requested frames, minimum 8
-            let headroom = (n / 8).max(8);
+            let headroom = std::env::var("MOHAWK_FREELIST_HEADROOM")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or_else(|| (n / 8).max(8));
             let cap = (n + headroom).next_power_of_two();
             let mut buf = Vec::with_capacity(cap);
             for _ in 0..cap {
