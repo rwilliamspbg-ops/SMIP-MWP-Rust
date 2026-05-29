@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
-use prometheus::{Encoder, TextEncoder, GaugeVec};
+use prometheus::{Encoder, GaugeVec};
 // Helper to construct an AF_XDP socket: attempt real socket when available,
 // otherwise fall back to the in-process mock.
 fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
