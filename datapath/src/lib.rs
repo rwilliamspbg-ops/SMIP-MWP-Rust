@@ -107,6 +107,10 @@ pub struct Forwarder {
     spray_buffer: Vec<Vec<u8>>,
     /// Track which channels were used in this batch
     channel_usage: AtomicU64,
+    /// MCR telemetry: forwarded output packets
+    mcr_forwarded: AtomicU64,
+    /// MCR telemetry: dropped outputs (route misses / encrypt failures)
+    mcr_dropped: AtomicU64,
 }
 
 struct PacketOutput {
@@ -138,6 +142,8 @@ impl Forwarder {
             offsets: Vec::with_capacity(4096),
             spray_buffer: Vec::new(),
             channel_usage: AtomicU64::new(mcr_config::get_mcr_channels() as u64),
+            mcr_forwarded: AtomicU64::new(0),
+            mcr_dropped: AtomicU64::new(0),
         }
     }
 
@@ -340,6 +346,10 @@ impl Forwarder {
     }
 
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        // If MCR is enabled, use the MCR-aware processing path.
+        if mcr_config::get_mcr_enabled() {
+            return self.process_batch_mcr(sock);
+        }
         let frames = sock.poll(64);
         let received = frames.len();
 
@@ -397,8 +407,77 @@ impl Forwarder {
     /// MCR-aware processing: for now delegates to `process_batch` while
     /// preserving a stable API for future MCR spray behavior.
     pub fn process_batch_mcr(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
-        // TODO: implement batched lookup_spray and multi-channel outputs
-        self.process_batch(sock)
+        use rayon::prelude::*;
+
+        let frames = sock.poll(64);
+        let received = frames.len();
+
+        if frames.is_empty() {
+            return ForwarderStats::default();
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let use_avx2 = false;
+
+        self.arena.clear();
+        self.offsets.clear();
+        self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+
+        let spray_mode = mcr_config::get_mcr_spray_mode();
+
+        // Phase 1: single-threaded channel selection and packet duplication
+        let mut duplicated: Vec<Vec<u8>> = Vec::with_capacity(received);
+        let mut route_miss_count: usize = 0;
+        for pkt in frames {
+            if let Ok(h) = HeaderViewRef::new(&pkt) {
+                let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                let flow_label = h.flow_label();
+
+                let channels = self.routes.lookup_spray(dst_id, flow_label);
+                if channels.is_empty() {
+                    // route miss: forward unchanged
+                    duplicated.push(pkt);
+                    route_miss_count += 1;
+                    continue;
+                }
+
+                if spray_mode == "full" {
+                    for (nh, _is_primary) in channels.iter() {
+                        let mut modified = pkt.clone();
+                        modified[32..64].copy_from_slice(nh);
+                        duplicated.push(modified);
+                    }
+                } else {
+                    // primary only
+                    let nh = channels[0].0;
+                    let mut modified = pkt.clone();
+                    modified[32..64].copy_from_slice(&nh);
+                    duplicated.push(modified);
+                }
+            } else {
+                duplicated.push(pkt);
+                route_miss_count += 1;
+            }
+        }
+
+        // Phase 2: parallel encryption/processing of duplicated packets
+        let routes_ref = &self.routes;
+        let session_ref = self.session.as_ref();
+        let outputs: Vec<PacketOutput> = duplicated
+            .into_par_iter()
+            .map(|pkt| Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2))
+            .collect();
+
+        // append outputs and update telemetry
+        let stats = self.append_outputs(outputs, received);
+        self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+        self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+
+        let _ = sock.send(self.arena.as_slice(), &self.offsets);
+        PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+        stats
     }
 
     /// Full-spray mode: duplicate to all channels. Currently a stub that
@@ -746,5 +825,43 @@ mod tests {
             let buf = buf_cell.borrow();
             assert_eq!((buf.as_ptr() as usize) % ALIGNMENT, 0);
         });
+    }
+
+    #[test]
+    fn mcr_full_spray_duplicates_outputs() {
+        use std::env;
+        env::set_var("MOHAWK_MCR_SPRAY_MODE", "full");
+        env::set_var("MOHAWK_MCR_ENABLED", "1");
+
+        let rt = Table::new();
+        rt.update_route(RouteEntry {
+            dest_id: [2u8; 32],
+            next_hop_id: [3u8; 32],
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 3,
+            alternate_channels: vec![[4u8; 32], [5u8; 32]],
+            mcr_epoch: 1,
+        });
+
+        let mut fwd = Forwarder::new(rt);
+        let mut buf = wire::Header::new_header_buffer(4);
+        let h = Header {
+            src_id: [1u8; 32],
+            dst_id: [2u8; 32],
+            flow_label: 0x1,
+            seq_num: 1,
+            session_id: [0u8; 16],
+            flags: 0,
+            length: 4,
+        };
+        h.marshal_into(&mut buf).unwrap();
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
+        let mut sock = MockSocket::new(vec![buf]);
+        let stats = fwd.process_batch(&mut sock);
+        assert_eq!(stats.received, 1);
+        // with full spray and 3 channels we expect 3 encrypted outputs
+        assert_eq!(stats.encrypted, 3);
+        assert_eq!(sock.sent.len(), 3);
     }
 }

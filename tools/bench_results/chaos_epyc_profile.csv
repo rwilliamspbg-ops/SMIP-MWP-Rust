@@ -1,4 +1,4 @@
-timestamp,core_set,packets,payload_len,loss_percent,corrupt_percent,duplicate_percent,throughput_pkt_s,p50_ns,p99_ns,p99_9_ns
-2026-05-29T12:49:47Z,"2-3",50000,1024,3,1,1,1074884.04,49913,81712,94235
-2026-05-29T12:49:47Z,"2-5",50000,1024,3,1,1,1109765.37,49783,74659,103864
-2026-05-29T12:49:47Z,"2-7",50000,1024,3,1,1,1101614.50,49803,73878,85831
+timestamp,core_set,packets,payload_len,loss_percent,corrupt_percent,duplicate_percent,mcr_channels,mcr_spray_mode,throughput_pkt_s,p50_ns,p99_ns,p99_9_ns
+2026-05-29T23:12:41Z,"2-3",50000,1024,3,1,1,5,primary,710729.61,81291,106158,137515
+2026-05-29T23:12:41Z,"2-5",50000,1024,3,1,1,5,primary,866861.72,64596,91396,103955
+2026-05-29T23:12:42Z,"2-7",50000,1024,3,1,1,5,primary,867815.91,64536,86428,129842
