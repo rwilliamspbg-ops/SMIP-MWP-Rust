@@ -16,13 +16,13 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const pr = github.context.payload.pull_request;
+            const pr = context.payload.pull_request;
             if (!pr) {
               core.setFailed('No pull_request context available');
               return;
             }
-            const owner = github.context.repo.owner;
-            const repo = github.context.repo.repo;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
             const prNumber = pr.number;
 
             // Fetch files modified in the PR
@@ -66,5 +66,5 @@ jobs:
           echo 'To change the SLA baselines you must:'
           echo '  - attach measurement artifacts and rationale in the PR description'
           echo '  - add the label "perf-approval" to this PR (maintainer approval)'
-          echo '
-If you believe this change is safe, request the maintainer to add the label.'
+          echo ''
+          echo 'If you believe this change is safe, request the maintainer to add the label.'
