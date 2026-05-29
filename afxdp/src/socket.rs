@@ -377,51 +377,61 @@ mod real {
                 Some(r) => r,
                 None => return Err(()),
             };
-            // Reclaim completed frames from comp ring into free list
-            if let Some(rm) = &self.ring {
-                let comps = rm.comp_pop(64);
+            // Implement bounded retry/backpressure: try to reclaim completions and
+            // retry a few times before failing. We avoid spinning indefinitely.
+            const MAX_RETRIES: usize = 8;
+            use std::thread;
+            use std::time::Duration;
+
+            for attempt in 0..=MAX_RETRIES {
+                // Reclaim completed frames from comp ring into free list
+                let comps = ring.comp_pop(64);
                 for a in comps {
                     let _ = self.free_list.try_push(a);
                 }
-            }
 
-            let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
+                // Allocate frames from free list first, falling back to next_frame
+                let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
+                for (off, len) in offsets.iter().cloned() {
+                    let mem_off = if let Some(f) = self.free_list.try_pop() {
+                        f
+                    } else {
+                        let frames = self._umem.len() / self._umem.frame_size();
+                        let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
+                        (idx * self._umem.frame_size()) as u64
+                    };
 
-            // Allocate frames from free list first, falling back to next_frame
-            for (off, len) in offsets.iter().cloned() {
-                let mem_off = if let Some(f) = self.free_list.try_pop() {
-                    f
-                } else {
-                    let frames = self._umem.len() / self._umem.frame_size();
-                    let idx = self.next_frame.fetch_add(1, Ordering::Relaxed) % frames;
-                    (idx * self._umem.frame_size()) as u64
-                };
-
-                let slice = &buf[off..off + len];
-                unsafe {
-                    let dst = self._umem.base_ptr().add(mem_off as usize);
-                    std::ptr::copy_nonoverlapping(
-                        slice.as_ptr(),
-                        dst,
-                        std::cmp::min(slice.len(), self._umem.frame_size()),
-                    );
+                    let slice = &buf[off..off + len];
+                    unsafe {
+                        let dst = self._umem.base_ptr().add(mem_off as usize);
+                        std::ptr::copy_nonoverlapping(
+                            slice.as_ptr(),
+                            dst,
+                            std::cmp::min(slice.len(), self._umem.frame_size()),
+                        );
+                    }
+                    addrs.push(mem_off as u64);
                 }
-                addrs.push(mem_off as u64);
-            }
 
-            let pushed = ring.tx_push(&addrs);
-            if pushed == 0 || pushed < addrs.len() {
-                // Return allocated frames back to free list if we couldn't push all
-                for &a in &addrs[..pushed] {
+                let pushed = ring.tx_push(&addrs);
+                if pushed == addrs.len() {
+                    return Ok(());
+                }
+
+                // Return all allocated frames back to free list
+                for &a in &addrs {
                     let _ = self.free_list.try_push(a);
                 }
-                for &a in &addrs[pushed..] {
-                    let _ = self.free_list.try_push(a);
+
+                if attempt == MAX_RETRIES {
+                    return Err(());
                 }
-                return Err(());
+
+                // Small backoff to let kernel or background threads consume TX ring
+                thread::sleep(Duration::from_millis(1));
             }
 
-            Ok(())
+            Err(())
         }
     }
 
@@ -561,6 +571,72 @@ mod real {
                 let slice = std::slice::from_raw_parts(base, rs._umem.frame_size());
                 assert_eq!(&slice[..payload.len()], &payload[..]);
             }
+        }
+
+        #[test]
+        fn send_retries_when_tx_is_full_then_succeeds() {
+            let frame_size = 2048usize;
+            let frames = 4usize;
+            let mut umem = Umem::new(frame_size * frames, frame_size).expect("umem alloc");
+
+            let mut buf = vec![0u8; 16384].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            let offs = crate::rings::XskMmapOffsets {
+                rx: 0,
+                rx_desc: 128,
+                tx: 64,
+                tx_desc: 256,
+                fill: 512,
+                fill_desc: 1024,
+                comp: 2048,
+                comp_desc: 4096,
+            };
+            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+
+            // Make tx capacity = 1 by setting tx_desc/fill_desc region small
+            unsafe {
+                // set tx prod=1, cons=0 -> full
+                ring.write_u32_at(offs.tx, 1);
+                ring.write_u32_at(offs.tx + 4, 0);
+            }
+
+            let fl = FreeList::with_capacity(frames);
+
+            let mut rs = RealSocket {
+                ifname: "test".to_string(),
+                queue_id: 0,
+                fd: -1,
+                _umem: umem,
+                ring_map_ptr: ptr as *mut libc::c_void,
+                ring_map_size: buf.len(),
+                mmap_offsets: Some(offs),
+                ring: Some(ring),
+                next_frame: AtomicUsize::new(0),
+                free_list: fl,
+            };
+
+            // spawn a thread that will free the TX ring after a short delay
+            if let Some(r) = &rs.ring {
+                let rptr_usize = r.base_ptr() as usize;
+                let map_size = rs.ring.as_ref().unwrap().len();
+                let offs_copy = offs;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    unsafe {
+                        let rptr = rptr_usize as *mut libc::c_void;
+                        let rm = crate::rings::RingMmap::new(rptr, map_size, offs_copy);
+                        let prodv = rm.read_u32_at(offs_copy.tx);
+                        rm.write_u32_at(offs_copy.tx + 4, prodv);
+                    }
+                });
+            }
+
+            let payload = b"retry_payload".to_vec();
+            let mut b = payload.clone();
+            let offsets = vec![(0usize, payload.len())];
+
+            // send should retry and succeed once the background thread advances cons
+            assert!(rs.send(&mut b, &offsets).is_ok());
         }
     }
 }
