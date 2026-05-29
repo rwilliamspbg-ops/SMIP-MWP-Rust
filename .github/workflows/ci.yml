@@ -61,6 +61,79 @@ jobs:
         python3 tools/benchmark/assert_chaos_thresholds.py \
           --input /tmp/chaos_benchmark_ci.txt \
           --enforce-sla
+    - name: Run routing-miss sweep harness
+      run: |
+        chmod +x tools/bench_harness/run_routing_miss_sweep.sh
+        mkdir -p tools/bench_results
+        ./tools/bench_harness/run_routing_miss_sweep.sh tools/bench_results/routing_miss_sweep.csv 10
+    - name: Upload routing-miss sweep CSV
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: routing-miss-sweep
+        path: tools/bench_results/routing_miss_sweep.csv
+        if-no-files-found: warn
+    - name: Run real-bench and collect NIC counters
+      run: |
+        mkdir -p tools/bench_results
+        IFACE=${MOHAWK_IFACE:-ens1f0}
+        date -u +%s > /tmp/time_before.txt
+        ethtool -S $IFACE > tools/bench_results/nic_before.json || true
+        MOHAWK_IFACE=$IFACE MOHAWK_QUEUE_ID=0 ./tools/benchmark/real_smoke.sh | tee tools/bench_results/real_smoke.txt || true
+        date -u +%s > /tmp/time_after.txt
+        ethtool -S $IFACE > tools/bench_results/nic_after.json || true
+    - name: Compute throughput from ethtool counters
+      run: |
+        python3 tools/benchmark/compute_throughput_from_ethtool.py \
+          tools/bench_results/nic_before.json \
+          tools/bench_results/nic_after.json \
+          /tmp/time_before.txt /tmp/time_after.txt \
+          tools/bench_results/throughput_from_ethtool.csv || true
+    - name: Upload throughput CSV
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: throughput-from-ethtool
+        path: tools/bench_results/throughput_from_ethtool.csv
+        if-no-files-found: warn
+    - name: Generate performance envelope
+      run: |
+        python3 tools/benchmark/generate_performance_envelope.py || true
+    - name: Upload performance envelope
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-envelope
+        path: benchmark/PERFORMANCE_ENVELOPE.md
+        if-no-files-found: warn
+    - name: Capture benchmark flamegraph on failure
+      if: failure()
+      run: |
+        cargo install flamegraph --locked
+        cargo flamegraph -p bench --bench alloc_bench --output /tmp/alloc_bench_flamegraph.svg -- --sample-size 10 || true
+        test -f /tmp/alloc_bench_flamegraph.svg || touch /tmp/alloc_bench_flamegraph.svg
+    - name: Upload benchmark profiling artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-profiling-artifacts
+        path: |
+          /tmp/alloc_bench_flamegraph.svg
+        if-no-files-found: warn
+    - name: Capture routing-miss flamegraph on failure
+      if: failure()
+      run: |
+        cargo install flamegraph --locked
+        cargo flamegraph -p bench --bench routing_miss_bench --output /tmp/routing_miss_flamegraph.svg -- --sample-size 10 || true
+        test -f /tmp/routing_miss_flamegraph.svg || touch /tmp/routing_miss_flamegraph.svg
+    - name: Upload routing-miss profiling artifact
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: routing-miss-profiling-artifacts
+        path: |
+          /tmp/routing_miss_flamegraph.svg
+        if-no-files-found: warn
     - name: Upload chaos validation artifacts
       if: always()
       uses: actions/upload-artifact@v4

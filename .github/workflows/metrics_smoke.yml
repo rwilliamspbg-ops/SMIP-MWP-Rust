@@ -35,5 +35,7 @@ jobs:
           done
           echo "--- /metrics ---"
           sed -n '1,200p' /tmp/metrics.txt || true
-          # ensure our key metrics are present
-          grep -E 'afxdp_retry_total|afxdp_backpressure_total|mohawk_packets_processed_total' /tmp/metrics.txt
+          # ensure our key metrics are present in the exported Prometheus labels
+          grep -E 'afxdp_counters\{metric="retry_total",socket="global"\} [0-9]+' /tmp/metrics.txt
+          grep -E 'afxdp_counters\{metric="backpressure_total",socket="global"\} [0-9]+' /tmp/metrics.txt
+          grep -E 'afxdp_counters\{metric="alloc_from_freelist_total",socket="global"\} [0-9]+' /tmp/metrics.txt

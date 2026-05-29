@@ -1,6 +1,6 @@
 # Chaos Engineering Report
 
-Status: **PASS**
+Status: **BLOCKED (missing ideal-mode baseline metrics)**
 
 ## Objective
 
@@ -12,22 +12,22 @@ Validate safety-invariant resilience under hostile traffic while keeping perform
 ## Input Artifact
 
 - Source CSV: `tools/bench_results/chaos_epyc_profile.csv`
-- Latest sampled row timestamp: `aggregated`
+- Latest sampled row timestamp: `2026-05-28T22:34:02Z`
 - Core set: `0-1`
 
 ## Latest Chaos Metrics
 
-- throughput_pkt_s: `1473261.02`
-- latency_ns p50: `33793`
-- latency_ns p99: `76012`
-- latency_ns p99_9: `115426`
+- throughput_pkt_s: `1429348.28`
+- latency_ns p50: `34094`
+- latency_ns p99: `95860`
+- latency_ns p99_9: `119103`
 
 ## Baseline Comparison
 
-- Baseline throughput_pkt_s: `1413304.31`
-- Baseline p99_ns: `94356.0`
-- Throughput degradation: `-4.24% (goal < 5.00%)`
-- p99 increase: `-18344.00 ns (goal < 1000.00 ns)`
+- Baseline throughput_pkt_s: `NOT PROVIDED`
+- Baseline p99_ns: `NOT PROVIDED`
+- Throughput degradation: `N/A`
+- p99 increase: `N/A`
 
 ## Invariant Notes
 

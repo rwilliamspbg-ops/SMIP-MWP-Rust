@@ -1,0 +1,4 @@
+mohawk-node (Rust rewrite)
+  --demo   run the in-process forwarding demo
+  --bridge-request <path>  run the bridge demo from a JSON control payload
+  --help   show this message
