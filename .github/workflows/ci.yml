@@ -96,6 +96,14 @@ jobs:
         name: throughput-from-ethtool
         path: tools/bench_results/throughput_from_ethtool.csv
         if-no-files-found: warn
+    - name: Run crypto overhead bench
+      run: |
+        mkdir -p tools/bench_results
+        cargo bench -p bench --bench crypto_overhead_bench 2>&1 | tee tools/bench_results/crypto_overhead.txt || true
+    - name: Parse crypto overhead and enforce baseline
+      run: |
+        python3 tools/benchmark/parse_crypto_overhead.py
+      continue-on-error: false
     - name: Generate performance envelope
       run: |
         python3 tools/benchmark/generate_performance_envelope.py || true
