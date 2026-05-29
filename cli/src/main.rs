@@ -483,7 +483,7 @@ fn main() {
         });
     }
 
-    if let Some(sock) = metrics_socket {
+    if let Some(ref sock) = metrics_socket {
         // Spawn a unix-domain socket listener that returns current cumulative counter
         let sock_path = sock.clone();
         thread::spawn(move || {
@@ -520,7 +520,7 @@ fn main() {
         });
     }
 
-    if let Some(addr) = metrics_http {
+    if let Some(ref addr) = metrics_http {
         start_metrics_http(&addr);
     }
 
