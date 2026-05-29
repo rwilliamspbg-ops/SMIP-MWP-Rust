@@ -14,6 +14,9 @@ fn build_table(route_count: usize) -> Table {
             next_hop_id: [(index as u8).wrapping_add(1); 32],
             metric: index as i32,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
     }
 

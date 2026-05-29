@@ -9,4 +9,5 @@ parking_lot = "0.12"
 once_cell = "1.18"
 arc-swap = "1.6"
 crossbeam-epoch = "0.9"
+hex = "0.4"
 

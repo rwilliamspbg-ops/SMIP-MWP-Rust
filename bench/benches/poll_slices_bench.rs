@@ -16,6 +16,9 @@ fn build_forwarder() -> Forwarder {
         next_hop_id: [3u8; 32],
         metric: 1,
         last_seen: SystemTime::now(),
+        channel_count: 1,
+        alternate_channels: Vec::new(),
+        mcr_epoch: 1,
     });
     Forwarder::new(routes)
 }
@@ -63,7 +66,7 @@ impl XdpSocket for CloneSocket {
         std::mem::take(&mut self.frames)
     }
 
-    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, _buf: &[u8], _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }
@@ -98,7 +101,7 @@ impl XdpSocket for ZeroCopySocket {
         ring.active.len()
     }
 
-    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, _buf: &[u8], _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }
@@ -128,7 +131,7 @@ impl XdpSocket for DefaultFallbackSocket {
         std::mem::take(&mut self.frames)
     }
 
-    fn send(&mut self, _buf: &mut Vec<u8>, _offsets: &[(usize, usize)]) -> Result<(), ()> {
+    fn send(&mut self, _buf: &[u8], _offsets: &[(usize, usize)]) -> Result<(), ()> {
         Ok(())
     }
 }

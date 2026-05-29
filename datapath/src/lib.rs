@@ -2,30 +2,115 @@ use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 use rayon::prelude::*;
 use std::cell::RefCell;
 thread_local! {
-    static TLS_CIPHERTEXT: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(65536));
+    static TLS_CIPHERTEXT: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_capacity(65536));
 }
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 #[cfg(target_arch = "x86_64")]
 use std::is_x86_feature_detected;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::ptr::NonNull;
 
 /// Application-level processed packet counter (samples per-second externally)
 pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 use routing::Table;
 use std::convert::TryInto;
 use wire::{HeaderViewRef, HEADER_SIZE};
+mod mcr_config;
 
 const PARALLEL_BATCH_THRESHOLD: usize = 1024;
+const ALIGNMENT: usize = 256;
 
 pub use socket::XdpSocket;
+
+struct AlignedBuffer {
+    ptr: NonNull<u8>,
+    len: usize,
+    cap: usize,
+}
+
+impl AlignedBuffer {
+    fn with_capacity(capacity: usize) -> Self {
+        let cap = capacity.max(1);
+        let layout = Layout::from_size_align(cap, ALIGNMENT).unwrap();
+        let ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
+        Self { ptr, len: 0, cap }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        let required = self.len.saturating_add(additional);
+        if required <= self.cap {
+            return;
+        }
+
+        let new_cap = required.next_power_of_two().max(self.cap.saturating_mul(2));
+        let old_layout = Layout::from_size_align(self.cap, ALIGNMENT).unwrap();
+        let new_layout = Layout::from_size_align(new_cap, ALIGNMENT).unwrap();
+        let raw = unsafe { realloc(self.ptr.as_ptr(), old_layout, new_layout.size()) };
+        let ptr = NonNull::new(raw).unwrap_or_else(|| std::alloc::handle_alloc_error(new_layout));
+        self.ptr = ptr;
+        self.cap = new_cap;
+    }
+
+    fn extend_from_slice(&mut self, src: &[u8]) {
+        self.reserve(src.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.as_ptr().add(self.len), src.len());
+        }
+        self.len += src.len();
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+}
+
+impl Drop for AlignedBuffer {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.cap, ALIGNMENT).unwrap();
+        unsafe { dealloc(self.ptr.as_ptr(), layout) };
+    }
+}
 
 pub struct Forwarder {
     pub routes: Table,
     session: Option<HybridSession>,
-    arena: Vec<u8>,
-    ciphertext: Vec<u8>,
+    arena: AlignedBuffer,
     offsets: Vec<(usize, usize)>,
+    /// MCR spray buffer for multi-channel outputs
+    spray_buffer: Vec<Vec<u8>>,
+    /// Track which channels were used in this batch
+    channel_usage: AtomicU64,
+    /// MCR telemetry: forwarded output packets
+    mcr_forwarded: AtomicU64,
+    /// MCR telemetry: dropped outputs (route misses / encrypt failures)
+    mcr_dropped: AtomicU64,
 }
 
 struct PacketOutput {
@@ -52,10 +137,13 @@ impl Forwarder {
         Self {
             routes,
             session,
-            // Pre-reserve arena and ciphertext buffers to avoid mid-run allocations.
-            arena: Vec::with_capacity(262144),
-            ciphertext: Vec::with_capacity(65536),
+            // Pre-reserve aligned scratch/output storage to avoid mid-run allocations.
+            arena: AlignedBuffer::with_capacity(262144),
             offsets: Vec::with_capacity(4096),
+            spray_buffer: Vec::new(),
+            channel_usage: AtomicU64::new(mcr_config::get_mcr_channels() as u64),
+            mcr_forwarded: AtomicU64::new(0),
+            mcr_dropped: AtomicU64::new(0),
         }
     }
 
@@ -90,7 +178,7 @@ impl Forwarder {
                         self.arena.extend_from_slice(payload);
 
                         match session.encrypt_into_slice(
-                            &mut self.arena[payload_start..payload_start + payload_len],
+                            &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
                             seq_num,
                         ) {
                             Ok(tag) => {
@@ -142,7 +230,7 @@ impl Forwarder {
                 if let Some(session) = session {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-                        // Reuse a thread-local ciphertext buffer to avoid per-packet allocations
+                        // Reuse a thread-local aligned ciphertext buffer to avoid per-packet allocations.
                         let encrypt_result = TLS_CIPHERTEXT.with(|buf_cell| {
                             let mut buf = buf_cell.borrow_mut();
                             buf.clear();
@@ -150,8 +238,10 @@ impl Forwarder {
                             if cap < payload_len + TAG_SIZE {
                                 buf.reserve(payload_len + TAG_SIZE - cap);
                             }
-                            match session.encrypt_to(&mut *buf, payload, seq_num) {
-                                Ok(()) => {
+                            buf.extend_from_slice(payload);
+                            match session.encrypt_into_slice(buf.as_mut_slice(), seq_num) {
+                                Ok(tag) => {
+                                    buf.extend_from_slice(tag.as_slice());
                                     let ct_len = buf.len();
                                     let mut bytes = Vec::with_capacity(HEADER_SIZE + ct_len);
                                     bytes.extend_from_slice(&pkt[..HEADER_SIZE]);
@@ -168,15 +258,15 @@ impl Forwarder {
                                                     copy_avx2(dst_ptr, src_ptr, ct_len);
                                                 }
                                             } else {
-                                                bytes.extend_from_slice(&buf);
+                                                bytes.extend_from_slice(buf.as_slice());
                                             }
                                         }
                                         #[cfg(not(target_arch = "x86_64"))]
                                         {
-                                            bytes.extend_from_slice(&buf);
+                                            bytes.extend_from_slice(buf.as_slice());
                                         }
                                     } else {
-                                        bytes.extend_from_slice(&buf);
+                                        bytes.extend_from_slice(buf.as_slice());
                                     }
 
                                     Ok(PacketOutput { bytes, encrypted: true, route_miss: false })
@@ -256,6 +346,10 @@ impl Forwarder {
     }
 
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        // If MCR is enabled, use the MCR-aware processing path.
+        if mcr_config::get_mcr_enabled() {
+            return self.process_batch_mcr(sock);
+        }
         let frames = sock.poll(64);
         let received = frames.len();
 
@@ -279,10 +373,6 @@ impl Forwarder {
                 ..ForwarderStats::default()
             };
 
-            // Reuse a persistent ciphertext buffer across batches to avoid repeated
-            // heap growth and allocator churn on the hot path.
-            self.ciphertext.clear();
-
             for pkt in frames {
                 let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats);
 
@@ -295,7 +385,7 @@ impl Forwarder {
                 }
             }
 
-            let _ = sock.send(&mut self.arena, &self.offsets);
+            let _ = sock.send(self.arena.as_slice(), &self.offsets);
             PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
             return stats;
         }
@@ -308,10 +398,107 @@ impl Forwarder {
             .collect::<Vec<_>>();
 
         let stats = self.append_outputs(outputs, received);
-        let _ = sock.send(&mut self.arena, &self.offsets);
+        let _ = sock.send(self.arena.as_slice(), &self.offsets);
         // update global application pconf counter
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
+    }
+
+    /// MCR-aware processing: for now delegates to `process_batch` while
+    /// preserving a stable API for future MCR spray behavior.
+    pub fn process_batch_mcr(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        use rayon::prelude::*;
+
+        let frames = sock.poll(64);
+        let received = frames.len();
+
+        if frames.is_empty() {
+            return ForwarderStats::default();
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let use_avx2 = false;
+
+        self.arena.clear();
+        self.offsets.clear();
+        self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+
+        let spray_mode = mcr_config::get_mcr_spray_mode();
+
+        // Phase 1: single-threaded channel selection and packet duplication
+        let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
+        let mut route_miss_count: usize = 0;
+        for pkt in frames {
+            if let Ok(h) = HeaderViewRef::new(&pkt) {
+                let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                let flow_label = h.flow_label();
+
+                let channels = self.routes.lookup_spray(dst_id, flow_label);
+                if channels.is_empty() {
+                    // route miss: forward unchanged
+                    duplicated.push((pkt, dst_id));
+                    route_miss_count += 1;
+                    continue;
+                }
+
+                if spray_mode == "full" {
+                    for (nh, _is_primary) in channels.iter() {
+                        let mut modified = pkt.clone();
+                        modified[32..64].copy_from_slice(nh);
+                        duplicated.push((modified, dst_id));
+                    }
+                } else {
+                    // primary only
+                    let nh = channels[0].0;
+                    let mut modified = pkt.clone();
+                    modified[32..64].copy_from_slice(&nh);
+                    duplicated.push((modified, dst_id));
+                }
+            } else {
+                duplicated.push((pkt, [0u8; 32]));
+                route_miss_count += 1;
+            }
+        }
+
+        // Phase 2: parallel encryption/processing of duplicated packets
+        let routes_ref = &self.routes;
+        let session_ref = self.session.as_ref();
+        let outputs_with_orig: Vec<(PacketOutput, [u8; 32])> = duplicated
+            .into_par_iter()
+            .map(|(pkt, orig)| (Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2), orig))
+            .collect();
+
+        // update routing per-channel stats based on outputs
+        for (out, orig_dest) in outputs_with_orig.iter() {
+            if let Ok(h) = HeaderViewRef::new(&out.bytes) {
+                let nh: [u8; 32] = h.dst_id().try_into().unwrap();
+                if out.encrypted {
+                    routes_ref.inc_channel_forwarded(*orig_dest, nh);
+                } else if out.route_miss {
+                    routes_ref.inc_channel_dropped(*orig_dest);
+                }
+            }
+        }
+
+        let outputs: Vec<PacketOutput> = outputs_with_orig.into_iter().map(|(o, _)| o).collect();
+
+        // append outputs and update telemetry
+        let stats = self.append_outputs(outputs, received);
+        self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+        self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+
+        let _ = sock.send(self.arena.as_slice(), &self.offsets);
+        PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+        stats
+    }
+
+    /// Full-spray mode: duplicate to all channels. Currently a stub that
+    /// behaves like the normal path until spray is implemented.
+    pub fn process_batch_spray_full(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
+        // TODO: build outputs for all channels per-packet
+        self.process_batch(sock)
     }
 
     pub fn process_batch_slices(
@@ -322,8 +509,6 @@ impl Forwarder {
         let received = sock.poll_slices(64, ring);
         self.arena.clear();
         self.offsets.clear();
-        self.ciphertext.clear();
-
         let mut stats = ForwarderStats {
             received,
             ..ForwarderStats::default()
@@ -360,7 +545,7 @@ impl Forwarder {
             }
         }
 
-        let _ = sock.send(&mut self.arena, &self.offsets);
+        let _ = sock.send(self.arena.as_slice(), &self.offsets);
         // update global application pconf counter
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
@@ -490,7 +675,7 @@ pub mod socket {
         // Send a single arena buffer with offsets describing individual packets.
         // The socket borrows the arena so the caller retains ownership and can
         // reuse it across batches.
-        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()>;
+        fn send(&mut self, buf: &[u8], offsets: &[(usize, usize)]) -> Result<(), ()>;
     }
 }
 
@@ -518,7 +703,7 @@ mod tests {
         fn poll(&mut self, _max: usize) -> Vec<Vec<u8>> {
             std::mem::take(&mut self.frames)
         }
-        fn send(&mut self, buf: &mut Vec<u8>, offsets: &[(usize, usize)]) -> Result<(), ()> {
+        fn send(&mut self, buf: &[u8], offsets: &[(usize, usize)]) -> Result<(), ()> {
             self.sent.clear();
             for (off, len) in offsets.iter().cloned() {
                 let slice = &buf[off..off + len];
@@ -536,6 +721,9 @@ mod tests {
             next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
@@ -565,6 +753,9 @@ mod tests {
             next_hop_id: [3u8; 32],
             metric: 1,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let mut fwd = Forwarder::new(rt);
         let mut buf = wire::Header::new_header_buffer(4);
@@ -586,5 +777,105 @@ mod tests {
         assert_eq!(stats.route_misses, 1);
         assert_eq!(stats.forwarded, 1);
         assert_eq!(sock.sent.len(), 1);
+    }
+
+    #[test]
+    fn slice_ring_clamps_overlong_frames() {
+        let mut ring = socket::SliceRing::new(1, 4);
+        let mut sock = MockSocket::new(vec![vec![1, 2, 3, 4, 5, 6]]);
+
+        let received = sock.poll_slices(64, &mut ring);
+
+        assert_eq!(received, 1);
+        assert_eq!(ring.active, vec![0]);
+        assert_eq!(ring.slot(0), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn forwarder_process_batch_slices_encrypts_and_sends() {
+        let rt = Table::new();
+        rt.update_route(RouteEntry {
+            dest_id: [2u8; 32],
+            next_hop_id: [3u8; 32],
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
+        });
+        let mut fwd = Forwarder::new(rt);
+
+        let mut buf = wire::Header::new_header_buffer(4);
+        let h = Header {
+            src_id: [1u8; 32],
+            dst_id: [2u8; 32],
+            flow_label: 0x1,
+            seq_num: 1,
+            session_id: [0u8; 16],
+            flags: 0,
+            length: 4,
+        };
+        h.marshal_into(&mut buf).unwrap();
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
+
+        let mut sock = MockSocket::new(vec![buf]);
+        let mut ring = socket::SliceRing::new(1, wire::HEADER_SIZE + 4 + TAG_SIZE);
+        let stats = fwd.process_batch_slices(&mut sock, &mut ring);
+
+        assert_eq!(stats.received, 1);
+        assert_eq!(stats.encrypted, 1);
+        assert_eq!(stats.route_misses, 0);
+        assert_eq!(stats.forwarded, 0);
+        assert_eq!(sock.sent.len(), 1);
+        assert_eq!(sock.sent[0].len(), wire::HEADER_SIZE + 4 + TAG_SIZE);
+    }
+
+    #[test]
+    fn aligned_buffers_are_256b_aligned() {
+        let forwarder = Forwarder::new(Table::new());
+        assert_eq!((forwarder.arena.as_ptr() as usize) % ALIGNMENT, 0);
+
+        TLS_CIPHERTEXT.with(|buf_cell| {
+            let buf = buf_cell.borrow();
+            assert_eq!((buf.as_ptr() as usize) % ALIGNMENT, 0);
+        });
+    }
+
+    #[test]
+    fn mcr_full_spray_duplicates_outputs() {
+        use std::env;
+        env::set_var("MOHAWK_MCR_SPRAY_MODE", "full");
+        env::set_var("MOHAWK_MCR_ENABLED", "1");
+
+        let rt = Table::new();
+        rt.update_route(RouteEntry {
+            dest_id: [2u8; 32],
+            next_hop_id: [3u8; 32],
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 3,
+            alternate_channels: vec![[4u8; 32], [5u8; 32]],
+            mcr_epoch: 1,
+        });
+
+        let mut fwd = Forwarder::new(rt);
+        let mut buf = wire::Header::new_header_buffer(4);
+        let h = Header {
+            src_id: [1u8; 32],
+            dst_id: [2u8; 32],
+            flow_label: 0x1,
+            seq_num: 1,
+            session_id: [0u8; 16],
+            flags: 0,
+            length: 4,
+        };
+        h.marshal_into(&mut buf).unwrap();
+        buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
+        let mut sock = MockSocket::new(vec![buf]);
+        let stats = fwd.process_batch(&mut sock);
+        assert_eq!(stats.received, 1);
+        // with full spray and 3 channels we expect 3 encrypted outputs
+        assert_eq!(stats.encrypted, 3);
+        assert_eq!(sock.sent.len(), 3);
     }
 }

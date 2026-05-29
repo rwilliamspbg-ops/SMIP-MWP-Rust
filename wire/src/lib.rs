@@ -4,6 +4,10 @@ use std::convert::TryInto;
 
 pub const HEADER_SIZE: usize = 96; // matches Go implementation
 
+// MCR spray flags (stored in the existing `flags` field)
+pub const MCR_SPRAY_FLAG: u16 = 1 << 0;
+pub const MCR_FULL_SPRAY_FLAG: u16 = 1 << 1;
+
 const SRC_OFFSET: usize = 0;
 const DST_OFFSET: usize = 32;
 const FLOW_OFFSET: usize = 64;

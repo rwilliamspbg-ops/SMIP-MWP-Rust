@@ -12,10 +12,12 @@ CORRUPT_PERCENT=${CORRUPT_PERCENT:-1}
 DUPLICATE_PERCENT=${DUPLICATE_PERCENT:-1}
 SEED_BASE=${SEED_BASE:-20260528}
 CORE_SETS=${CORE_SETS:-2-3 2-5 2-7}
+MOHAWK_MCR_CHANNELS=${MOHAWK_MCR_CHANNELS:-3}
+MOHAWK_MCR_SPRAY_MODE=${MOHAWK_MCR_SPRAY_MODE:-primary}
 
 mkdir -p "$(dirname "$OUT")"
 
-echo "timestamp,core_set,packets,payload_len,loss_percent,corrupt_percent,duplicate_percent,throughput_pkt_s,p50_ns,p99_ns,p99_9_ns" > "$OUT"
+echo "timestamp,core_set,packets,payload_len,loss_percent,corrupt_percent,duplicate_percent,mcr_channels,mcr_spray_mode,throughput_pkt_s,p50_ns,p99_ns,p99_9_ns" > "$OUT"
 
 if ! command -v taskset >/dev/null 2>&1; then
   echo "taskset not found; install util-linux" >&2
@@ -33,7 +35,9 @@ for core_set in $CORE_SETS; do
     --loss-percent "$LOSS_PERCENT" \
     --corrupt-percent "$CORRUPT_PERCENT" \
     --duplicate-percent "$DUPLICATE_PERCENT" \
-    --seed "$seed" | tee "$tmp"
+    --seed "$seed" \
+    --mcr-channels "$MOHAWK_MCR_CHANNELS" \
+    --mcr-spray-mode "$MOHAWK_MCR_SPRAY_MODE" | tee "$tmp"
 
   throughput=$(grep -Eo 'throughput_pkt_s=[0-9.]+' "$tmp" | head -n1 | cut -d= -f2)
   latency_line=$(grep -E 'latency_ns p50=' "$tmp" | head -n1)
@@ -42,7 +46,7 @@ for core_set in $CORE_SETS; do
   p999=$(echo "$latency_line" | sed -E 's/.*p99_9=([0-9]+).*/\1/')
 
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  echo "$timestamp,\"$core_set\",$PACKETS,$PAYLOAD_LEN,$LOSS_PERCENT,$CORRUPT_PERCENT,$DUPLICATE_PERCENT,$throughput,$p50,$p99,$p999" >> "$OUT"
+  echo "$timestamp,\"$core_set\",$PACKETS,$PAYLOAD_LEN,$LOSS_PERCENT,$CORRUPT_PERCENT,$DUPLICATE_PERCENT,$MOHAWK_MCR_CHANNELS,$MOHAWK_MCR_SPRAY_MODE,$throughput,$p50,$p99,$p999" >> "$OUT"
 
   rm -f "$tmp"
 done

@@ -13,6 +13,33 @@ pub struct RouteEntry {
     pub next_hop_id: [u8; 32],
     pub metric: i32,
     pub last_seen: SystemTime,
+    /// MCR-specific: number of alternate channels (default 1 = single-path)
+    pub channel_count: u8,
+    /// List of alternative next-hop IDs for spraying (may be empty)
+    pub alternate_channels: Vec<[u8; 32]>,
+    /// MCR epoch for failover decisions (monotonic counter)
+    pub mcr_epoch: u64,
+}
+
+#[derive(Debug)]
+pub struct ChannelStats {
+    /// Per-next-hop forwarded packet counters
+    pub per_channel_forwarded: AHashMap<[u8; 32], AtomicU64>,
+    /// Dropped packets for this destination
+    pub packets_dropped: AtomicU64,
+    pub last_failure: Option<SystemTime>,
+    pub failure_count: u32,
+}
+
+impl Default for ChannelStats {
+    fn default() -> Self {
+        ChannelStats {
+            per_channel_forwarded: AHashMap::new(),
+            packets_dropped: AtomicU64::new(0),
+            last_failure: None,
+            failure_count: 0,
+        }
+    }
 }
 
 impl Default for Table {
@@ -25,6 +52,8 @@ impl Default for Table {
 pub struct Table {
     inner: RwLock<TableInner>,
     fast_shards: Vec<RwLock<AHashMap<[u8; 32], RouteEntry>>>,
+    /// MCR-specific: per-destination channel stats (read-only hot path)
+    mcr_channel_stats: RwLock<AHashMap<[u8; 32], ChannelStats>>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +115,7 @@ impl Table {
         Self {
             inner: RwLock::new(init),
             fast_shards: shards,
+            mcr_channel_stats: RwLock::new(AHashMap::new()),
         }
     }
 
@@ -115,8 +145,51 @@ impl Table {
             inner.entries.insert(e.dest_id, e.clone());
             Self::rebuild_predictive_entries(&mut inner);
         }
+        // ensure channel stats entry exists
+        {
+            let mut stats = self.mcr_channel_stats.write();
+            stats.entry(e.dest_id).or_insert_with(ChannelStats::default);
+        }
         // Invalidate per-thread caches
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Increment per-channel forwarded counter for `dest_id` and `next_hop`.
+    pub fn inc_channel_forwarded(&self, dest_id: [u8; 32], next_hop: [u8; 32]) {
+        let mut stats = self.mcr_channel_stats.write();
+        let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
+        use std::sync::atomic::Ordering;
+        if let Some(counter) = entry.per_channel_forwarded.get(&next_hop) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        } else {
+            entry
+                .per_channel_forwarded
+                .insert(next_hop, AtomicU64::new(1));
+        }
+    }
+
+    /// Increment dropped counter for `dest_id`.
+    pub fn inc_channel_dropped(&self, dest_id: [u8; 32]) {
+        let mut stats = self.mcr_channel_stats.write();
+        let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
+        entry.packets_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Collect MCR metrics snapshot as triples (dest_hex, next_hop_hex, count).
+    pub fn collect_mcr_metrics(&self) -> Vec<(String, String, u64)> {
+        let stats = self.mcr_channel_stats.read();
+        let mut out = Vec::new();
+        for (dest, ch_stats) in stats.iter() {
+            for (nh, counter) in ch_stats.per_channel_forwarded.iter() {
+                let count = counter.load(std::sync::atomic::Ordering::Relaxed);
+                out.push((hex::encode(dest), hex::encode(nh), count));
+            }
+            let dropped = ch_stats.packets_dropped.load(std::sync::atomic::Ordering::Relaxed);
+            if dropped > 0 {
+                out.push((hex::encode(dest), "dropped".to_string(), dropped));
+            }
+        }
+        out
     }
 
     pub fn remove_route(&self, dest: [u8; 32]) {
@@ -133,7 +206,59 @@ impl Table {
             inner.entries.remove(&dest);
             Self::rebuild_predictive_entries(&mut inner);
         }
+        {
+            let mut stats = self.mcr_channel_stats.write();
+            stats.remove(&dest);
+        }
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Return list of channels for spraying for given destination and flow label.
+    /// Each tuple is `(next_hop_id, is_primary)` where primary is first element.
+    pub fn lookup_spray(&self, dst_id: [u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
+        // Try fast-path shard first
+        let shard = Self::shard_for(&dst_id);
+        if let Some(e) = { let map = self.fast_shards[shard].read(); map.get(&dst_id).cloned() } {
+            // construct channels vector: primary + alternates
+            let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
+            out.push((e.next_hop_id, true));
+            for ch in &e.alternate_channels {
+                out.push((*ch, false));
+            }
+            return out;
+        }
+
+        // Fall back to main table
+        if let Some(e) = { let inner = self.inner.read(); inner.entries.get(&dst_id).cloned() } {
+            let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
+            out.push((e.next_hop_id, true));
+            for ch in &e.alternate_channels {
+                out.push((*ch, false));
+            }
+            // If there are multiple channels, re-order by hash selection so primary reflects flow affinity
+            if out.len() > 1 {
+                let choices = out.len();
+                let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                out.swap(0, idx);
+                // mark primary accordingly
+                for i in 0..out.len() {
+                    out[i].1 = i == 0;
+                }
+            }
+            return out;
+        }
+
+        Vec::new()
+    }
+
+    /// Select a single channel by index (round-robin if out of range)
+    pub fn lookup_spray_single(&self, dst_id: [u8; 32], flow_label: u32, channel_idx: usize) -> Option<[u8; 32]> {
+        let channels = self.lookup_spray(dst_id, flow_label);
+        if channels.is_empty() {
+            return None;
+        }
+        let idx = channel_idx % channels.len();
+        Some(channels[idx].0)
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
@@ -326,6 +451,9 @@ mod tests {
             next_hop_id: next,
             metric: 0,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let got = t.lookup_next_hop(dest, 0).unwrap();
         assert_eq!(got, next);
@@ -339,12 +467,18 @@ mod tests {
             next_hop_id: [9u8; 32],
             metric: 0,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         t.update_route(RouteEntry {
             dest_id: [2u8; 32],
             next_hop_id: [8u8; 32],
             metric: 0,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         let src = [4u8; 32];
         let dst = [99u8; 32];
@@ -362,6 +496,9 @@ mod tests {
             next_hop_id: nh,
             metric: 1,
             last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
         });
         assert_eq!(t.lookup_or_predict([1u8; 32], dest, 0).unwrap(), nh);
         t.remove_route(dest);
