@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
-use prometheus::{Registry, IntGauge, Encoder, TextEncoder};
+use prometheus::{Registry, IntGauge, Encoder, TextEncoder, GaugeVec};
 // Helper to construct an AF_XDP socket: attempt real socket when available,
 // otherwise fall back to the in-process mock.
 fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
@@ -366,35 +366,27 @@ fn main() {
         let bind_addr = addr.clone();
         // Setup a prometheus registry and gauges for AF_XDP counters
         let registry = prometheus::Registry::new();
-        let afxdp_retry = prometheus::IntGauge::new("afxdp_retry_total", "AF_XDP send retry attempts").unwrap();
-        let afxdp_back = prometheus::IntGauge::new("afxdp_backpressure_total", "AF_XDP tx backpressure events").unwrap();
-        let af_alloc_from_fl = prometheus::IntGauge::new("afxdp_alloc_from_freelist_total", "AF_XDP allocations served from free list").unwrap();
-        let af_alloc_fallback = prometheus::IntGauge::new("afxdp_alloc_fallback_total", "AF_XDP allocations using fallback allocator").unwrap();
-        let af_free_push_drop = prometheus::IntGauge::new("afxdp_free_push_drop_total", "AF_XDP drops when returning frames to free list").unwrap();
-        registry.register(Box::new(afxdp_retry.clone())).ok();
-        registry.register(Box::new(afxdp_back.clone())).ok();
-        registry.register(Box::new(af_alloc_from_fl.clone())).ok();
-        registry.register(Box::new(af_alloc_fallback.clone())).ok();
-        registry.register(Box::new(af_free_push_drop.clone())).ok();
+        // Use labeled metrics so we can add per-socket labels later.
+        let afxdp_gauges = GaugeVec::new(
+            prometheus::opts!("afxdp_counters", "AF_XDP counters by name"),
+            &["metric", "socket"],
+        ).unwrap();
+        registry.register(Box::new(afxdp_gauges.clone())).ok();
 
         // Background updater to sync atomic globals into the prometheus gauges
         {
-            let g_retry = afxdp_retry.clone();
-            let g_back = afxdp_back.clone();
-            let g_af_alloc_from = af_alloc_from_fl.clone();
-            let g_af_alloc_fb = af_alloc_fallback.clone();
-            let g_af_free_drop = af_free_push_drop.clone();
+            let g = afxdp_gauges.clone();
             std::thread::spawn(move || loop {
-                let r = afxdp::AF_XDP_RETRY_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
-                let b = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
-                let af_from = afxdp::AF_XDP_ALLOC_FROM_FREELIST_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
-                let af_fb = afxdp::AF_XDP_ALLOC_FALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
-                let af_drop = afxdp::AF_XDP_FREE_PUSH_DROP_COUNT.load(std::sync::atomic::Ordering::Relaxed) as i64;
-                g_retry.set(r);
-                g_back.set(b);
-                g_af_alloc_from.set(af_from);
-                g_af_alloc_fb.set(af_fb);
-                g_af_free_drop.set(af_drop);
+                let r = afxdp::AF_XDP_RETRY_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                let b = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                let af_from = afxdp::AF_XDP_ALLOC_FROM_FREELIST_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                let af_fb = afxdp::AF_XDP_ALLOC_FALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                let af_drop = afxdp::AF_XDP_FREE_PUSH_DROP_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                g.with_label_values(&["retry_total", "global"]).set(r);
+                g.with_label_values(&["backpressure_total", "global"]).set(b);
+                g.with_label_values(&["alloc_from_freelist_total", "global"]).set(af_from);
+                g.with_label_values(&["alloc_fallback_total", "global"]).set(af_fb);
+                g.with_label_values(&["free_push_drop_total", "global"]).set(af_drop);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             });
         }
@@ -415,6 +407,19 @@ fn main() {
                                 let body = String::from_utf8_lossy(&buffer);
                                 let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
                                 let _ = s.write_all(resp.as_bytes());
+                            } else if req.starts_with("POST /control") {
+                                // simple control endpoint: body contains `headroom=<n>`
+                                let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                                if let Some(eq) = body.find("headroom=") {
+                                    if let Ok(n) = body[eq + 9..].trim().split_whitespace().next().unwrap_or("").parse::<usize>() {
+                                        std::env::set_var("MOHAWK_FREELIST_HEADROOM", n.to_string());
+                                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+                                    } else {
+                                        let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request");
+                                    }
+                                } else {
+                                    let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request");
+                                }
                             } else {
                                 let _ = s.write_all(
                                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
