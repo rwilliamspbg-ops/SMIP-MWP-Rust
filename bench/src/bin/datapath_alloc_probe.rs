@@ -22,7 +22,9 @@ unsafe impl GlobalAlloc for TrackingAlloc {
         if !ptr.is_null() {
             let size = layout.size();
             CURRENT_ALLOCS.fetch_add(1, Ordering::Relaxed);
-            let cur_bytes = CURRENT_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
+            let cur_bytes = CURRENT_BYTES
+                .fetch_add(size as u64, Ordering::Relaxed)
+                .saturating_add(size as u64);
             update_peak(&PEAK_ALLOCS, CURRENT_ALLOCS.load(Ordering::Relaxed));
             update_peak(&PEAK_BYTES, cur_bytes);
         }
@@ -42,7 +44,9 @@ unsafe impl GlobalAlloc for TrackingAlloc {
             let old_size = layout.size();
             if new_size as u64 >= old_size as u64 {
                 let added = new_size as u64 - old_size as u64;
-                let cur = CURRENT_BYTES.fetch_add(added, Ordering::Relaxed) + added;
+                let cur = CURRENT_BYTES
+                    .fetch_add(added, Ordering::Relaxed)
+                    .saturating_add(added);
                 update_peak(&PEAK_BYTES, cur);
             } else {
                 let removed = old_size as u64 - new_size as u64;

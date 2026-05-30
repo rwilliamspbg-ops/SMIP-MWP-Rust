@@ -37,7 +37,7 @@ impl DatapathXdpSocket for MockSocket {
     }
     fn send(&mut self, buf: &[u8], offsets: &[(usize, usize)]) -> Result<(), ()> {
         let mut out = Vec::with_capacity(offsets.len());
-            for (off, len) in offsets.iter().cloned() {
+        for (off, len) in offsets.iter().cloned() {
             out.push(buf[off..off + len].to_vec());
         }
         *self.sent.lock().unwrap() = out;

@@ -1,16 +1,11 @@
 use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 use rayon::prelude::*;
-use std::cell::RefCell;
-thread_local! {
-    static TLS_CIPHERTEXT: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_capacity(65536));
-}
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 #[cfg(target_arch = "x86_64")]
 use std::is_x86_feature_detected;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 /// Application-level processed packet counter (samples per-second externally)
 pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
@@ -85,10 +80,6 @@ impl AlignedBuffer {
     fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
-
-    fn as_ptr(&self) -> *const u8 {
-        self.ptr.as_ptr()
-    }
 }
 
 impl Drop for AlignedBuffer {
@@ -111,6 +102,46 @@ pub struct Forwarder {
     mcr_forwarded: AtomicU64,
     /// MCR telemetry: dropped outputs (route misses / encrypt failures)
     mcr_dropped: AtomicU64,
+}
+
+struct Profiler {
+    handle_ns: AtomicU64,
+    handle_count: AtomicU64,
+
+    encrypt_ns: AtomicU64,
+    encrypt_count: AtomicU64,
+
+    append_ns: AtomicU64,
+    append_count: AtomicU64,
+
+    lookup_next_hop_calls: AtomicU64,
+    lookup_next_hop_hits: AtomicU64,
+
+    lookup_predict_calls: AtomicU64,
+    lookup_predict_hits: AtomicU64,
+}
+
+impl Default for Profiler {
+    fn default() -> Self {
+        Self {
+            handle_ns: AtomicU64::new(0),
+            handle_count: AtomicU64::new(0),
+            encrypt_ns: AtomicU64::new(0),
+            encrypt_count: AtomicU64::new(0),
+            append_ns: AtomicU64::new(0),
+            append_count: AtomicU64::new(0),
+            lookup_next_hop_calls: AtomicU64::new(0),
+            lookup_next_hop_hits: AtomicU64::new(0),
+            lookup_predict_calls: AtomicU64::new(0),
+            lookup_predict_hits: AtomicU64::new(0),
+        }
+    }
+}
+
+static GLOBAL_PROFILER: OnceLock<Profiler> = OnceLock::new();
+
+fn global_profiler() -> &'static Profiler {
+    GLOBAL_PROFILER.get_or_init(|| Profiler::default())
 }
 
 struct PacketOutput {
@@ -147,7 +178,43 @@ impl Forwarder {
         }
     }
 
+    /// Print profiling counters collected during runs. Safe to call while
+    /// the forwarder is idle; locks the profiler and prints a summary.
+    pub fn print_profile(&self) {
+        let p = global_profiler();
+        let handle_count = p.handle_count.load(Ordering::Relaxed);
+        let handle_ns = p.handle_ns.load(Ordering::Relaxed);
+        let encrypt_count = p.encrypt_count.load(Ordering::Relaxed);
+        let encrypt_ns = p.encrypt_ns.load(Ordering::Relaxed);
+        let append_count = p.append_count.load(Ordering::Relaxed);
+        let append_ns = p.append_ns.load(Ordering::Relaxed);
+        let lookup_calls = p.lookup_next_hop_calls.load(Ordering::Relaxed);
+        let lookup_hits = p.lookup_next_hop_hits.load(Ordering::Relaxed);
+        let predict_calls = p.lookup_predict_calls.load(Ordering::Relaxed);
+        let predict_hits = p.lookup_predict_hits.load(Ordering::Relaxed);
+
+        eprintln!("--- Forwarder profile ---");
+        eprintln!("handle: {} calls, {} ns total, avg {} ns", handle_count, handle_ns, if handle_count>0 { handle_ns / handle_count } else { 0 });
+        eprintln!("encrypt: {} calls, {} ns total, avg {} ns", encrypt_count, encrypt_ns, if encrypt_count>0 { encrypt_ns / encrypt_count } else { 0 });
+        eprintln!("append: {} calls, {} ns total, avg {} ns", append_count, append_ns, if append_count>0 { append_ns / append_count } else { 0 });
+        eprintln!("lookup_next_hop: {} calls, {} hits", lookup_calls, lookup_hits);
+        eprintln!("lookup_predict: {} calls, {} hits", predict_calls, predict_hits);
+        eprintln!("global packets_processed={}", PACKETS_PROCESSED.load(Ordering::Relaxed));
+    }
+
+    /// Ensure the internal arena has capacity for approximately `cap` bytes.
+    /// This is a low-risk tuning knob for benchmark harnesses to avoid
+    /// mid-run reallocations when the expected batch size and packet sizes
+    /// are known.
+    pub fn ensure_arena_capacity(&mut self, cap: usize) {
+        // AlignedBuffer::reserve expects an "additional" amount relative
+        // to the current length; when called on an empty arena this
+        // effectively sets the desired capacity.
+        self.arena.reserve(cap);
+    }
+
     fn handle_packet(&mut self, pkt: &[u8], _use_avx2: bool, stats: &mut ForwarderStats) -> bool {
+        let start_handle = std::time::Instant::now();
         let mut forwarded = false;
 
         if let Ok(h) = HeaderViewRef::new(pkt) {
@@ -157,11 +224,19 @@ impl Forwarder {
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
+            // instrument lookup_next_hop
+            {
+                let prof = global_profiler();
+                prof.lookup_next_hop_calls.fetch_add(1, Ordering::Relaxed);
+            }
             if self
                 .routes
-                .lookup_or_predict(src_id, dst_id, flow_label)
+                .lookup_next_hop(dst_id, flow_label)
                 .is_some()
             {
+                let prof = global_profiler();
+                prof.lookup_next_hop_hits.fetch_add(1, Ordering::Relaxed);
+            
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
@@ -177,12 +252,17 @@ impl Forwarder {
                         let payload_start = self.arena.len();
                         self.arena.extend_from_slice(payload);
 
-                        match session.encrypt_into_slice(
-                            &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
-                            seq_num,
-                        ) {
-                            Ok(tag) => {
-                                self.arena.extend_from_slice(tag.as_slice());
+                                let enc_start = std::time::Instant::now();
+                                match session.encrypt_into_slice(
+                                    &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
+                                    seq_num,
+                                ) {
+                                    Ok(tag) => {
+                                        let enc_ns = enc_start.elapsed().as_nanos();
+                                        let prof = global_profiler();
+                                        prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                                        prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                        self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
                                 stats.encrypted += 1;
@@ -203,9 +283,69 @@ impl Forwarder {
                     }
                 }
             } else {
-                stats.route_misses += 1;
+                        if self
+                    .routes
+                    .lookup_or_predict(src_id, dst_id, flow_label)
+                    .is_some()
+                {
+                        let prof = global_profiler();
+                        prof.lookup_predict_calls.fetch_add(1, Ordering::Relaxed);
+                        prof.lookup_predict_hits.fetch_add(1, Ordering::Relaxed);
+                    if let Some(session) = self.session.as_ref() {
+                        if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                            let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
+
+                            let start = self.arena.len();
+                            let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                            let remaining = self.arena.capacity().saturating_sub(self.arena.len());
+                            if remaining < needed {
+                                self.arena.reserve(needed - remaining);
+                            }
+
+                            self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                            let payload_start = self.arena.len();
+                            self.arena.extend_from_slice(payload);
+
+                            let enc_start = std::time::Instant::now();
+                            match session.encrypt_into_slice(
+                                &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
+                                seq_num,
+                            ) {
+                                    Ok(tag) => {
+                                                                let enc_ns = enc_start.elapsed().as_nanos();
+                                                                let prof = global_profiler();
+                                                                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                                                                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                                self.arena.extend_from_slice(tag.as_slice());
+                                    let len = self.arena.len() - start;
+                                    self.offsets.push((start, len));
+                                    stats.encrypted += 1;
+                                    forwarded = true;
+                                }
+                                Err(SessionError::AuthenticationFailed)
+                                | Err(SessionError::PayloadTooLarge)
+                                | Err(SessionError::CiphertextTooShort)
+                                | Err(SessionError::AeadError)
+                                | Err(SessionError::BufferTooSmall)
+                                | Err(SessionError::InsufficientCapacity) => {
+                                    self.arena.truncate(start);
+                                    stats.route_misses += 1;
+                                }
+                            }
+                        } else if payload_len > 0 {
+                            stats.route_misses += 1;
+                        }
+                    }
+                } else {
+                    stats.route_misses += 1;
+                }
             }
         }
+
+        let handle_ns = start_handle.elapsed().as_nanos();
+        let prof = global_profiler();
+        prof.handle_count.fetch_add(1, Ordering::Relaxed);
+        prof.handle_ns.fetch_add(handle_ns as u64, Ordering::Relaxed);
 
         forwarded
     }
@@ -214,7 +354,7 @@ impl Forwarder {
         pkt: Vec<u8>,
         routes: &Table,
         session: Option<&HybridSession>,
-        use_avx2: bool,
+        _use_avx2: bool,
     ) -> PacketOutput {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
             let src_id: [u8; 32] = h.src_id().try_into().unwrap();
@@ -223,77 +363,17 @@ impl Forwarder {
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
-            if routes
-                .lookup_or_predict(src_id, dst_id, flow_label)
-                .is_some()
+            // measure encrypt under caller's profiler by timing around call sites
+            if routes.lookup_next_hop(dst_id, flow_label).is_some()
+                || routes.lookup_or_predict(src_id, dst_id, flow_label).is_some()
             {
-                if let Some(session) = session {
-                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-                        // Reuse a thread-local aligned ciphertext buffer to avoid per-packet allocations.
-                        let encrypt_result = TLS_CIPHERTEXT.with(|buf_cell| {
-                            let mut buf = buf_cell.borrow_mut();
-                            buf.clear();
-                            let cap = buf.capacity();
-                            if cap < payload_len + TAG_SIZE {
-                                buf.reserve(payload_len + TAG_SIZE - cap);
-                            }
-                            buf.extend_from_slice(payload);
-                            match session.encrypt_into_slice(buf.as_mut_slice(), seq_num) {
-                                Ok(tag) => {
-                                    buf.extend_from_slice(tag.as_slice());
-                                    let ct_len = buf.len();
-                                    let mut bytes = Vec::with_capacity(HEADER_SIZE + ct_len);
-                                    bytes.extend_from_slice(&pkt[..HEADER_SIZE]);
-
-                                    if ct_len >= 16384 {
-                                        #[cfg(target_arch = "x86_64")]
-                                        {
-                                            if use_avx2 {
-                                                let start_index = bytes.len();
-                                                bytes.resize(start_index + ct_len, 0);
-                                                unsafe {
-                                                    let dst_ptr = bytes[start_index..].as_mut_ptr();
-                                                    let src_ptr = buf.as_ptr();
-                                                    copy_avx2(dst_ptr, src_ptr, ct_len);
-                                                }
-                                            } else {
-                                                bytes.extend_from_slice(buf.as_slice());
-                                            }
-                                        }
-                                        #[cfg(not(target_arch = "x86_64"))]
-                                        {
-                                            bytes.extend_from_slice(buf.as_slice());
-                                        }
-                                    } else {
-                                        bytes.extend_from_slice(buf.as_slice());
-                                    }
-
-                                    Ok(PacketOutput { bytes, encrypted: true, route_miss: false })
-                                }
-                                Err(e) => Err(e),
-                            }
-                        });
-
-                        match encrypt_result {
-                            Ok(pkt_out) => return pkt_out,
-                            Err(SessionError::AuthenticationFailed)
-                            | Err(SessionError::PayloadTooLarge)
-                            | Err(SessionError::CiphertextTooShort)
-                            | Err(SessionError::AeadError)
-                            | Err(SessionError::BufferTooSmall)
-                            | Err(SessionError::InsufficientCapacity) => {
-                                return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
-                            }
-                        }
-                    } else if payload_len > 0 {
-                        return PacketOutput {
-                            bytes: pkt,
-                            encrypted: false,
-                            route_miss: true,
-                        };
-                    }
-                }
+                let enc_start = std::time::Instant::now();
+                let out = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session);
+                let enc_ns = enc_start.elapsed().as_nanos();
+                let prof = global_profiler();
+                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                return out;
             } else {
                 return PacketOutput {
                     bytes: pkt,
@@ -310,7 +390,55 @@ impl Forwarder {
         }
     }
 
+    fn encrypt_packet_owned(
+        pkt: Vec<u8>,
+        seq_num: u64,
+        payload_len: usize,
+        session: Option<&HybridSession>,
+    ) -> PacketOutput {
+        if let Some(session) = session {
+            if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                let mut pkt = pkt;
+                let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
+                if pkt.len() < target_len {
+                    pkt.resize(target_len, 0);
+                }
+                match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                    Ok(tag) => {
+                        pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                        return PacketOutput {
+                            bytes: pkt,
+                            encrypted: true,
+                            route_miss: false,
+                        };
+                    }
+                    Err(SessionError::AuthenticationFailed)
+                    | Err(SessionError::PayloadTooLarge)
+                    | Err(SessionError::CiphertextTooShort)
+                    | Err(SessionError::AeadError)
+                    | Err(SessionError::BufferTooSmall)
+                    | Err(SessionError::InsufficientCapacity) => {
+                        return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                    }
+                }
+            } else if payload_len > 0 {
+                return PacketOutput {
+                    bytes: pkt,
+                    encrypted: false,
+                    route_miss: true,
+                };
+            }
+        }
+
+        PacketOutput {
+            bytes: pkt,
+            encrypted: false,
+            route_miss: false,
+        }
+    }
+
     fn append_outputs(&mut self, outputs: Vec<PacketOutput>, received: usize) -> ForwarderStats {
+        let append_start = std::time::Instant::now();
         self.arena.clear();
         self.offsets.clear();
 
@@ -318,6 +446,9 @@ impl Forwarder {
             received,
             ..ForwarderStats::default()
         };
+        // record that we began processing this batch (MCR path)
+        let prof = global_profiler();
+        prof.handle_count.fetch_add(received as u64, Ordering::Relaxed);
 
         self.arena.reserve(
             outputs
@@ -341,6 +472,11 @@ impl Forwarder {
                 stats.route_misses += 1;
             }
         }
+
+        let append_ns = append_start.elapsed().as_nanos();
+        let prof = global_profiler();
+        prof.append_count.fetch_add(1, Ordering::Relaxed);
+        prof.append_ns.fetch_add(append_ns as u64, Ordering::Relaxed);
 
         stats
     }
@@ -387,6 +523,8 @@ impl Forwarder {
 
             let _ = sock.send(self.arena.as_slice(), &self.offsets);
             PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+            let prof = global_profiler();
+            prof.handle_count.fetch_add(stats.received as u64, Ordering::Relaxed);
             return stats;
         }
 
@@ -401,6 +539,8 @@ impl Forwarder {
         let _ = sock.send(self.arena.as_slice(), &self.offsets);
         // update global application pconf counter
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+        let prof = global_profiler();
+        prof.handle_count.fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
     }
 
@@ -424,68 +564,132 @@ impl Forwarder {
         self.arena.clear();
         self.offsets.clear();
         self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+        self.offsets.reserve(frames.len());
+
+        // Default primary-spray mode can process in place, avoiding a second
+        // copy and an intermediate duplicated packet vector.
+        let routes_ref = &self.routes;
+        let session_ref = self.session.as_ref();
+        let mut stats = ForwarderStats {
+            received,
+            ..ForwarderStats::default()
+        };
 
         let spray_mode = mcr_config::get_mcr_spray_mode();
 
-        // Phase 1: single-threaded channel selection and packet duplication
-        let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
-        let mut route_miss_count: usize = 0;
-        for pkt in frames {
-            if let Ok(h) = HeaderViewRef::new(&pkt) {
-                let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
-                let flow_label = h.flow_label();
+        if spray_mode != "full" {
+            for mut pkt in frames {
+                let (seq_num, payload_len) = if let Ok(h) = HeaderViewRef::new(&pkt) {
+                    let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                    let flow_label = h.flow_label();
+                    let seq_num = h.seq_num();
+                    let payload_len = h.length() as usize;
 
-                let channels = self.routes.lookup_spray(dst_id, flow_label);
-                if channels.is_empty() {
-                    // route miss: forward unchanged
-                    duplicated.push((pkt, dst_id));
-                    route_miss_count += 1;
+                    let prof = global_profiler();
+                    prof.lookup_next_hop_calls.fetch_add(1, Ordering::Relaxed);
+                    let next_hop = match self.routes.lookup_next_hop(dst_id, flow_label) {
+                        Some(next_hop) => {
+                            prof.lookup_next_hop_hits.fetch_add(1, Ordering::Relaxed);
+                            next_hop
+                        }
+                        None => {
+                            let start = self.arena.len();
+                            self.arena.extend_from_slice(&pkt);
+                            let len = self.arena.len() - start;
+                            self.offsets.push((start, len));
+                            stats.forwarded += 1;
+                            stats.route_misses += 1;
+                            continue;
+                        }
+                    };
+
+                    pkt[32..64].copy_from_slice(&next_hop);
+                    (seq_num, payload_len)
+                } else {
+                    let start = self.arena.len();
+                    self.arena.extend_from_slice(&pkt);
+                    let len = self.arena.len() - start;
+                    self.offsets.push((start, len));
+                    stats.forwarded += 1;
+                    stats.route_misses += 1;
                     continue;
-                }
+                };
 
-                if spray_mode == "full" {
+                let enc_start = std::time::Instant::now();
+                let output = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session_ref);
+                let enc_ns = enc_start.elapsed().as_nanos();
+                let prof = global_profiler();
+                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+
+                let start = self.arena.len();
+                self.arena.extend_from_slice(&output.bytes);
+                let len = self.arena.len() - start;
+                self.offsets.push((start, len));
+                if output.encrypted {
+                    stats.encrypted += 1;
+                } else {
+                    stats.forwarded += 1;
+                }
+                if output.route_miss {
+                    stats.route_misses += 1;
+                }
+            }
+        } else {
+            // Full spray keeps the existing duplication behavior because one
+            // input packet can expand to multiple outputs.
+            let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
+            for pkt in frames {
+                if let Ok(h) = HeaderViewRef::new(&pkt) {
+                    let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                    let flow_label = h.flow_label();
+
+                    let channels = self.routes.lookup_spray(dst_id, flow_label);
+                    if channels.is_empty() {
+                        duplicated.push((pkt, dst_id));
+                        continue;
+                    }
+
                     for (nh, _is_primary) in channels.iter() {
                         let mut modified = pkt.clone();
                         modified[32..64].copy_from_slice(nh);
                         duplicated.push((modified, dst_id));
                     }
                 } else {
-                    // primary only
-                    let nh = channels[0].0;
-                    let mut modified = pkt.clone();
-                    modified[32..64].copy_from_slice(&nh);
-                    duplicated.push((modified, dst_id));
+                    duplicated.push((pkt, [0u8; 32]));
                 }
+            }
+
+            if duplicated.len() < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
+                let outputs: Vec<PacketOutput> = duplicated
+                    .into_iter()
+                    .map(|(pkt, _)| Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2))
+                    .collect();
+
+                let stats = self.append_outputs(outputs, received);
+
+                self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+                self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+                let _ = sock.send(self.arena.as_slice(), &self.offsets);
+                PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+                let prof = global_profiler();
+                prof.handle_count.fetch_add(stats.received as u64, Ordering::Relaxed);
+                return stats;
             } else {
-                duplicated.push((pkt, [0u8; 32]));
-                route_miss_count += 1;
+                let outputs: Vec<PacketOutput> = duplicated
+                    .into_par_iter()
+                    .map(|(pkt, _)| Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2))
+                    .collect();
+
+                let stats = self.append_outputs(outputs, received);
+                self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+                self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+                let _ = sock.send(self.arena.as_slice(), &self.offsets);
+                PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+                return stats;
             }
         }
 
-        // Phase 2: parallel encryption/processing of duplicated packets
-        let routes_ref = &self.routes;
-        let session_ref = self.session.as_ref();
-        let outputs_with_orig: Vec<(PacketOutput, [u8; 32])> = duplicated
-            .into_par_iter()
-            .map(|(pkt, orig)| (Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2), orig))
-            .collect();
-
-        // update routing per-channel stats based on outputs
-        for (out, orig_dest) in outputs_with_orig.iter() {
-            if let Ok(h) = HeaderViewRef::new(&out.bytes) {
-                let nh: [u8; 32] = h.dst_id().try_into().unwrap();
-                if out.encrypted {
-                    routes_ref.inc_channel_forwarded(*orig_dest, nh);
-                } else if out.route_miss {
-                    routes_ref.inc_channel_dropped(*orig_dest);
-                }
-            }
-        }
-
-        let outputs: Vec<PacketOutput> = outputs_with_orig.into_iter().map(|(o, _)| o).collect();
-
-        // append outputs and update telemetry
-        let stats = self.append_outputs(outputs, received);
         self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
         self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
 
@@ -549,67 +753,6 @@ impl Forwarder {
         // update global application pconf counter
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
-    }
-}
-
-// AVX2 accelerated copy helper for x86_64.
-// Safety: caller must ensure dst and src are valid for len bytes and non-overlapping.
-#[cfg(target_arch = "x86_64")]
-unsafe fn copy_avx2(dst: *mut u8, src: *const u8, len: usize) {
-    use std::ptr;
-
-    #[target_feature(enable = "avx2")]
-    unsafe fn inner(dst: *mut u8, src: *const u8, len: usize) {
-        let mut off = 0usize;
-        let dst_aligned = (dst as usize) & 31 == 0;
-
-        // Streaming stores for large, aligned transfers — avoids cache pollution.
-        // Threshold matches the outer >= 4096 guard, so this branch actually fires.
-        if len >= 4096 && dst_aligned {
-            while off + 128 <= len {
-                let v0 = _mm256_loadu_si256(src.add(off) as *const __m256i);
-                let v1 = _mm256_loadu_si256(src.add(off + 32) as *const __m256i);
-                let v2 = _mm256_loadu_si256(src.add(off + 64) as *const __m256i);
-                let v3 = _mm256_loadu_si256(src.add(off + 96) as *const __m256i);
-                _mm256_stream_si256(dst.add(off) as *mut __m256i, v0);
-                _mm256_stream_si256(dst.add(off + 32) as *mut __m256i, v1);
-                _mm256_stream_si256(dst.add(off + 64) as *mut __m256i, v2);
-                _mm256_stream_si256(dst.add(off + 96) as *mut __m256i, v3);
-                off += 128;
-            }
-            _mm_sfence();
-        }
-
-        // Unrolled 128-byte vector copy for remainder (or all of a non-aligned buffer)
-        while off + 128 <= len {
-            let v0 = _mm256_loadu_si256(src.add(off) as *const __m256i);
-            let v1 = _mm256_loadu_si256(src.add(off + 32) as *const __m256i);
-            let v2 = _mm256_loadu_si256(src.add(off + 64) as *const __m256i);
-            let v3 = _mm256_loadu_si256(src.add(off + 96) as *const __m256i);
-            _mm256_storeu_si256(dst.add(off) as *mut __m256i, v0);
-            _mm256_storeu_si256(dst.add(off + 32) as *mut __m256i, v1);
-            _mm256_storeu_si256(dst.add(off + 64) as *mut __m256i, v2);
-            _mm256_storeu_si256(dst.add(off + 96) as *mut __m256i, v3);
-            off += 128;
-        }
-
-        // 32-byte tail
-        while off + 32 <= len {
-            let v = _mm256_loadu_si256(src.add(off) as *const __m256i);
-            _mm256_storeu_si256(dst.add(off) as *mut __m256i, v);
-            off += 32;
-        }
-
-        // Byte tail
-        if off < len {
-            ptr::copy_nonoverlapping(src.add(off), dst.add(off), len - off);
-        }
-    }
-
-    if is_x86_feature_detected!("avx2") {
-        inner(dst, src, len);
-    } else {
-        std::ptr::copy_nonoverlapping(src, dst, len);
     }
 }
 

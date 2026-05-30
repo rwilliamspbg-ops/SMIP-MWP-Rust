@@ -2,6 +2,7 @@ use ahash::{AHashMap, AHasher};
 use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -79,6 +80,8 @@ thread_local! {
     #[allow(clippy::missing_const_for_thread_local)]
     static HOT_CACHE: RefCell<[Option<CacheEntry>; HOT_CACHE_SIZE]> = RefCell::new([None; HOT_CACHE_SIZE]);
     #[allow(clippy::missing_const_for_thread_local)]
+    static HOT_CACHE_LAST: RefCell<Option<CacheEntry>> = RefCell::new(None);
+    #[allow(clippy::missing_const_for_thread_local)]
     static HOT_CACHE_NEXT: RefCell<usize> = RefCell::new(0);
 }
 
@@ -154,6 +157,24 @@ impl Table {
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
 
+    fn cache_hot_entry(cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
+        let entry = CacheEntry {
+            epoch: cur_epoch,
+            dest_id,
+            next_hop,
+        };
+
+        HOT_CACHE_LAST.with(|slot| {
+            *slot.borrow_mut() = Some(entry);
+        });
+
+        HOT_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            let idx = cache_next_idx();
+            cache[idx] = Some(entry);
+        });
+    }
+
     /// Increment per-channel forwarded counter for `dest_id` and `next_hop`.
     pub fn inc_channel_forwarded(&self, dest_id: [u8; 32], next_hop: [u8; 32]) {
         let mut stats = self.mcr_channel_stats.write();
@@ -173,6 +194,31 @@ impl Table {
         let mut stats = self.mcr_channel_stats.write();
         let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
         entry.packets_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Apply a batch of forwarded and dropped counters with a single write lock.
+    pub fn apply_mcr_batch_stats(
+        &self,
+        forwarded: &HashMap<[u8; 32], HashMap<[u8; 32], u64>>,
+        dropped: &HashMap<[u8; 32], u64>,
+    ) {
+        let mut stats = self.mcr_channel_stats.write();
+
+        for (dest, by_next_hop) in forwarded.iter() {
+            let entry = stats.entry(*dest).or_insert_with(ChannelStats::default);
+            for (next_hop, count) in by_next_hop.iter() {
+                let counter = entry
+                    .per_channel_forwarded
+                    .entry(*next_hop)
+                    .or_insert_with(|| AtomicU64::new(0));
+                counter.fetch_add(*count, Ordering::Relaxed);
+            }
+        }
+
+        for (dest, count) in dropped.iter() {
+            let entry = stats.entry(*dest).or_insert_with(ChannelStats::default);
+            entry.packets_dropped.fetch_add(*count, Ordering::Relaxed);
+        }
     }
 
     /// Collect MCR metrics snapshot as triples (dest_hex, next_hop_hex, count).
@@ -251,6 +297,40 @@ impl Table {
         Vec::new()
     }
 
+    /// Return the primary next-hop for spray-mode forwarding without
+    /// allocating a channel vector.
+    pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
+        let shard = Self::shard_for(&dst_id);
+        if let Some(next_hop) = { let map = self.fast_shards[shard].read(); map.get(&dst_id).map(|entry| entry.next_hop_id) } {
+            return Some(next_hop);
+        }
+
+            let next_hop = {
+                let inner = self.inner.read();
+                if let Some(entry) = inner.entries.get(&dst_id) {
+                    if entry.alternate_channels.is_empty() {
+                        Some(entry.next_hop_id)
+                    } else {
+                        let choices = 1 + entry.alternate_channels.len();
+                        let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                        if idx == 0 {
+                            Some(entry.next_hop_id)
+                        } else {
+                            Some(entry.alternate_channels[idx - 1])
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(next_hop) = next_hop {
+                return Some(next_hop);
+            }
+
+        None
+    }
+
     /// Select a single channel by index (round-robin if out of range)
     pub fn lookup_spray_single(&self, dst_id: [u8; 32], flow_label: u32, channel_idx: usize) -> Option<[u8; 32]> {
         let channels = self.lookup_spray(dst_id, flow_label);
@@ -264,6 +344,17 @@ impl Table {
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
+        if let Some(v) = HOT_CACHE_LAST.with(|slot| {
+            slot.borrow().as_ref().and_then(|ent| {
+                if ent.epoch == cur_epoch && ent.dest_id == dst_id {
+                    Some(ent.next_hop)
+                } else {
+                    None
+                }
+            })
+        }) {
+            return Some(v);
+        }
         if let Some(v) = HOT_CACHE.with(|c| {
             let cache = c.borrow();
             for ent in cache.iter().flatten() {
@@ -291,15 +382,7 @@ impl Table {
             inner.entries.get(&dst_id).map(|e| e.next_hop_id)
         };
         if let Some(nh) = res {
-            HOT_CACHE.with(|c| {
-                let mut cache = c.borrow_mut();
-                let idx = cache_next_idx();
-                cache[idx] = Some(CacheEntry {
-                    epoch: cur_epoch,
-                    dest_id: dst_id,
-                    next_hop: nh,
-                });
-            });
+            Self::cache_hot_entry(cur_epoch, dst_id, nh);
         }
         res
     }

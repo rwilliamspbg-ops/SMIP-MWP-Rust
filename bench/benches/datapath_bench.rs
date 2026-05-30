@@ -1,8 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, LazyLock};
 
 struct TrackingAlloc;
 
@@ -11,32 +9,24 @@ static PEAK_ALLOCS: AtomicU64 = AtomicU64::new(0);
 static CURRENT_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
 
-static ALLOC_MAP: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
 unsafe impl GlobalAlloc for TrackingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = System.alloc(layout);
         if !ptr.is_null() {
             let size = layout.size();
             CURRENT_ALLOCS.fetch_add(1, Ordering::Relaxed);
-            let cur_bytes = CURRENT_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
+            let cur_bytes = CURRENT_BYTES
+                .fetch_add(size as u64, Ordering::Relaxed)
+                .saturating_add(size as u64);
             // update peak allocs
             update_peak(&PEAK_ALLOCS, CURRENT_ALLOCS.load(Ordering::Relaxed));
             update_peak(&PEAK_BYTES, cur_bytes);
-            if let Ok(mut m) = ALLOC_MAP.lock() {
-                m.insert(ptr as usize, size);
-            }
         }
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // consult map to find the originally recorded size if available
-        let mut removed = None;
-        if let Ok(mut m) = ALLOC_MAP.lock() {
-            removed = m.remove(&(ptr as usize));
-        }
-        let size = removed.unwrap_or(layout.size());
+        let size = layout.size();
         System.dealloc(ptr, layout);
         CURRENT_ALLOCS.fetch_sub(1, Ordering::Relaxed);
         CURRENT_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
@@ -45,18 +35,13 @@ unsafe impl GlobalAlloc for TrackingAlloc {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = System.realloc(ptr, layout, new_size);
         if !new_ptr.is_null() {
-            // remove old mapping if present
-            let mut old_size = layout.size();
-            if let Ok(mut m) = ALLOC_MAP.lock() {
-                if let Some(sz) = m.remove(&(ptr as usize)) {
-                    old_size = sz;
-                }
-                m.insert(new_ptr as usize, new_size);
-            }
+            let old_size = layout.size();
             // adjust counters: subtract old, add new
             if new_size as u64 >= old_size as u64 {
                 let added = new_size as u64 - old_size as u64;
-                let cur = CURRENT_BYTES.fetch_add(added, Ordering::Relaxed) + added;
+                let cur = CURRENT_BYTES
+                    .fetch_add(added, Ordering::Relaxed)
+                    .saturating_add(added);
                 update_peak(&PEAK_BYTES, cur);
             } else {
                 let removed = old_size as u64 - new_size as u64;
@@ -85,9 +70,6 @@ fn reset_alloc_counters() {
     PEAK_ALLOCS.store(0, Ordering::Relaxed);
     CURRENT_BYTES.store(0, Ordering::Relaxed);
     PEAK_BYTES.store(0, Ordering::Relaxed);
-    if let Ok(mut m) = ALLOC_MAP.lock() {
-        m.clear();
-    }
 }
 
 fn snapshot_alloc_counters() -> (u64, u64, u64, u64) {
@@ -328,8 +310,6 @@ criterion_group!(
     benches,
     datapath_forwarder_benchmark,
     datapath_forwarder_miss_benchmark,
-    datapath_alloc_tracking_benchmark
-    ,
     datapath_alloc_tracking_benchmark
 );
 criterion_main!(benches);

@@ -1,0 +1,44 @@
+name: FlameGraph Capture
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  flamegraph:
+    name: Capture FlameGraph (manual)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install perf tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r) perf || true
+
+      - name: Clone FlameGraph
+        run: git clone https://github.com/brendangregg/FlameGraph.git FlameGraph
+
+      - name: Build benchmark
+        run: cargo build --release -p benchmark
+
+      - name: Record perf and generate flamegraph
+        run: |
+          BINARY=target/release/benchmark
+          OUT_PERF=out.perf
+          FOLDED=out.folded
+          FLAME=flamegraph.svg
+          if ! command -v perf >/dev/null 2>&1; then
+            echo "perf not found on runner; this job requires perf and appropriate permissions."
+            exit 1
+          fi
+          sudo perf record -F 200 -g -- $BINARY --packets 20000 --batch-size 64 --payload-len 512 --loss-percent 5 --corrupt-percent 2 --duplicate-percent 1 --seed 1337
+          sudo perf script > "$OUT_PERF"
+          ./FlameGraph/stackcollapse-perf.pl "$OUT_PERF" > "$FOLDED"
+          ./FlameGraph/flamegraph.pl "$FOLDED" > "$FLAME"
+
+      - name: Upload flamegraph
+        uses: actions/upload-artifact@v4
+        with:
+          name: flamegraph
+          path: flamegraph.svg

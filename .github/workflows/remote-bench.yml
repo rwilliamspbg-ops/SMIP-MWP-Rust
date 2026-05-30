@@ -13,7 +13,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.81.0
 
       - name: Make script executable
         run: chmod +x ./tools/run_pinned_bench.sh
