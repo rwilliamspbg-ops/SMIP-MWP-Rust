@@ -390,6 +390,65 @@ impl Forwarder {
         }
     }
 
+    // Inline variant used by serial MCR paths to avoid allocating PacketOutput/Vecs.
+    // Returns a tuple: (bytes, encrypted, route_miss)
+    fn process_packet_owned_inline(
+        pkt: &mut Vec<u8>,
+        routes: &Table,
+        session: Option<&HybridSession>,
+        _use_avx2: bool,
+    ) -> (Vec<u8>, bool, bool) {
+        if let Ok(h) = HeaderViewRef::new(&pkt) {
+            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
+            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let flow_label = h.flow_label();
+            let seq_num = h.seq_num();
+            let payload_len = h.length() as usize;
+
+            if routes.lookup_next_hop(dst_id, flow_label).is_some()
+                || routes.lookup_or_predict(src_id, dst_id, flow_label).is_some()
+            {
+                let enc_start = std::time::Instant::now();
+                let mut encrypted = false;
+                let mut route_miss = false;
+                if let Some(session) = session {
+                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                        let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
+                        if pkt.len() < target_len {
+                            pkt.resize(target_len, 0);
+                        }
+                        match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                            Ok(tag) => {
+                                pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                                encrypted = true;
+                            }
+                            Err(SessionError::AuthenticationFailed)
+                            | Err(SessionError::PayloadTooLarge)
+                            | Err(SessionError::CiphertextTooShort)
+                            | Err(SessionError::AeadError)
+                            | Err(SessionError::BufferTooSmall)
+                            | Err(SessionError::InsufficientCapacity) => {
+                                route_miss = true;
+                            }
+                        }
+                    } else if payload_len > 0 {
+                        route_miss = true;
+                    }
+                }
+                let enc_ns = enc_start.elapsed().as_nanos();
+                let prof = global_profiler();
+                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+
+                return (pkt.clone(), encrypted, route_miss);
+            } else {
+                return (pkt.clone(), false, true);
+            }
+        }
+
+        (pkt.clone(), false, false)
+    }
+
     fn encrypt_packet_owned(
         pkt: Vec<u8>,
         seq_num: u64,
@@ -615,23 +674,49 @@ impl Forwarder {
                     continue;
                 };
 
+                // Inline encryption into the arena to avoid allocating per-packet Vecs.
                 let enc_start = std::time::Instant::now();
-                let output = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session_ref);
+                let mut was_encrypted = false;
+                let mut was_route_miss = false;
+                if let Some(session) = session_ref {
+                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                        let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
+                        if pkt.len() < target_len {
+                            pkt.resize(target_len, 0);
+                        }
+                        match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                            Ok(tag) => {
+                                pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                                was_encrypted = true;
+                            }
+                            Err(SessionError::AuthenticationFailed)
+                            | Err(SessionError::PayloadTooLarge)
+                            | Err(SessionError::CiphertextTooShort)
+                            | Err(SessionError::AeadError)
+                            | Err(SessionError::BufferTooSmall)
+                            | Err(SessionError::InsufficientCapacity) => {
+                                was_route_miss = true;
+                            }
+                        }
+                    } else if payload_len > 0 {
+                        was_route_miss = true;
+                    }
+                }
                 let enc_ns = enc_start.elapsed().as_nanos();
                 let prof = global_profiler();
                 prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
                 prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
 
                 let start = self.arena.len();
-                self.arena.extend_from_slice(&output.bytes);
+                self.arena.extend_from_slice(&pkt);
                 let len = self.arena.len() - start;
                 self.offsets.push((start, len));
-                if output.encrypted {
+                if was_encrypted {
                     stats.encrypted += 1;
                 } else {
                     stats.forwarded += 1;
                 }
-                if output.route_miss {
+                if was_route_miss {
                     stats.route_misses += 1;
                 }
             }
@@ -661,12 +746,17 @@ impl Forwarder {
             }
 
             if duplicated.len() < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
-                let outputs: Vec<PacketOutput> = duplicated
-                    .into_iter()
-                    .map(|(pkt, _)| Self::process_packet_owned(pkt, routes_ref, session_ref, use_avx2))
-                    .collect();
-
-                let stats = self.append_outputs(outputs, received);
+                // Serial path: process in-place and append directly to arena to avoid
+                // allocating intermediate PacketOutput/Vecs.
+                for (mut pkt, _dst) in duplicated.into_iter() {
+                    let out = Self::process_packet_owned_inline(&mut pkt, routes_ref, session_ref, use_avx2);
+                    let start = self.arena.len();
+                    self.arena.extend_from_slice(&out.0);
+                    let len = self.arena.len() - start;
+                    self.offsets.push((start, len));
+                    if out.1 { stats.encrypted += 1 } else { stats.forwarded += 1 }
+                    if out.2 { stats.route_misses += 1 }
+                }
 
                 self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
                 self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
