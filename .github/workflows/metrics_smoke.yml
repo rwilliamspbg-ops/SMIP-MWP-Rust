@@ -13,7 +13,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: 1.81.0
           profile: minimal
 
       - name: Build CLI
