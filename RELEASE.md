@@ -9,7 +9,15 @@ This file tracks notable repository-level changes on the current `main` branch.
 - The datapath serial hot path now encrypts payloads directly inside the output arena instead of bouncing through an intermediate ciphertext buffer.
 - The README and benchmark docs were refreshed to match the current workspace, workflows, and artifact layout.
 
+- Buffer-reuse and allocation-reduction work applied to the datapath hot path to reduce allocator pressure and mid-path Vec allocations; includes serial-path arena encryption and parallel-path consuming transformations.
+- Updated test fixes: added `AlignedBuffer::as_ptr()` and a thread-local ciphertext buffer used by unit-tests.
 - Added Multi-Channel Routing (MCR) spraying integration: routing table extensions, datapath hooks, and benchmark/reporting scripts. See [docs/mcr_architecture.md](docs/mcr_architecture.md).
+- Bench reporting and aggregation scripts added under `tools/bench_results/` with CSV/MD outputs and CI baseline file `tools/bench_results/ci_baseline_mcr.txt` (requires perf review to merge).
+
+### Performance notes (summary)
+
+- Recent pinned smoke runs indicate median throughput used for CI MCR baseline: ~2,402,042 pkt/s. See `tools/bench_results/` for run artifacts and `PR_PERFORMANCE_NOTES.md` for details.
+- Flamegraph capture remains pending on a self-hosted bench host (requires `perf` and a compatible rust toolchain); profiling scripts are present in `tools/benchmark/` and `benchmark/FLAMEGRAPH_RUN.md`.
 
 ## v1.0.0
 

@@ -32,9 +32,9 @@ cargo test --workspace --all-targets
 make verify-bridge
 
 # Run the chaos benchmark validation (CI-style)
-REPS=7 AGG_METHOD=median ./tools/benchmark/ci_validate_chaos_report.sh
+SMIP-MWP-Rust is the Rust workspace for the SMIP-MWP datapath stack: crypto, routing, AF_XDP integration, CLI control-plane glue, and benchmark tooling. The repository is actively developed; CI builds the workspace, runs tests, validates the bridge contract, and exercises benchmark/chaos gates.
 
-# Build and run the MCR chaos profile locally (requires NIC/hardware)
+This workspace contains an active Multi-Channel Routing (MCR) feature (experimental). See [docs/mcr_architecture.md](docs/mcr_architecture.md) for architecture notes and the benchmark artifacts in `tools/bench_results/` for recent run outputs.
 MOHAWK_MCR_CHANNELS=3 MOHAWK_MCR_SPRAY_MODE=primary ./tools/benchmark/run_chaos_epyc_profile.sh
 ```
 
@@ -43,19 +43,29 @@ MOHAWK_MCR_CHANNELS=3 MOHAWK_MCR_SPRAY_MODE=primary ./tools/benchmark/run_chaos_
 Prerequisites:
 - Rust toolchain (stable), Cargo
 - For AF_XDP runs: Linux with AF_XDP-capable NIC and root privileges
+ - The repository contains active benchmark and profiling work (see `tools/bench_results/` and `benchmark/`). Recent work includes allocator-pressure reductions on the datapath hot path and updates to the CI MCR baseline.
 - Optional: Python3 for report generation
+Note: the CI MCR baseline file (`tools/bench_results/ci_baseline_mcr.txt`) was recently updated to reflect pinned smoke runs; merging that baseline requires a perf review / `perf-approval` according to repo policy.
 
 Install and run locally:
 
 ```sh
 # Build workspace
 cargo build --release
+## Badges & Status
+
+- CI: build/test gates — top-level workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+- Bench harness & remote bench workflows: `bench-harness.yml` and `remote-bench.yml`
+- License: AGPL-3.0
+- Rust toolchain: pinned via `rust-toolchain.toml` (workspace uses the Rust stable toolchain)
 
 # Run the datapath binary (example):
 # METRICS_SOCKET=/tmp/mohawk.metrics.sock MOHAWK_IFACE=ens1f0 target/release/mohawk-node
 
 # Enable/disable MCR and tune channels via environment variables:
 export MOHAWK_MCR_ENABLED=1           # 0|1 (default: 1)
+ 
+When running local smoke or chaos benchmarks that affect CI baselines, prefer the harness scripts in `tools/` and follow the pinned run instructions in `benchmark/` or `tools/bench_results/FLAMEGRAPH_RUN.md` for flamegraph capture on self-hosted hosts.
 export MOHAWK_MCR_SPRAY_MODE=primary  # primary|full (default: primary)
 export MOHAWK_MCR_CHANNELS=3          # 1|3|5 (default: 3)
 export MOHAWK_MCR_HASH_SEED=0xDEADBEEF
