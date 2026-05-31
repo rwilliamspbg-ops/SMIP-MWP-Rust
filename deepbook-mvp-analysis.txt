@@ -1,0 +1,40 @@
+DeepBook v3 Architecture Analysis for Predict Agent MVP
+======================================================
+
+🎯 MVP Architecture Summary:
+┌─────────────────────────────────────────────────────────────┐
+│                    DeepBook v3 Integration                   │
+├─────────────────────────────────────────────────────────────┤
+│ Client Layer:                                               │
+│  - BalanceManager for SUI balance operations                │
+│  - DepositToVault flow (LP tokens issued)                   │
+│  - PlaceOrder/mintPosition for binary markets               │
+│                                                             │
+│ Settlement Layer:                                           │
+│  - Proof-based settlement correctness                       │
+│  - Hybrid PQC signatures (x25519 + ML-KEM)                  │
+│  - AF_XDP zero-copy event ingestion                         │
+└─────────────────────────────────────────────────────────────┘
+
+SMIP-MWP-Rust/
+├── deepbook-integration/          # NEW: DeepBook agent workspace
+│   ├── Cargo.toml                 # Rust deps: sui-sdk, deepbook-client-wasm
+│   ├── src/
+│   │   ├── main.rs                # Agent entrypoint
+│   │   ├── lib.rs                 # Library API for agents
+│   │   ├── oracle_reader.rs       # Price oracle abstraction
+│   │   ├── deepbook_client.rs     # DeepBook v3 client wrapper
+│   │   ├── position_manager.rs    # Binary position logic
+│   │   └── vault_flow.rs          # Liquidity provision flow
+│   ├── tests/
+│   │   ├── testnet_flow.rs        # Deposit -> Order -> Mint end-to-end
+│   │   └── settlement_proof.rs    # Formal verification test cases
+│   └── docs/
+│       ├── DEEPBOOK_MVP.md        # Hackathon submission guide
+│       └── FORMAL_SPECS.md         # Lean proof integration plan
+
+✅ Next Steps for Hackathon MVP:
+1. Clone DeepBook v3 to explore packages/predict
+2. Set up DeepBookClient in your agent framework
+3. Test basic flows on testnet (deposit -> place order -> mint)
+4. Leverage formal proofs for settlement correctness
