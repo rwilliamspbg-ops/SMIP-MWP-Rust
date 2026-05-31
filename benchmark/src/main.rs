@@ -7,6 +7,8 @@ use std::env;
 use std::time::{Instant, SystemTime};
 use wire::{Header, HEADER_SIZE};
 
+const TAG_SIZE: usize = 16;
+
 #[derive(Debug, Clone)]
 struct Config {
     packets: usize,
@@ -77,11 +79,17 @@ fn build_forwarder() -> Forwarder {
         mcr_epoch: 1,
     });
 
-    Forwarder::new(routes)
+    let mut fwd = Forwarder::new(routes);
+    // Preallocate the forwarder arena to hold a full batch of encrypted
+    // outputs: header + payload + tag per packet. This avoids mid-run
+    // reallocations when running large batches in the chaos harness.
+    let per_packet = HEADER_SIZE + TAG_SIZE + 512; // conservative default
+    fwd.ensure_arena_capacity(per_packet * 64);
+    fwd
 }
 
 fn build_packet(payload_len: usize, seq: u64) -> Vec<u8> {
-    let mut packet = Header::new_header_buffer(payload_len);
+    let mut packet = Header::new_header_buffer(payload_len + TAG_SIZE);
     let header = Header {
         src_id: [1u8; 32],
         dst_id: [2u8; 32],
@@ -98,6 +106,23 @@ fn build_packet(payload_len: usize, seq: u64) -> Vec<u8> {
     }
 
     packet
+}
+
+fn build_packet_template(payload_len: usize) -> Vec<u8> {
+    build_packet(payload_len, 0)
+}
+
+fn set_packet_seq(packet: &mut [u8], seq: u64) {
+    let header = Header {
+        src_id: [1u8; 32],
+        dst_id: [2u8; 32],
+        flow_label: 7,
+        seq_num: seq,
+        session_id: [0u8; 16],
+        flags: 0,
+        length: (packet.len().saturating_sub(HEADER_SIZE + TAG_SIZE)) as u16,
+    };
+    header.marshal_into(packet).expect("marshal header");
 }
 
 fn inject_byzantine_noise(
@@ -143,11 +168,12 @@ fn main() {
     let mut total_socket_packets = 0usize;
     let mut counters = ChaosCounters::default();
     let mut pending_frames: Vec<Vec<u8>> = Vec::with_capacity(config.batch_size.max(1));
+    let packet_template = build_packet_template(config.payload_len);
 
     let harness_start = Instant::now();
-
     for seq in 0..config.packets {
-        let mut packet = build_packet(config.payload_len, seq as u64);
+        let mut packet = packet_template.clone();
+        set_packet_seq(&mut packet, seq as u64);
         if !inject_byzantine_noise(&mut packet, &config, &mut rng, &mut counters) {
             continue;
         }
@@ -165,7 +191,11 @@ fn main() {
         }
 
         total_socket_packets += pending_frames.len();
-        let mut sock = MockSocket::new(std::mem::take(&mut pending_frames));
+        let batch_frames = std::mem::replace(
+            &mut pending_frames,
+            Vec::with_capacity(config.batch_size.max(1)),
+        );
+        let mut sock = MockSocket::new(batch_frames);
 
         let start = Instant::now();
         let _stats = forwarder.process_batch(&mut sock);
@@ -174,7 +204,11 @@ fn main() {
 
     if !pending_frames.is_empty() {
         total_socket_packets += pending_frames.len();
-        let mut sock = MockSocket::new(std::mem::take(&mut pending_frames));
+        let batch_frames = std::mem::replace(
+            &mut pending_frames,
+            Vec::with_capacity(config.batch_size.max(1)),
+        );
+        let mut sock = MockSocket::new(batch_frames);
         let start = Instant::now();
         let _stats = forwarder.process_batch(&mut sock);
         latencies_ns.push(start.elapsed().as_nanos());
@@ -204,6 +238,8 @@ fn main() {
         "fault_injection drop={} corrupt={} duplicate={}",
         counters.dropped, counters.corrupted, counters.duplicated
     );
+        // Print forwarder internal profiling summary
+        forwarder.print_profile();
     println!("throughput_pkt_s={:.2}", pkt_per_sec);
     println!(
         "latency_ns p50={} p99={} p99_9={}",
