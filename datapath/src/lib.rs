@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::thread_local;
 
 /// Application-level processed packet counter (samples per-second externally)
 pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
@@ -80,6 +82,10 @@ impl AlignedBuffer {
     fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
 }
 
 impl Drop for AlignedBuffer {
@@ -87,6 +93,10 @@ impl Drop for AlignedBuffer {
         let layout = Layout::from_size_align(self.cap, ALIGNMENT).unwrap();
         unsafe { dealloc(self.ptr.as_ptr(), layout) };
     }
+}
+
+thread_local! {
+    static TLS_CIPHERTEXT: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_capacity(4096));
 }
 
 pub struct Forwarder {
