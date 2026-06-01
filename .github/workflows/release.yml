@@ -1,0 +1,106 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: 1.81.0
+        profile: minimal
+        override: true
+    - name: Install target
+      run: rustup target add ${{ matrix.target }} || true
+    - name: Build release binary
+      run: |
+        mkdir -p dist/${{ matrix.target }}
+        cargo build --release --target ${{ matrix.target }}
+        # Copy top-level binaries if present (workspace may expose different binary names)
+        cp -a target/${{ matrix.target }}/release/* dist/${{ matrix.target }}/ 2>/dev/null || true
+    - name: Upload artifact for release
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-${{ matrix.target }}
+        path: dist/${{ matrix.target }}
+
+  publish-release:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+    - uses: actions/checkout@v4
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist/
+    - name: Generate changelog snippet
+      id: changelog
+      run: |
+        TAG=${GITHUB_REF#refs/tags/}
+        PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+        if [ -n "$PREV_TAG" ]; then
+          echo "Generating changelog from $PREV_TAG..$TAG"
+          git log --pretty=format:"- %s (%an)" "$PREV_TAG..$TAG" > /tmp/changelog.txt || true
+        else
+          echo "No previous tag found; using latest commits"
+          git log -n 50 --pretty=format:"- %s (%an)" > /tmp/changelog.txt || true
+        fi
+        echo "changelog<<EOF" >> $GITHUB_OUTPUT
+        cat /tmp/changelog.txt >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body: |
+          Changelog (auto-generated):
+
+          ${{ steps.changelog.outputs.changelog }}
+        draft: false
+        prerelease: false
+
+    - name: Package and upload per-target archives
+      run: |
+        set -euo pipefail
+        cd dist
+        # Create per-target zip archives
+        for d in */ ; do
+          t=${d%/}
+          zipfile="${t}.zip"
+          echo "Packaging $d -> $zipfile"
+          zip -r "$zipfile" "$d" || true
+        done
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload release assets (via GitHub API)
+      run: |
+        set -euo pipefail
+        cd dist
+        UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+        # strip the template suffix if present
+        UPLOAD_URL=${UPLOAD_URL%%"{*}")}
+        # fallback strip for common pattern
+        UPLOAD_URL=${UPLOAD_URL%%\{*}
+        echo "Using upload_url: $UPLOAD_URL"
+        for f in *.zip; do
+          [ -f "$f" ] || continue
+          echo "Uploading $f"
+          curl -sSf -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@$f" "$UPLOAD_URL?name=$(basename "$f")"
+        done
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
