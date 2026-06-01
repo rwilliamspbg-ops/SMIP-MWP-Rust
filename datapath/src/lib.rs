@@ -871,11 +871,156 @@ impl Forwarder {
         stats
     }
 
-    /// Full-spray mode: duplicate to all channels. Currently a stub that
-    /// behaves like the normal path until spray is implemented.
+    /// Full-spray mode: duplicate to all MCR channels per-packet.
+    /// Uses lookup_spray() to get primary+alternate next-hops, then processes
+    /// each channel's copy in parallel (when batch threshold met) or serially.
     pub fn process_batch_spray_full(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
-        // TODO: build outputs for all channels per-packet
-        self.process_batch(sock)
+        use rayon::prelude::*;
+
+        let frames = sock.poll(64);
+        let received = frames.len();
+
+        if frames.is_empty() {
+            return ForwarderStats::default();
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        let use_avx2 = is_x86_feature_detected!("avx2");
+        #[cfg(not(target_arch = "x86_64"))]
+        let use_avx2 = false;
+
+        self.arena.clear();
+        self.offsets.clear();
+
+        // Build multi-channel duplicated packets
+        let routes_ref = &self.routes;
+        let session_ref = self.session.as_ref();
+        let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received * mcr_config::get_mcr_channels() as usize);
+
+        for pkt in frames {
+            if let Ok(h) = HeaderViewRef::new(&pkt) {
+                let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                let flow_label = h.flow_label();
+
+                // Get all spray channels (primary + alternates)
+                let channels = self.routes.lookup_spray(dst_id, flow_label);
+                
+                if channels.is_empty() {
+                    // Route miss: keep original packet
+                    duplicated.push((pkt, dst_id));
+                    continue;
+                }
+
+                // Create a copy for each channel with updated next-hop ID
+                for (nh, _is_primary) in channels.iter() {
+                    let mut modified = pkt.clone();
+                    // Update destination ID to match the channel's next-hop
+                    modified[32..64].copy_from_slice(nh);
+                    duplicated.push((modified, dst_id));
+                }
+            } else {
+                // Invalid header: keep original
+                duplicated.push((pkt, [0u8; 32]));
+            }
+        }
+
+        let spray_mode = mcr_config::get_mcr_spray_mode();
+
+        if duplicated.len() < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
+            // Serial path: process in-place and append directly to arena
+            for (mut pkt, _dst) in duplicated.into_iter() {
+                let (seq_num, payload_len) = if let Ok(h) = HeaderViewRef::new(&pkt) {
+                    let flow_label = h.flow_label();
+                    let seq_num = h.seq_num();
+                    let payload_len = h.length() as usize;
+
+                    // Inline encryption into the arena to avoid allocating per-packet Vecs.
+                    let enc_start = std::time::Instant::now();
+                    let mut was_encrypted = false;
+                    let mut was_route_miss = false;
+                    if let Some(session) = session_ref {
+                        if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                            let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
+                            if pkt.len() < target_len {
+                                pkt.resize(target_len, 0);
+                            }
+                            match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                                Ok(tag) => {
+                                    pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                                    was_encrypted = true;
+                                }
+                                Err(SessionError::AuthenticationFailed)
+                                | Err(SessionError::PayloadTooLarge)
+                                | Err(SessionError::CiphertextTooShort)
+                                | Err(SessionError::AeadError)
+                                | Err(SessionError::BufferTooSmall)
+                                | Err(SessionError::InsufficientCapacity) => {
+                                    was_route_miss = true;
+                                }
+                            }
+                        } else if payload_len > 0 {
+                            was_route_miss = true;
+                        }
+                    }
+                    let enc_ns = enc_start.elapsed().as_nanos();
+                    let prof = global_profiler();
+                    prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                    prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+
+                    (seq_num, payload_len)
+                } else {
+                    let start = self.arena.len();
+                    self.arena.extend_from_slice(&pkt);
+                    let len = self.arena.len() - start;
+                    self.offsets.push((start, len));
+                    stats.forwarded += 1;
+                    stats.route_misses += 1;
+                    continue;
+                };
+
+                // Append to arena
+                let start = self.arena.len();
+                self.arena.extend_from_slice(&pkt);
+                let len = self.arena.len() - start;
+                self.offsets.push((start, len));
+                if was_encrypted {
+                    stats.encrypted += 1;
+                } else {
+                    stats.forwarded += 1;
+                }
+                if was_route_miss {
+                    stats.route_misses += 1;
+                }
+            }
+
+            self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+            self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+            let _ = sock.send(self.arena.as_slice(), &self.offsets);
+            PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+            return stats;
+        }
+
+        // Parallel path: process packets in parallel
+        let outputs: Vec<(Vec<u8>, bool, bool)> = duplicated
+            .into_par_iter()
+            .map(|(pkt, _dst)| Self::process_packet_owned_consuming(pkt, routes_ref, session_ref, use_avx2))
+            .collect();
+
+        // Append results in the main thread to the arena.
+        for (bytes, encrypted, route_miss) in outputs {
+            let start = self.arena.len();
+            self.arena.extend_from_slice(&bytes);
+            let len = self.arena.len() - start;
+            self.offsets.push((start, len));
+            if encrypted { stats.encrypted += 1 } else { stats.forwarded += 1 }
+            if route_miss { stats.route_misses += 1 }
+        }
+
+        self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+        self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+        let _ = sock.send(self.arena.as_slice(), &self.offsets);
+        PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+        stats
     }
 
     pub fn process_batch_slices(
