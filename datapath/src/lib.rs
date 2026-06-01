@@ -699,10 +699,9 @@ impl Forwarder {
         // copy and an intermediate duplicated packet vector.
         let routes_ref = &self.routes;
         let session_ref = self.session.as_ref();
-        let mut stats = ForwarderStats {
-            received,
-            ..ForwarderStats::default()
-        };
+        // Defensive: ensure `stats` exists before any use in this function.
+        let mut stats = ForwarderStats::default();
+        stats.received = received;
 
         let spray_mode = mcr_config::get_mcr_spray_mode();
 
