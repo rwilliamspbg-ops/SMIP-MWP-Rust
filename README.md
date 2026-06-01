@@ -9,17 +9,26 @@
 [![MCR: experimental](https://img.shields.io/badge/MCR-experimental-yellow.svg)](docs/mcr_architecture.md)
 [![Bench: ready](https://img.shields.io/badge/bench-ready-brightgreen.svg)](tools/benchmark/run_chaos_epyc_profile.sh)
 
-SMIP-MWP-Rust is the Rust workspace for the SMIP-MWP datapath stack: crypto, routing, AF_XDP integration, CLI control-plane glue, and benchmark tooling. The repository is currently in active development on `main`. CI builds the workspace, runs tests, validates the bridge contract, and exercises the chaos benchmark/report gates.
+SMIP-MWP-Rust is the Rust workspace for the SMIP-MWP datapath stack: crypto, routing, AF_XDP integration, CLI control-plane glue, and benchmark tooling. The repository is currently in active development on `main`. CI builds the workspace, runs tests, validates the bridge contract, and exercises the benchmark/chaos gates.
 
-This patch branch adds Multi-Channel Routing (MCR) spraying integration: routing table extensions, datapath hooks, bench harness flags, and documentation. See [docs/mcr_architecture.md](docs/mcr_architecture.md) for details.
+This branch includes Multi-Channel Routing (MCR) spraying integration: routing table extensions, datapath hooks, bench harness flags, and documentation. See [docs/mcr_architecture.md](docs/mcr_architecture.md) for details.
 
 ## Current State
 
 - Workspace crates: `afxdp`, `bench`, `benchmark`, `cli`, `crypto`, `datapath`, `routing`, and `wire`.
-- Validation entry points: `cargo test --workspace --all-targets`, `make verify-bridge`, and `make performance-envelope`.
+- Validation entry points: `cargo build --release`, `cargo test --workspace --all-targets`, `make verify-bridge`, and `make performance-envelope`.
 - Generated validation artifacts live under `benchmark/`, `docs/perf/`, and `tools/bench_results/`.
 - The bridge validation wrapper is committed at [tools/validation/verify_bridge.sh](tools/validation/verify_bridge.sh).
-- Last verified locally: workspace tests, bridge validation, and the median/7-rep chaos gate configuration used by CI.
+- Last verified locally in this session: `cargo build --release`, `cargo test --workspace --all-targets`, `cargo run --release -p bench --bin bench`, `make verify-bridge`, and the CI-style benchmark smoke run.
+- Latest local benchmark smoke output from this session:
+	- `cargo run --release -p benchmark -- --packets 2000 --payload-len 64 --loss-percent 0 --corrupt-percent 0 --duplicate-percent 0 --seed 42 --mcr-channels 3 --mcr-spray-mode primary`
+	- `throughput_pkt_s=2284453.27`
+	- `latency_ns p50=20789 p99=42710 p99_9=42710`
+- Latest local synthetic bench output from this session:
+	- `cargo run --release -p bench --bin bench`
+	- size `1024`: `66297.52 MiB/s`
+	- size `8192`: `98085.37 MiB/s`
+	- size `65536`: `80954.35 MiB/s`
 
 ## Quick Start
 
@@ -27,14 +36,13 @@ This patch branch adds Multi-Channel Routing (MCR) spraying integration: routing
 git clone https://github.com/rwilliamspbg-ops/SMIP-MWP-Rust.git
 cd SMIP-MWP-Rust
 source $HOME/.cargo/env
-# Run the full test suite and bridge validation
+
+# Build, test, and validate the bridge contract
+cargo build --release
 cargo test --workspace --all-targets
 make verify-bridge
 
-# Run the chaos benchmark validation (CI-style)
-SMIP-MWP-Rust is the Rust workspace for the SMIP-MWP datapath stack: crypto, routing, AF_XDP integration, CLI control-plane glue, and benchmark tooling. The repository is actively developed; CI builds the workspace, runs tests, validates the bridge contract, and exercises benchmark/chaos gates.
-
-This workspace contains an active Multi-Channel Routing (MCR) feature (experimental). See [docs/mcr_architecture.md](docs/mcr_architecture.md) for architecture notes and the benchmark artifacts in `tools/bench_results/` for recent run outputs.
+# Run the chaos benchmark validation (CI-style) when pinned cores and hugepages are available
 MOHAWK_MCR_CHANNELS=3 MOHAWK_MCR_SPRAY_MODE=primary ./tools/benchmark/run_chaos_epyc_profile.sh
 ```
 
@@ -42,34 +50,36 @@ MOHAWK_MCR_CHANNELS=3 MOHAWK_MCR_SPRAY_MODE=primary ./tools/benchmark/run_chaos_
 
 Prerequisites:
 - Rust toolchain (stable), Cargo
-- For AF_XDP runs: Linux with AF_XDP-capable NIC and root privileges
- - The repository contains active benchmark and profiling work (see `tools/bench_results/` and `benchmark/`). Recent work includes allocator-pressure reductions on the datapath hot path and updates to the CI MCR baseline.
+- For AF_XDP runs: Linux with an AF_XDP-capable NIC and root privileges
+- The repository contains active benchmark and profiling work (see `tools/bench_results/` and `benchmark/`). Recent work includes allocator-pressure reductions on the datapath hot path and updates to the CI MCR baseline.
 - Optional: Python3 for report generation
-Note: the CI MCR baseline file (`tools/bench_results/ci_baseline_mcr.txt`) was recently updated to reflect pinned smoke runs; merging that baseline requires a perf review / `perf-approval` according to repo policy.
+
+Note: the CI MCR baseline file (`tools/bench_results/ci_baseline_mcr.txt`) was updated to reflect pinned smoke runs; merging that baseline requires a perf review / `perf-approval` according to repo policy.
 
 Install and run locally:
 
 ```sh
 # Build workspace
 cargo build --release
-## Badges & Status
-
-- CI: build/test gates — top-level workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
-- Bench harness & remote bench workflows: `bench-harness.yml` and `remote-bench.yml`
-- License: AGPL-3.0
-- Rust toolchain: pinned via `rust-toolchain.toml` (workspace uses the Rust stable toolchain)
 
 # Run the datapath binary (example):
 # METRICS_SOCKET=/tmp/mohawk.metrics.sock MOHAWK_IFACE=ens1f0 target/release/mohawk-node
 
 # Enable/disable MCR and tune channels via environment variables:
 export MOHAWK_MCR_ENABLED=1           # 0|1 (default: 1)
- 
-When running local smoke or chaos benchmarks that affect CI baselines, prefer the harness scripts in `tools/` and follow the pinned run instructions in `benchmark/` or `tools/bench_results/FLAMEGRAPH_RUN.md` for flamegraph capture on self-hosted hosts.
 export MOHAWK_MCR_SPRAY_MODE=primary  # primary|full (default: primary)
 export MOHAWK_MCR_CHANNELS=3          # 1|3|5 (default: 3)
 export MOHAWK_MCR_HASH_SEED=0xDEADBEEF
 ```
+
+When running local smoke or chaos benchmarks that affect CI baselines, prefer the harness scripts in `tools/` and follow the pinned run instructions in `benchmark/` or `tools/bench_results/FLAMEGRAPH_RUN.md` for flamegraph capture on self-hosted hosts.
+
+## Badges & Status
+
+- CI: build/test gates — top-level workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
+- Bench harness & remote bench workflows: `bench-harness.yml` and `remote-bench.yml`
+- License: AGPL-3.0
+- Rust toolchain: pinned via `rust-toolchain.toml` (workspace uses the Rust stable toolchain)
 
 ## Repository Layout
 

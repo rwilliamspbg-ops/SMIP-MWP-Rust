@@ -37,11 +37,22 @@ cargo run --release -p bench
 - `MOHAWK_WORKER_CORES=0-3 cargo run --release -p cli -- --bridge-request bridge/examples/control_request.example.json` fans bridge workers out across pinned CPU cores when `num_workers > 1`.
 - `cargo run --release -p bench` runs the synthetic allocation benchmark in `bench/src/lib.rs` and prints throughput-style numbers.
 
+Recent local measurements from this session:
+
+- `cargo run --release -p bench --bin bench`
+	- size `1024`: `66297.52 MiB/s`
+	- size `8192`: `98085.37 MiB/s`
+	- size `65536`: `80954.35 MiB/s`
+- `cargo run --release -p benchmark -- --packets 2000 --payload-len 64 --loss-percent 0 --corrupt-percent 0 --duplicate-percent 0 --seed 42 --mcr-channels 3 --mcr-spray-mode primary`
+	- `throughput_pkt_s=2284453.27`
+	- `latency_ns p50=20789 p99=42710 p99_9=42710`
+
 ## Current Repository Notes
 
 - The workspace CI currently checks `cargo build --release`.
 - The repo has passing tests across `wire`, `crypto`, `routing`, `datapath`, `afxdp`, `cli`, and `bench`.
 - The benchmark output currently reflects synthetic allocation/fill performance, not real AF_XDP packet latency or NIC throughput.
+- The current local smoke benchmark in this branch reached `throughput_pkt_s=2284453.27` with `p50=20789 ns` and `p99=42710 ns` under the packet profile above.
 - The latest perf artifacts also include routing miss sweep CSV/SVG outputs under `docs/perf/`.
 - `cargo` warnings about the workspace resolver are avoided by using `resolver = "2"` at the workspace root.
 

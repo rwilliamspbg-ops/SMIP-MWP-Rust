@@ -16,10 +16,12 @@ Validate ideal-mode throughput against target:
    - `PACKETS=12000 CORE_SETS='2-3 2-5' make chaos-epyc-profile`
 3. For line-rate validation, run real traffic generation against DUT (`make real-bench`) and collect NIC counters.
 
-## Latest Local Snapshot (from `tools/bench_results/chaos_epyc_profile.csv`)
+## Latest Local Snapshot
 
-- Core set `2-3`: `throughput_pkt_s=792003.11`
-- Core set `2-5`: `throughput_pkt_s=932108.75`
+The current local session measured the synthetic benchmark smoke path and the bench micro-harness, but it did not capture a fresh line-rate NIC run on self-hosted hardware.
+
+- Synthetic smoke benchmark: `throughput_pkt_s=2284453.27`, `p50=20789 ns`, `p99=42710 ns`, `p99_9=42710 ns`
+- Synthetic bench micro-run: `1024 -> 66297.52 MiB/s`, `8192 -> 98085.37 MiB/s`, `65536 -> 80954.35 MiB/s`
 
 These are packet-rate micro-harness numbers and are **not** direct line-rate Gbps proof.
 
