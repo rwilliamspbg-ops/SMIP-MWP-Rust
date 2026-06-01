@@ -1,6 +1,11 @@
 # Performance Envelope Report
 **Throughput CSV not found:** tools/bench_results/throughput_from_ethtool.csv
 
+## Current Local Session Smoke
+
+- Synthetic smoke benchmark: `throughput_pkt_s=2284453.27`, `p50=20789 ns`, `p99=42710 ns`, `p99_9=42710 ns`
+- Synthetic bench micro-run: `1024 -> 66297.52 MiB/s`, `8192 -> 98085.37 MiB/s`, `65536 -> 80954.35 MiB/s`
+
 ## Chaos EPYC Profile
 (timestamp, core_set, packets, payload_len, loss, corrupt, duplicate, throughput_pkt_s, p50, p99, p99_9)
 

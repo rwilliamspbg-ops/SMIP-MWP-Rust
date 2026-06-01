@@ -16,7 +16,8 @@ This file tracks notable repository-level changes on the current `main` branch.
 
 ### Performance notes (summary)
 
-- Recent pinned smoke runs indicate median throughput used for CI MCR baseline: ~2,402,042 pkt/s. See `tools/bench_results/` for run artifacts and `PR_PERFORMANCE_NOTES.md` for details.
+- Recent local benchmark smoke in this session reached `throughput_pkt_s=2284453.27` with `p50=20789 ns` and `p99=42710 ns` on the packet profile used by `cargo run --release -p benchmark -- --packets 2000 --payload-len 64 --loss-percent 0 --corrupt-percent 0 --duplicate-percent 0 --seed 42 --mcr-channels 3 --mcr-spray-mode primary`.
+- Recent pinned smoke runs still indicate the CI MCR baseline is around `2,402,042 pkt/s`; see `tools/bench_results/` for run artifacts and `PR_PERFORMANCE_NOTES.md` for details.
 - Flamegraph capture remains pending on a self-hosted bench host (requires `perf` and a compatible rust toolchain); profiling scripts are present in `tools/benchmark/` and `benchmark/FLAMEGRAPH_RUN.md`.
 
 ## v1.0.0
