@@ -6,10 +6,10 @@ pub mod umem;
 
 pub use socket::{AfXdpSocket, MockSocket};
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 
 /// Per-socket counters structure exposed for labeled metrics.
 pub struct SocketCounters {
@@ -32,9 +32,18 @@ impl SocketCounters {
     }
 }
 
-type SocketRegistry = HashMap<String, Arc<SocketCounters>>;
+impl Default for SocketCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-static SOCKET_REGISTRY: once_cell::sync::Lazy<Mutex<SocketRegistry>> = once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+type SocketRegistry = HashMap<String, Arc<SocketCounters>>;
+pub type SocketMetrics = (u64, u64, u64, u64, u64);
+pub type LabeledSocketMetrics = (String, SocketMetrics);
+
+static SOCKET_REGISTRY: once_cell::sync::Lazy<Mutex<SocketRegistry>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Register per-socket counters under the given label. Overwrites existing.
 pub fn register_socket_metrics(label: String, counters: Arc<SocketCounters>) {
@@ -49,7 +58,7 @@ pub fn unregister_socket_metrics(label: &str) {
 }
 
 /// Snapshot all registered per-socket counters for consumption by the CLI.
-pub fn snapshot_all_socket_metrics() -> Vec<(String, (u64, u64, u64, u64, u64))> {
+pub fn snapshot_all_socket_metrics() -> Vec<LabeledSocketMetrics> {
     let reg = SOCKET_REGISTRY.lock().unwrap();
     reg.iter()
         .map(|(k, v)| {

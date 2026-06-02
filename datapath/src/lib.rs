@@ -1,12 +1,12 @@
 use crypto::session::{HybridSession, SessionError, TAG_SIZE};
 use rayon::prelude::*;
+use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::cell::RefCell;
 #[cfg(target_arch = "x86_64")]
 use std::is_x86_feature_detected;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::cell::RefCell;
 use std::thread_local;
 
 /// Application-level processed packet counter (samples per-second externally)
@@ -83,6 +83,7 @@ impl AlignedBuffer {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
+    #[cfg(test)]
     fn as_ptr(&self) -> *const u8 {
         self.ptr.as_ptr()
     }
@@ -104,10 +105,6 @@ pub struct Forwarder {
     session: Option<HybridSession>,
     arena: AlignedBuffer,
     offsets: Vec<(usize, usize)>,
-    /// MCR spray buffer for multi-channel outputs
-    spray_buffer: Vec<Vec<u8>>,
-    /// Track which channels were used in this batch
-    channel_usage: AtomicU64,
     /// MCR telemetry: forwarded output packets
     mcr_forwarded: AtomicU64,
     /// MCR telemetry: dropped outputs (route misses / encrypt failures)
@@ -151,7 +148,7 @@ impl Default for Profiler {
 static GLOBAL_PROFILER: OnceLock<Profiler> = OnceLock::new();
 
 fn global_profiler() -> &'static Profiler {
-    GLOBAL_PROFILER.get_or_init(|| Profiler::default())
+    GLOBAL_PROFILER.get_or_init(Profiler::default)
 }
 
 struct PacketOutput {
@@ -181,8 +178,6 @@ impl Forwarder {
             // Pre-reserve aligned scratch/output storage to avoid mid-run allocations.
             arena: AlignedBuffer::with_capacity(262144),
             offsets: Vec::with_capacity(4096),
-            spray_buffer: Vec::new(),
-            channel_usage: AtomicU64::new(mcr_config::get_mcr_channels() as u64),
             mcr_forwarded: AtomicU64::new(0),
             mcr_dropped: AtomicU64::new(0),
         }
@@ -204,12 +199,48 @@ impl Forwarder {
         let predict_hits = p.lookup_predict_hits.load(Ordering::Relaxed);
 
         eprintln!("--- Forwarder profile ---");
-        eprintln!("handle: {} calls, {} ns total, avg {} ns", handle_count, handle_ns, if handle_count>0 { handle_ns / handle_count } else { 0 });
-        eprintln!("encrypt: {} calls, {} ns total, avg {} ns", encrypt_count, encrypt_ns, if encrypt_count>0 { encrypt_ns / encrypt_count } else { 0 });
-        eprintln!("append: {} calls, {} ns total, avg {} ns", append_count, append_ns, if append_count>0 { append_ns / append_count } else { 0 });
-        eprintln!("lookup_next_hop: {} calls, {} hits", lookup_calls, lookup_hits);
-        eprintln!("lookup_predict: {} calls, {} hits", predict_calls, predict_hits);
-        eprintln!("global packets_processed={}", PACKETS_PROCESSED.load(Ordering::Relaxed));
+        eprintln!(
+            "handle: {} calls, {} ns total, avg {} ns",
+            handle_count,
+            handle_ns,
+            if handle_count > 0 {
+                handle_ns / handle_count
+            } else {
+                0
+            }
+        );
+        eprintln!(
+            "encrypt: {} calls, {} ns total, avg {} ns",
+            encrypt_count,
+            encrypt_ns,
+            if encrypt_count > 0 {
+                encrypt_ns / encrypt_count
+            } else {
+                0
+            }
+        );
+        eprintln!(
+            "append: {} calls, {} ns total, avg {} ns",
+            append_count,
+            append_ns,
+            if append_count > 0 {
+                append_ns / append_count
+            } else {
+                0
+            }
+        );
+        eprintln!(
+            "lookup_next_hop: {} calls, {} hits",
+            lookup_calls, lookup_hits
+        );
+        eprintln!(
+            "lookup_predict: {} calls, {} hits",
+            predict_calls, predict_hits
+        );
+        eprintln!(
+            "global packets_processed={}",
+            PACKETS_PROCESSED.load(Ordering::Relaxed)
+        );
     }
 
     /// Ensure the internal arena has capacity for approximately `cap` bytes.
@@ -239,14 +270,10 @@ impl Forwarder {
                 let prof = global_profiler();
                 prof.lookup_next_hop_calls.fetch_add(1, Ordering::Relaxed);
             }
-            if self
-                .routes
-                .lookup_next_hop(dst_id, flow_label)
-                .is_some()
-            {
+            if self.routes.lookup_next_hop(dst_id, flow_label).is_some() {
                 let prof = global_profiler();
                 prof.lookup_next_hop_hits.fetch_add(1, Ordering::Relaxed);
-            
+
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
@@ -262,17 +289,72 @@ impl Forwarder {
                         let payload_start = self.arena.len();
                         self.arena.extend_from_slice(payload);
 
-                                let enc_start = std::time::Instant::now();
-                                match session.encrypt_into_slice(
-                                    &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
-                                    seq_num,
-                                ) {
-                                    Ok(tag) => {
-                                        let enc_ns = enc_start.elapsed().as_nanos();
-                                        let prof = global_profiler();
-                                        prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                                        prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
-                                        self.arena.extend_from_slice(tag.as_slice());
+                        let enc_start = std::time::Instant::now();
+                        match session.encrypt_into_slice(
+                            &mut self.arena.as_mut_slice()
+                                [payload_start..payload_start + payload_len],
+                            seq_num,
+                        ) {
+                            Ok(tag) => {
+                                let enc_ns = enc_start.elapsed().as_nanos();
+                                let prof = global_profiler();
+                                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                self.arena.extend_from_slice(tag.as_slice());
+                                let len = self.arena.len() - start;
+                                self.offsets.push((start, len));
+                                stats.encrypted += 1;
+                                forwarded = true;
+                            }
+                            Err(SessionError::AuthenticationFailed)
+                            | Err(SessionError::PayloadTooLarge)
+                            | Err(SessionError::CiphertextTooShort)
+                            | Err(SessionError::AeadError)
+                            | Err(SessionError::BufferTooSmall)
+                            | Err(SessionError::InsufficientCapacity) => {
+                                self.arena.truncate(start);
+                                stats.route_misses += 1;
+                            }
+                        }
+                    } else if payload_len > 0 {
+                        stats.route_misses += 1;
+                    }
+                }
+            } else if self
+                .routes
+                .lookup_or_predict(src_id, dst_id, flow_label)
+                .is_some()
+            {
+                let prof = global_profiler();
+                prof.lookup_predict_calls.fetch_add(1, Ordering::Relaxed);
+                prof.lookup_predict_hits.fetch_add(1, Ordering::Relaxed);
+                if let Some(session) = self.session.as_ref() {
+                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                        let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
+
+                        let start = self.arena.len();
+                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
+                        if remaining < needed {
+                            self.arena.reserve(needed - remaining);
+                        }
+
+                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                        let payload_start = self.arena.len();
+                        self.arena.extend_from_slice(payload);
+
+                        let enc_start = std::time::Instant::now();
+                        match session.encrypt_into_slice(
+                            &mut self.arena.as_mut_slice()
+                                [payload_start..payload_start + payload_len],
+                            seq_num,
+                        ) {
+                            Ok(tag) => {
+                                let enc_ns = enc_start.elapsed().as_nanos();
+                                let prof = global_profiler();
+                                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
                                 stats.encrypted += 1;
@@ -293,69 +375,15 @@ impl Forwarder {
                     }
                 }
             } else {
-                        if self
-                    .routes
-                    .lookup_or_predict(src_id, dst_id, flow_label)
-                    .is_some()
-                {
-                        let prof = global_profiler();
-                        prof.lookup_predict_calls.fetch_add(1, Ordering::Relaxed);
-                        prof.lookup_predict_hits.fetch_add(1, Ordering::Relaxed);
-                    if let Some(session) = self.session.as_ref() {
-                        if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                            let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-
-                            let start = self.arena.len();
-                            let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                            let remaining = self.arena.capacity().saturating_sub(self.arena.len());
-                            if remaining < needed {
-                                self.arena.reserve(needed - remaining);
-                            }
-
-                            self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                            let payload_start = self.arena.len();
-                            self.arena.extend_from_slice(payload);
-
-                            let enc_start = std::time::Instant::now();
-                            match session.encrypt_into_slice(
-                                &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
-                                seq_num,
-                            ) {
-                                    Ok(tag) => {
-                                                                let enc_ns = enc_start.elapsed().as_nanos();
-                                                                let prof = global_profiler();
-                                                                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                                                                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
-                                                self.arena.extend_from_slice(tag.as_slice());
-                                    let len = self.arena.len() - start;
-                                    self.offsets.push((start, len));
-                                    stats.encrypted += 1;
-                                    forwarded = true;
-                                }
-                                Err(SessionError::AuthenticationFailed)
-                                | Err(SessionError::PayloadTooLarge)
-                                | Err(SessionError::CiphertextTooShort)
-                                | Err(SessionError::AeadError)
-                                | Err(SessionError::BufferTooSmall)
-                                | Err(SessionError::InsufficientCapacity) => {
-                                    self.arena.truncate(start);
-                                    stats.route_misses += 1;
-                                }
-                            }
-                        } else if payload_len > 0 {
-                            stats.route_misses += 1;
-                        }
-                    }
-                } else {
-                    stats.route_misses += 1;
-                }
+                stats.route_misses += 1;
             }
         }
 
         let handle_ns = start_handle.elapsed().as_nanos();
         let prof = global_profiler();
         prof.handle_count.fetch_add(1, Ordering::Relaxed);
-        prof.handle_ns.fetch_add(handle_ns as u64, Ordering::Relaxed);
+        prof.handle_ns
+            .fetch_add(handle_ns as u64, Ordering::Relaxed);
 
         forwarded
     }
@@ -375,7 +403,9 @@ impl Forwarder {
 
             // measure encrypt under caller's profiler by timing around call sites
             if routes.lookup_next_hop(dst_id, flow_label).is_some()
-                || routes.lookup_or_predict(src_id, dst_id, flow_label).is_some()
+                || routes
+                    .lookup_or_predict(src_id, dst_id, flow_label)
+                    .is_some()
             {
                 let enc_start = std::time::Instant::now();
                 let out = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session);
@@ -417,7 +447,9 @@ impl Forwarder {
             let payload_len = h.length() as usize;
 
             if routes.lookup_next_hop(dst_id, flow_label).is_some()
-                || routes.lookup_or_predict(src_id, dst_id, flow_label).is_some()
+                || routes
+                    .lookup_or_predict(src_id, dst_id, flow_label)
+                    .is_some()
             {
                 let enc_start = std::time::Instant::now();
                 let mut encrypted = false;
@@ -428,9 +460,13 @@ impl Forwarder {
                         if pkt.len() < target_len {
                             pkt.resize(target_len, 0);
                         }
-                        match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                        match session.encrypt_into_slice(
+                            &mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len],
+                            seq_num,
+                        ) {
                             Ok(tag) => {
-                                pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                                pkt[HEADER_SIZE + payload_len..target_len]
+                                    .copy_from_slice(tag.as_slice());
                                 encrypted = true;
                             }
                             Err(SessionError::AuthenticationFailed)
@@ -468,7 +504,7 @@ impl Forwarder {
         session: Option<&HybridSession>,
         _use_avx2: bool,
     ) -> (Vec<u8>, bool, bool) {
-        if let Ok(h) = HeaderViewRef::new(&pkt) {
+        if let Ok(h) = HeaderViewRef::new(pkt) {
             let src_id: [u8; 32] = h.src_id().try_into().unwrap();
             let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
             let flow_label = h.flow_label();
@@ -476,7 +512,9 @@ impl Forwarder {
             let payload_len = h.length() as usize;
 
             if routes.lookup_next_hop(dst_id, flow_label).is_some()
-                || routes.lookup_or_predict(src_id, dst_id, flow_label).is_some()
+                || routes
+                    .lookup_or_predict(src_id, dst_id, flow_label)
+                    .is_some()
             {
                 let enc_start = std::time::Instant::now();
                 let mut encrypted = false;
@@ -487,9 +525,13 @@ impl Forwarder {
                         if pkt.len() < target_len {
                             pkt.resize(target_len, 0);
                         }
-                        match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                        match session.encrypt_into_slice(
+                            &mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len],
+                            seq_num,
+                        ) {
                             Ok(tag) => {
-                                pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                                pkt[HEADER_SIZE + payload_len..target_len]
+                                    .copy_from_slice(tag.as_slice());
                                 encrypted = true;
                             }
                             Err(SessionError::AuthenticationFailed)
@@ -532,7 +574,9 @@ impl Forwarder {
                 if pkt.len() < target_len {
                     pkt.resize(target_len, 0);
                 }
-                match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                match session
+                    .encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num)
+                {
                     Ok(tag) => {
                         pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
                         return PacketOutput {
@@ -547,7 +591,11 @@ impl Forwarder {
                     | Err(SessionError::AeadError)
                     | Err(SessionError::BufferTooSmall)
                     | Err(SessionError::InsufficientCapacity) => {
-                        return PacketOutput { bytes: pkt, encrypted: false, route_miss: true };
+                        return PacketOutput {
+                            bytes: pkt,
+                            encrypted: false,
+                            route_miss: true,
+                        };
                     }
                 }
             } else if payload_len > 0 {
@@ -577,7 +625,8 @@ impl Forwarder {
         };
         // record that we began processing this batch (MCR path)
         let prof = global_profiler();
-        prof.handle_count.fetch_add(received as u64, Ordering::Relaxed);
+        prof.handle_count
+            .fetch_add(received as u64, Ordering::Relaxed);
 
         self.arena.reserve(
             outputs
@@ -605,7 +654,8 @@ impl Forwarder {
         let append_ns = append_start.elapsed().as_nanos();
         let prof = global_profiler();
         prof.append_count.fetch_add(1, Ordering::Relaxed);
-        prof.append_ns.fetch_add(append_ns as u64, Ordering::Relaxed);
+        prof.append_ns
+            .fetch_add(append_ns as u64, Ordering::Relaxed);
 
         stats
     }
@@ -653,7 +703,8 @@ impl Forwarder {
             let _ = sock.send(self.arena.as_slice(), &self.offsets);
             PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
             let prof = global_profiler();
-            prof.handle_count.fetch_add(stats.received as u64, Ordering::Relaxed);
+            prof.handle_count
+                .fetch_add(stats.received as u64, Ordering::Relaxed);
             return stats;
         }
 
@@ -669,7 +720,8 @@ impl Forwarder {
         // update global application pconf counter
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
         let prof = global_profiler();
-        prof.handle_count.fetch_add(stats.received as u64, Ordering::Relaxed);
+        prof.handle_count
+            .fetch_add(stats.received as u64, Ordering::Relaxed);
         stats
     }
 
@@ -692,7 +744,8 @@ impl Forwarder {
 
         self.arena.clear();
         self.offsets.clear();
-        self.arena.reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
+        self.arena
+            .reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
         self.offsets.reserve(frames.len());
 
         // Default primary-spray mode can process in place, avoiding a second
@@ -700,8 +753,10 @@ impl Forwarder {
         let routes_ref = &self.routes;
         let session_ref = self.session.as_ref();
         // Defensive: ensure `stats` exists before any use in this function.
-        let mut stats = ForwarderStats::default();
-        stats.received = received;
+        let mut stats = ForwarderStats {
+            received,
+            ..ForwarderStats::default()
+        };
 
         let spray_mode = mcr_config::get_mcr_spray_mode();
 
@@ -753,9 +808,13 @@ impl Forwarder {
                         if pkt.len() < target_len {
                             pkt.resize(target_len, 0);
                         }
-                        match session.encrypt_into_slice(&mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len], seq_num) {
+                        match session.encrypt_into_slice(
+                            &mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len],
+                            seq_num,
+                        ) {
                             Ok(tag) => {
-                                pkt[HEADER_SIZE + payload_len..target_len].copy_from_slice(tag.as_slice());
+                                pkt[HEADER_SIZE + payload_len..target_len]
+                                    .copy_from_slice(tag.as_slice());
                                 was_encrypted = true;
                             }
                             Err(SessionError::AuthenticationFailed)
@@ -818,21 +877,35 @@ impl Forwarder {
                 // Serial path: process in-place and append directly to arena to avoid
                 // allocating intermediate PacketOutput/Vecs.
                 for (mut pkt, _dst) in duplicated.into_iter() {
-                    let out = Self::process_packet_owned_inline(&mut pkt, routes_ref, session_ref, use_avx2);
+                    let out = Self::process_packet_owned_inline(
+                        &mut pkt,
+                        routes_ref,
+                        session_ref,
+                        use_avx2,
+                    );
                     let start = self.arena.len();
                     self.arena.extend_from_slice(&out.0);
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
-                    if out.1 { stats.encrypted += 1 } else { stats.forwarded += 1 }
-                    if out.2 { stats.route_misses += 1 }
+                    if out.1 {
+                        stats.encrypted += 1
+                    } else {
+                        stats.forwarded += 1
+                    }
+                    if out.2 {
+                        stats.route_misses += 1
+                    }
                 }
 
-                self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
-                self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+                self.mcr_forwarded
+                    .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+                self.mcr_dropped
+                    .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
                 let _ = sock.send(self.arena.as_slice(), &self.offsets);
                 PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
                 let prof = global_profiler();
-                prof.handle_count.fetch_add(stats.received as u64, Ordering::Relaxed);
+                prof.handle_count
+                    .fetch_add(stats.received as u64, Ordering::Relaxed);
                 return stats;
             } else {
                 // Parallel path: process packets in parallel but return owned
@@ -841,7 +914,9 @@ impl Forwarder {
                 // parallel map.
                 let outputs: Vec<(Vec<u8>, bool, bool)> = duplicated
                     .into_par_iter()
-                    .map(|(pkt, _)| Self::process_packet_owned_consuming(pkt, routes_ref, session_ref, use_avx2))
+                    .map(|(pkt, _)| {
+                        Self::process_packet_owned_consuming(pkt, routes_ref, session_ref, use_avx2)
+                    })
                     .collect();
 
                 // Append results in the main thread to the arena.
@@ -850,20 +925,30 @@ impl Forwarder {
                     self.arena.extend_from_slice(&bytes);
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
-                    if encrypted { stats.encrypted += 1 } else { stats.forwarded += 1 }
-                    if route_miss { stats.route_misses += 1 }
+                    if encrypted {
+                        stats.encrypted += 1
+                    } else {
+                        stats.forwarded += 1
+                    }
+                    if route_miss {
+                        stats.route_misses += 1
+                    }
                 }
 
-                self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
-                self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+                self.mcr_forwarded
+                    .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+                self.mcr_dropped
+                    .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
                 let _ = sock.send(self.arena.as_slice(), &self.offsets);
                 PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
                 return stats;
             }
         }
 
-        self.mcr_forwarded.fetch_add(stats.forwarded as u64, Ordering::Relaxed);
-        self.mcr_dropped.fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+        self.mcr_forwarded
+            .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+        self.mcr_dropped
+            .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
 
         let _ = sock.send(self.arena.as_slice(), &self.offsets);
         PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
