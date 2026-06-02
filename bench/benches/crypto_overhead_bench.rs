@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use crypto::kex::{HybridKEX, INITIATOR_PUB_LEN, RESPONDER_MSG_LEN, SESSION_SECRET_LEN};
-use crypto::session::{HybridSession, prederive_session, TAG_SIZE};
+use crypto::session::{prederive_session, HybridSession, TAG_SIZE};
 
 const PAYLOAD_LEN: usize = 128;
 

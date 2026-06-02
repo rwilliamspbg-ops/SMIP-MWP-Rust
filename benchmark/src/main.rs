@@ -43,12 +43,8 @@ fn parse_config() -> Config {
         println!("  --packets <N>           Number of packets to generate (default 20000)");
         println!("  --batch-size <N>        Packets per forwarder batch (default 64)");
         println!("  --payload-len <N>       Payload bytes per packet (default 512)");
-        println!(
-            "  --loss-percent <f64>    Byzantine packet drop rate, 0-100 (default 5.0)"
-        );
-        println!(
-            "  --corrupt-percent <f64> Byzantine packet corruption rate, 0-100 (default 2.0)"
-        );
+        println!("  --loss-percent <f64>    Byzantine packet drop rate, 0-100 (default 5.0)");
+        println!("  --corrupt-percent <f64> Byzantine packet corruption rate, 0-100 (default 2.0)");
         println!(
             "  --duplicate-percent <f64> Byzantine duplicate injection rate, 0-100 (default 1.0)"
         );
@@ -238,11 +234,8 @@ fn main() {
         "fault_injection drop={} corrupt={} duplicate={}",
         counters.dropped, counters.corrupted, counters.duplicated
     );
-        // Print forwarder internal profiling summary
-        forwarder.print_profile();
+    // Print forwarder internal profiling summary
+    forwarder.print_profile();
     println!("throughput_pkt_s={:.2}", pkt_per_sec);
-    println!(
-        "latency_ns p50={} p99={} p99_9={}",
-        p50, p99, p999
-    );
+    println!("latency_ns p50={} p99={} p99_9={}", p50, p99, p999);
 }

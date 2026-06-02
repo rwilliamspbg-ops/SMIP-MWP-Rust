@@ -49,7 +49,11 @@ impl Umem {
 
     /// Return the total number of frames (computed from region length/frame size).
     pub fn total_frames(&self) -> usize {
-        if self.frame_size == 0 { 0 } else { self.len / self.frame_size }
+        if self.frame_size == 0 {
+            0
+        } else {
+            self.len / self.frame_size
+        }
     }
 
     /// A pointer to the base of the UMEM region

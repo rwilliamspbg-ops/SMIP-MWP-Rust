@@ -151,7 +151,7 @@ impl Table {
         // ensure channel stats entry exists
         {
             let mut stats = self.mcr_channel_stats.write();
-            stats.entry(e.dest_id).or_insert_with(ChannelStats::default);
+            stats.entry(e.dest_id).or_default();
         }
         // Invalidate per-thread caches
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
@@ -178,7 +178,7 @@ impl Table {
     /// Increment per-channel forwarded counter for `dest_id` and `next_hop`.
     pub fn inc_channel_forwarded(&self, dest_id: [u8; 32], next_hop: [u8; 32]) {
         let mut stats = self.mcr_channel_stats.write();
-        let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
+        let entry = stats.entry(dest_id).or_default();
         use std::sync::atomic::Ordering;
         if let Some(counter) = entry.per_channel_forwarded.get(&next_hop) {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -192,8 +192,10 @@ impl Table {
     /// Increment dropped counter for `dest_id`.
     pub fn inc_channel_dropped(&self, dest_id: [u8; 32]) {
         let mut stats = self.mcr_channel_stats.write();
-        let entry = stats.entry(dest_id).or_insert_with(ChannelStats::default);
-        entry.packets_dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let entry = stats.entry(dest_id).or_default();
+        entry
+            .packets_dropped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Apply a batch of forwarded and dropped counters with a single write lock.
@@ -205,7 +207,7 @@ impl Table {
         let mut stats = self.mcr_channel_stats.write();
 
         for (dest, by_next_hop) in forwarded.iter() {
-            let entry = stats.entry(*dest).or_insert_with(ChannelStats::default);
+            let entry = stats.entry(*dest).or_default();
             for (next_hop, count) in by_next_hop.iter() {
                 let counter = entry
                     .per_channel_forwarded
@@ -216,7 +218,7 @@ impl Table {
         }
 
         for (dest, count) in dropped.iter() {
-            let entry = stats.entry(*dest).or_insert_with(ChannelStats::default);
+            let entry = stats.entry(*dest).or_default();
             entry.packets_dropped.fetch_add(*count, Ordering::Relaxed);
         }
     }
@@ -230,7 +232,9 @@ impl Table {
                 let count = counter.load(std::sync::atomic::Ordering::Relaxed);
                 out.push((hex::encode(dest), hex::encode(nh), count));
             }
-            let dropped = ch_stats.packets_dropped.load(std::sync::atomic::Ordering::Relaxed);
+            let dropped = ch_stats
+                .packets_dropped
+                .load(std::sync::atomic::Ordering::Relaxed);
             if dropped > 0 {
                 out.push((hex::encode(dest), "dropped".to_string(), dropped));
             }
@@ -264,7 +268,10 @@ impl Table {
     pub fn lookup_spray(&self, dst_id: [u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
         // Try fast-path shard first
         let shard = Self::shard_for(&dst_id);
-        if let Some(e) = { let map = self.fast_shards[shard].read(); map.get(&dst_id).cloned() } {
+        if let Some(e) = {
+            let map = self.fast_shards[shard].read();
+            map.get(&dst_id).cloned()
+        } {
             // construct channels vector: primary + alternates
             let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
             out.push((e.next_hop_id, true));
@@ -275,7 +282,10 @@ impl Table {
         }
 
         // Fall back to main table
-        if let Some(e) = { let inner = self.inner.read(); inner.entries.get(&dst_id).cloned() } {
+        if let Some(e) = {
+            let inner = self.inner.read();
+            inner.entries.get(&dst_id).cloned()
+        } {
             let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
             out.push((e.next_hop_id, true));
             for ch in &e.alternate_channels {
@@ -287,8 +297,8 @@ impl Table {
                 let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
                 out.swap(0, idx);
                 // mark primary accordingly
-                for i in 0..out.len() {
-                    out[i].1 = i == 0;
+                for (i, channel) in out.iter_mut().enumerate() {
+                    channel.1 = i == 0;
                 }
             }
             return out;
@@ -301,38 +311,46 @@ impl Table {
     /// allocating a channel vector.
     pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
         let shard = Self::shard_for(&dst_id);
-        if let Some(next_hop) = { let map = self.fast_shards[shard].read(); map.get(&dst_id).map(|entry| entry.next_hop_id) } {
+        if let Some(next_hop) = {
+            let map = self.fast_shards[shard].read();
+            map.get(&dst_id).map(|entry| entry.next_hop_id)
+        } {
             return Some(next_hop);
         }
 
-            let next_hop = {
-                let inner = self.inner.read();
-                if let Some(entry) = inner.entries.get(&dst_id) {
-                    if entry.alternate_channels.is_empty() {
+        let next_hop = {
+            let inner = self.inner.read();
+            if let Some(entry) = inner.entries.get(&dst_id) {
+                if entry.alternate_channels.is_empty() {
+                    Some(entry.next_hop_id)
+                } else {
+                    let choices = 1 + entry.alternate_channels.len();
+                    let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                    if idx == 0 {
                         Some(entry.next_hop_id)
                     } else {
-                        let choices = 1 + entry.alternate_channels.len();
-                        let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
-                        if idx == 0 {
-                            Some(entry.next_hop_id)
-                        } else {
-                            Some(entry.alternate_channels[idx - 1])
-                        }
+                        Some(entry.alternate_channels[idx - 1])
                     }
-                } else {
-                    None
                 }
-            };
-
-            if let Some(next_hop) = next_hop {
-                return Some(next_hop);
+            } else {
+                None
             }
+        };
+
+        if let Some(next_hop) = next_hop {
+            return Some(next_hop);
+        }
 
         None
     }
 
     /// Select a single channel by index (round-robin if out of range)
-    pub fn lookup_spray_single(&self, dst_id: [u8; 32], flow_label: u32, channel_idx: usize) -> Option<[u8; 32]> {
+    pub fn lookup_spray_single(
+        &self,
+        dst_id: [u8; 32],
+        flow_label: u32,
+        channel_idx: usize,
+    ) -> Option<[u8; 32]> {
         let channels = self.lookup_spray(dst_id, flow_label);
         if channels.is_empty() {
             return None;

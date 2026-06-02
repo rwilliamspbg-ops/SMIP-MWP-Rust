@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::env;
-use std::process::Command;
 use std::hint::black_box;
+use std::process::Command;
 
 fn line_rate_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("line_rate");

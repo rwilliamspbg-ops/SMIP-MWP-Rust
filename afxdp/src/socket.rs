@@ -76,7 +76,9 @@ pub fn register_socket_instance_for_reconfigure() {
 }
 
 #[cfg(feature = "real")]
-pub fn register_socket_instance_for_reconfigure(inst: std::sync::Arc<std::sync::Mutex<RealSocket>>) {
+pub fn register_socket_instance_for_reconfigure(
+    inst: std::sync::Arc<std::sync::Mutex<RealSocket>>,
+) {
     real::register_socket_instance(inst)
 }
 
@@ -105,12 +107,11 @@ mod real {
     use super::*;
     use crate::rings::{RingMmap, XskMmapOffsets};
     use crate::umem::Umem;
-    use std::os::unix::io::RawFd;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Weak;
     use once_cell::sync::Lazy;
-    
+    use std::os::unix::io::RawFd;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Weak;
 
     // Registry of weak references to RealSocket instances for runtime
     // reconfiguration (e.g., changing FreeList headroom). Entries are weak
@@ -416,11 +417,27 @@ mod real {
             // register socket and eventfd with epoll if available
             if epoll_fd >= 0 {
                 unsafe {
-                    let mut ev = libc::epoll_event { events: (libc::EPOLLOUT as u32), u64: fd as u64 };
-                    let _ = libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev as *mut libc::epoll_event);
+                    let mut ev = libc::epoll_event {
+                        events: (libc::EPOLLOUT as u32),
+                        u64: fd as u64,
+                    };
+                    let _ = libc::epoll_ctl(
+                        epoll_fd,
+                        libc::EPOLL_CTL_ADD,
+                        fd,
+                        &mut ev as *mut libc::epoll_event,
+                    );
                     if eventfd >= 0 {
-                        let mut ev2 = libc::epoll_event { events: (libc::EPOLLIN as u32), u64: eventfd as u64 };
-                        let _ = libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, eventfd, &mut ev2 as *mut libc::epoll_event);
+                        let mut ev2 = libc::epoll_event {
+                            events: (libc::EPOLLIN as u32),
+                            u64: eventfd as u64,
+                        };
+                        let _ = libc::epoll_ctl(
+                            epoll_fd,
+                            libc::EPOLL_CTL_ADD,
+                            eventfd,
+                            &mut ev2 as *mut libc::epoll_event,
+                        );
                     }
                 }
             }
@@ -617,17 +634,23 @@ mod real {
                 if reclaimed_any && self.eventfd >= 0 {
                     let one: u64 = 1;
                     unsafe {
-                        let _ = libc::write(self.eventfd, &one as *const u64 as *const libc::c_void, std::mem::size_of::<u64>());
+                        let _ = libc::write(
+                            self.eventfd,
+                            &one as *const u64 as *const libc::c_void,
+                            std::mem::size_of::<u64>(),
+                        );
                     }
                 }
 
                 // Allocate frames from free list first, falling back to next_frame
                 let mut addrs: Vec<u64> = Vec::with_capacity(offsets.len());
                 for (off, len) in offsets.iter().cloned() {
-                        let mem_off = if let Some(f) = self.free_list.try_pop() {
+                    let mem_off = if let Some(f) = self.free_list.try_pop() {
                         // allocated from free list
                         crate::AF_XDP_ALLOC_FROM_FREELIST_COUNT.fetch_add(1, Ordering::Relaxed);
-                        self.counters.alloc_from_freelist.fetch_add(1, Ordering::Relaxed);
+                        self.counters
+                            .alloc_from_freelist
+                            .fetch_add(1, Ordering::Relaxed);
                         f
                     } else {
                         // fallback to bumping next_frame
@@ -683,15 +706,28 @@ mod real {
                 // Prefer epoll on (socket fd, eventfd) when available; fallback to poll.
                 if self.epoll_fd >= 0 {
                     let mut events: [libc::epoll_event; 4] = unsafe { std::mem::zeroed() };
-                    let nfds = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), events.len() as i32, 100) };
+                    let nfds = unsafe {
+                        libc::epoll_wait(
+                            self.epoll_fd,
+                            events.as_mut_ptr(),
+                            events.len() as i32,
+                            100,
+                        )
+                    };
                     if nfds < 0 {
                         // fallback to a tiny sleep on error
                         thread::sleep(Duration::from_millis(1));
                     }
                 } else if self.fd >= 0 {
-                    let mut pfd = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
+                    let mut pfd = libc::pollfd {
+                        fd: self.fd,
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
                     // timeout 100ms to avoid long blocking in normal cases
-                    unsafe { let _ = libc::poll(&mut pfd as *mut libc::pollfd, 1, 100); }
+                    unsafe {
+                        let _ = libc::poll(&mut pfd as *mut libc::pollfd, 1, 100);
+                    }
                 } else {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -771,7 +807,8 @@ mod real {
                 comp: 2048,
                 comp_desc: 4096,
             };
-            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+            let ring =
+                unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
             let fl = FreeList::with_capacity(frames);
             for i in 0..frames {
                 let _ = fl.try_push((i * frame_size) as u64);
@@ -813,7 +850,9 @@ mod real {
             let mut seen = Vec::new();
             while let Some(v) = fl.try_pop() {
                 seen.push(v);
-                if seen.len() > frames { break; }
+                if seen.len() > frames {
+                    break;
+                }
             }
             assert!(!seen.is_empty());
         }
@@ -837,7 +876,8 @@ mod real {
                 comp: 2048,
                 comp_desc: 4096,
             };
-            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+            let ring =
+                unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
 
             // empty free list to force next_frame allocation
             let fl = FreeList::with_capacity(frames);
@@ -901,7 +941,8 @@ mod real {
                 comp: 2048,
                 comp_desc: 4096,
             };
-            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+            let ring =
+                unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
 
             // Make tx capacity = 1 by setting tx_desc/fill_desc region small
             unsafe {
@@ -979,7 +1020,8 @@ mod real {
                 comp: 2048,
                 comp_desc: 4096,
             };
-            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+            let ring =
+                unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
 
             let fl = FreeList::with_capacity(frames);
             for i in 0..frames {
@@ -1044,8 +1086,10 @@ mod real {
                                 let avail = prod.wrapping_sub(cons);
                                 if avail > 0 {
                                     // compute tx capacity from offsets
-                                    let desc_region_bytes = offs.fill_desc.saturating_sub(offs.tx_desc) as usize;
-                                    let cap = (desc_region_bytes / std::mem::size_of::<u64>()).max(1);
+                                    let desc_region_bytes =
+                                        offs.fill_desc.saturating_sub(offs.tx_desc) as usize;
+                                    let cap =
+                                        (desc_region_bytes / std::mem::size_of::<u64>()).max(1);
                                     // clamp availability to avoid wrapping-induced huge values
                                     let avail_clamped = std::cmp::min(avail, cap as usize);
                                     // copy descriptors from tx_desc to comp_desc and set comp prod
@@ -1098,7 +1142,8 @@ mod real {
                 comp: 2048,
                 comp_desc: 4096,
             };
-            let ring = unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
+            let ring =
+                unsafe { crate::rings::RingMmap::new(ptr as *mut libc::c_void, buf.len(), offs) };
 
             let fl = FreeList::with_capacity(frames);
             for i in 0..frames {
@@ -1145,7 +1190,7 @@ mod real {
 
             // global set should include our label
             let applied = set_freelist_headroom_all(128);
-            assert!(applied.iter().any(|(l,_,_)| l == &label));
+            assert!(applied.iter().any(|(l, _, _)| l == &label));
 
             // drop the strong Arc and ensure snapshot no longer returns the label
             std::mem::drop(arc);
@@ -1156,6 +1201,6 @@ mod real {
         }
     }
     // close mod real
-    }
+}
 #[cfg(feature = "real")]
 pub use real::RealSocket;
