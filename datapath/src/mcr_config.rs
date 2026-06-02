@@ -10,3 +10,10 @@ pub fn get_mcr_enabled() -> bool {
 pub fn get_mcr_spray_mode() -> String {
     env::var("MOHAWK_MCR_SPRAY_MODE").unwrap_or_else(|_| "primary".to_string())
 }
+
+pub fn get_mcr_channels() -> u32 {
+    match env::var("MOHAWK_MCR_CHANNELS") {
+        Ok(v) => v.parse().unwrap_or(3),
+        Err(_) => 3,
+    }
+}

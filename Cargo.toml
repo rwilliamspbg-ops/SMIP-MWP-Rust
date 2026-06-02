@@ -5,7 +5,6 @@ members = [
     "crypto",
     "routing",
     "datapath",
-    "afxdp",
     "cli",
     "bench",
     "benchmark",
