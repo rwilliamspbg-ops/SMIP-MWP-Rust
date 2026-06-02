@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
     steps:
     - uses: actions/checkout@v4
     - name: Set up Rust toolchain
@@ -10,29 +13,44 @@ jobs:
       with:
         toolchain: 1.81.0
         profile: minimal
+        components: rustfmt, clippy
         override: true
+    - name: Install target
+      run: rustup target add ${{ matrix.target }}
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.target }}
     - name: Build the project
-      run: cargo build --release
+      run: cargo build --release --target ${{ matrix.target }}
     - name: Prepare benchmark artifacts and scripts
       run: |
-        # Ensure directories exist and scripts are executable to avoid CI failures
         mkdir -p tools/bench_results benchmark
         chmod +x tools/benchmark/*.sh || true
-    - name: Run workspace tests
+    - name: Run workspace tests (native only)
+      if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
       run: cargo test --workspace --all-targets
-    - name: Run MCR smoke benchmark and enforce regression threshold
+    - name: Check formatting (native only)
+      if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+      run: cargo fmt --all -- --check
+    - name: Run clippy (native only)
+      if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    - name: Run MCR smoke benchmark and enforce regression threshold (native only)
+      if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
       run: |
         set -euo pipefail
         mkdir -p tools/bench_results
-        # Run a fast smoke benchmark exercising MCR (small packet count)
         cargo run --release -p benchmark -- --packets 2000 --payload-len 64 --loss-percent 0 --corrupt-percent 0 --duplicate-percent 0 --seed 42 --mcr-channels 3 --mcr-spray-mode primary 2>&1 | tee tools/bench_results/mcr_smoke.txt
-        # Extract throughput value from output (throughput_pkt_s=FLOAT)
         th=$(grep -oE 'throughput_pkt_s=[0-9]+\.?[0-9]+' tools/bench_results/mcr_smoke.txt | head -n1 | cut -d'=' -f2)
         if [ -z "${th:-}" ]; then
           echo "Failed to extract throughput" >&2; exit 2
         fi
         echo "throughput=$th" > tools/bench_results/mcr_smoke_result.txt
-        # Baseline (packets/s) is stored in repo; fail if current < baseline * 0.8 (20% regression)
         baseline=$(cat tools/bench_results/ci_baseline_mcr.txt)
         min=$(awk -v b=$baseline 'BEGIN{printf("%d", b*0.8)}')
         echo "baseline=$baseline, min_allowed=$min, measured=$th"
@@ -41,9 +59,11 @@ jobs:
           echo "MCR smoke benchmark below allowed threshold" >&2
           exit 3
         fi
-    - name: Run metrics smoke test
+    - name: Run metrics smoke test (native only)
+      if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
       run: cargo run --release -p bench --bin bench
-    - name: Run bridge validation gate
+    - name: Run bridge validation gate (native only)
+      if: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
       run: make verify-bridge
     - name: Prepare for optional chaos validation
       run: echo "Chaos validation moved to a self-hosted job to avoid flaky failures on hosted runners"
