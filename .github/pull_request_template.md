@@ -1,31 +1,27 @@
-<!-- Please describe the change and why it is needed. -->
+<!--- Provide a short, clear summary of the change in this PR --->
 
 ## Summary
 
 Describe the change in one or two sentences.
 
-## Changes
-- What changed (files, modules, behavior)
-
-## Testing
-- How was this tested? List commands and reproducible steps.
-
-```sh
-# unit tests
-cargo test --workspace --all-targets
-
-# example: run the smoke harness
-./tools/benchmark/run_smoke.sh
-```
-
-## Performance
-- If this PR affects datapath performance, include a short summary and attach any bench logs/CSV artifacts (put them under `tools/bench_results/` when appropriate).
-- If updating CI baselines (e.g. `ci_baseline_mcr.txt`), request `perf-approval` and include pinned run artifacts.
-
-## Related issues / PRs
-- Link any related issues or PRs.
-
 ## Checklist
-- [ ] I ran `cargo test --workspace --all-targets` and formatting (`cargo fmt`).
-- [ ] For performance changes, artifacts are attached and reproduction steps are provided.
-- [ ] I assigned reviewers and labels as appropriate.
+
+- [ ] I have run `cargo test --workspace --all-targets` locally.
+- [ ] I have updated documentation where appropriate.
+
+### Performance / SLA changes
+If this PR modifies `tools/benchmark/sla_baselines.json` you must:
+
+- [ ] Attach measurement artifacts that justify the new baselines (raw outputs, CSVs, plots).
+- [ ] Include an explanation of the test environment (CPU, NIC model, hugepage config, kernel version).
+- [ ] Add the `perf-approval` label to this PR (request it from a maintainer).
+
+Failure to provide these will cause the SLA protection CI check to block the PR.
+
+## Description
+
+More detailed description of the change, why it was needed, and how it was tested.
+
+## Related issues
+
+Link any related issues or PRs.
