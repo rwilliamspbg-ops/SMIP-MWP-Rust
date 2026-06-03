@@ -15,21 +15,33 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Install Rust
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.81.0
           profile: minimal
-          override: true
 
       - name: Build bench (release)
         run: cargo build -p bench --release
 
       - name: Run bench harness
-        run: ./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv || echo "Bench harness completed"
+        run: |
+          mkdir -p bench_results
+          if [ -f tools/bench_harness/run_bench_harness.sh ]; then
+            chmod +x tools/bench_harness/run_bench_harness.sh
+            ./tools/bench_harness/run_bench_harness.sh 20 bench_results.csv || echo "Bench harness completed with possible errors"
+          else
+            echo "Bench harness script not found - skipping optional step"
+          fi
 
       - name: Summarize results
-        run: python3 tools/bench_harness/summarize_csv.py bench_results.csv bench_summary.csv || true
+        run: |
+          if [ -f bench_results.csv ] && [ -f tools/bench_harness/summarize_csv.py ]; then
+            python3 tools/bench_harness/summarize_csv.py bench_results.csv bench_summary.csv || \
+              echo "CSV summarization completed (may have errors)"
+          else
+            echo "CSV summarization skipped (files not available)"
+          fi
 
       - name: Install plotting deps
         run: |
@@ -37,7 +49,11 @@ jobs:
 
       - name: Generate plots
         run: |
-          python3 tools/bench_harness/plot_results.py || echo "Plot generation skipped (optional)"
+          if [ -f tools/bench_harness/plot_results.py ] && [ -f bench_results.csv ]; then
+            python3 tools/bench_harness/plot_results.py || echo "Plot generation completed with possible errors"
+          else
+            echo "Plot generation skipped (script or data not available)"
+          fi
 
       - name: Commit plots back to branch
         if: always() && github.ref_type == 'branch' && github.event_name != 'pull_request'
@@ -47,12 +63,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
           # Check if files exist before adding
           if [ -f docs/bench_performance.png ]; then
             git add docs/bench_performance.png
           fi
           if [ -f docs/bench_market_compare.png ]; then
             git add docs/bench_market_compare.png
+          fi
+          if [ -d docs/ ] && [ "$(git ls-files --others --exclude-standard | wc -l)" -gt 0 ]; then
+            git add docs/ 2>/dev/null || true
           fi
           git commit -m "chore(bench): add generated performance plots" || echo "No changes to commit"
           git push origin HEAD:$TARGET_BRANCH || echo "Push skipped (no changes or already up-to-date)"
@@ -62,8 +82,8 @@ jobs:
         with:
           name: bench-results
           path: |
-            bench_results.csv
-            bench_summary.csv
-            docs/bench_performance.png
-            docs/bench_market_compare.png
+            bench_results.csv 2>/dev/null || .
+            bench_summary.csv 2>/dev/null || .
+            docs/bench_performance.png 2>/dev/null || .
+            docs/bench_market_compare.png 2>/dev/null || .
           if-no-files-found: ignore
