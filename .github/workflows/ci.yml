@@ -9,12 +9,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Set up Rust toolchain
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.81.0
-        profile: minimal
-        components: rustfmt, clippy
-        override: true
+        components: rustfmt,clippy
     - name: Install target
       run: rustup target add ${{ matrix.target }} || true
     - name: Cache cargo
@@ -76,11 +74,9 @@ jobs:
       with:
         ref: ${{ github.ref }}
     - name: Set up Rust toolchain
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.81.0
-        profile: minimal
-        override: true
     - name: Prepare benchmark artifacts and scripts
       run: |
         mkdir -p tools/bench_results benchmark

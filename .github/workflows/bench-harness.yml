@@ -12,15 +12,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.81.0
-          profile: minimal
-          override: true
 
       - name: Build bench (release)
         run: cargo build -p bench --release

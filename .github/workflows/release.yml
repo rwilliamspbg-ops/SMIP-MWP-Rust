@@ -13,11 +13,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Set up Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@master
       with:
         toolchain: 1.81.0
-        profile: minimal
-        override: true
     - name: Install target
       run: rustup target add ${{ matrix.target }} || true
     - name: Build release binary
@@ -60,24 +58,10 @@ jobs:
         cat /tmp/changelog.txt >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
 
-    - name: Create GitHub Release
-      id: create_release
-      uses: actions/create-release@v1
-      with:
-        tag_name: ${{ github.ref_name }}
-        release_name: Release ${{ github.ref_name }}
-        body: |
-          Changelog (auto-generated):
-
-          ${{ steps.changelog.outputs.changelog }}
-        draft: false
-        prerelease: false
-
-    - name: Package and upload per-target archives
+    - name: Package per-target archives
       run: |
         set -euo pipefail
         cd dist
-        # Create per-target zip archives
         for d in */ ; do
           t=${d%/}
           zipfile="${t}.zip"
@@ -87,27 +71,17 @@ jobs:
           fi
         done
 
-    - name: Upload release assets (via GitHub API)
-      run: |
-        set -euo pipefail
-        cd dist
-        # Get the upload URL from the create_release step
-        UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
-        
-        # Strip query parameters and template suffix
-        UPLOAD_URL=$(echo "$UPLOAD_URL" | sed 's/\?.*//')
-        echo "Using upload_url: $UPLOAD_URL"
-        
-        for f in *.zip; do
-          [ -f "$f" ] || continue
-          echo "Uploading $f"
-          
-          # Extract the filename from the zip
-          FILENAME=$(basename "$f")
-          
-          curl -sSf -X POST \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Content-Type: application/zip" \
-            --data-binary "@$f" \
-            "$UPLOAD_URL?name=$FILENAME" || echo "Upload of $f failed (may already exist)"
-        done
+    - name: Create GitHub Release and upload assets
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
+        body: |
+          Changelog (auto-generated):
+
+          ${{ steps.changelog.outputs.changelog }}
+        draft: false
+        prerelease: false
+        files: dist/**/*.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
