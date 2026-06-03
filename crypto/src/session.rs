@@ -222,13 +222,8 @@ impl HybridSession {
         }
         let nonce = self.build_nonce(seq);
         
-        // Use a temporary buffer to avoid aliasing issues with AEAD cipher state
-        // The cipher state needs exclusive access during encryption operations
-        let temp_buf: Vec<u8> = payload.to_vec();
-        let mut temp_slice: &mut [u8] = temp_buf.as_mut_slice();
-        
-        let nonce_ref = GenericArray::<u8, U12>::from_slice(&nonce);
-        match self.aead.encrypt_in_place_detached(nonce_ref, b"", &mut temp_slice) {
+        let mut temp_buf: Vec<u8> = payload.to_vec();
+        match self.aead.encrypt_in_place_detached(&nonce, temp_buf.as_mut_slice()) {
             Ok(tag) => Ok(tag),
             Err(_) => Err(SessionError::AuthenticationFailed),
         }
