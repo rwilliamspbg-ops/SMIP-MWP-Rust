@@ -221,12 +221,9 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
-        
-        let mut temp_buf: Vec<u8> = payload.to_vec();
-        match self.aead.encrypt_in_place_detached(&nonce, temp_buf.as_mut_slice()) {
-            Ok(tag) => Ok(tag),
-            Err(_) => Err(SessionError::AuthenticationFailed),
-        }
+        self.aead
+            .encrypt_in_place_detached(&nonce, payload)
+            .map_err(|_| SessionError::AuthenticationFailed)
     }
 
     /// Zero-allocation encrypt: caller fills `dst` with the plaintext, then
@@ -317,5 +314,25 @@ mod tests {
             sess2.decrypt(&[1, 2, 3], 0),
             Err(SessionError::CiphertextTooShort)
         ));
+    }
+
+    #[test]
+    fn encrypt_into_slice_mutates_in_place() {
+        let combined = vec![0x55u8; 64];
+        let info = b"slice-encrypt-info";
+        let sess = HybridSession::new(&combined, info).expect("session");
+        let mut payload = b"slice payload".to_vec();
+        let original = payload.clone();
+
+        let tag = sess
+            .encrypt_into_slice(payload.as_mut_slice(), 11)
+            .expect("encrypt_into_slice");
+
+        assert_ne!(payload, original);
+
+        let mut ciphertext = payload;
+        ciphertext.extend_from_slice(tag.as_slice());
+        let pt = sess.decrypt(&ciphertext, 11).expect("decrypt");
+        assert_eq!(pt, original);
     }
 }

@@ -3,6 +3,7 @@ mod worker;
 
 use bridge::{ControlRequest, ForwarderStats, QueueStats, TelemetryResponse};
 use datapath::Forwarder;
+use prometheus::{Encoder, GaugeVec};
 use routing::{RouteEntry, Table};
 use std::env;
 use std::fs;
@@ -13,7 +14,6 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use wire::{Header, HEADER_SIZE};
-use prometheus::{Encoder, GaugeVec};
 // Helper to construct an AF_XDP socket: attempt real socket when available,
 // otherwise fall back to the in-process mock.
 fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
@@ -21,12 +21,24 @@ fn build_socket(frames: Vec<Vec<u8>>) -> afxdp::AfXdpSocket {
     {
         use std::env;
         if let Ok(iface) = env::var("MOHAWK_IFACE") {
-            let queue_id = env::var("MOHAWK_QUEUE_ID").ok().and_then(|s| s.parse().ok()).unwrap_or(0u32);
-            let frame_size = env::var("MOHAWK_FRAME_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(2048usize);
-            let pages = env::var("MOHAWK_UMEM_PAGES").ok().and_then(|s| s.parse().ok()).unwrap_or(1024usize);
+            let queue_id = env::var("MOHAWK_QUEUE_ID")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0u32);
+            let frame_size = env::var("MOHAWK_FRAME_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2048usize);
+            let pages = env::var("MOHAWK_UMEM_PAGES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1024usize);
             match afxdp::socket::RealSocket::new(&iface, queue_id, frame_size, pages) {
                 Ok(sock) => return Box::new(sock),
-                Err(e) => eprintln!("AF_XDP real socket init failed: {}. Falling back to mock.", e),
+                Err(e) => eprintln!(
+                    "AF_XDP real socket init failed: {}. Falling back to mock.",
+                    e
+                ),
             }
         }
     }
@@ -204,8 +216,6 @@ fn render_telemetry(
     }
 }
 
-
-
 #[cfg_attr(not(test), allow(dead_code))]
 fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
     format!(
@@ -231,20 +241,26 @@ pub fn start_metrics_http(bind_addr: &str) {
     let afxdp_gauges = GaugeVec::new(
         prometheus::opts!("afxdp_counters", "AF_XDP counters by name"),
         &["metric", "socket"],
-    ).unwrap();
+    )
+    .unwrap();
     registry.register(Box::new(afxdp_gauges.clone())).ok();
 
     // Register MCR routing gauges: per-destination per-next-hop forwarded counters
     let mcr_forwarded = GaugeVec::new(
-        prometheus::opts!("mohawk_mcr_forwarded_total", "MCR forwarded packets per dest/next_hop"),
+        prometheus::opts!(
+            "mohawk_mcr_forwarded_total",
+            "MCR forwarded packets per dest/next_hop"
+        ),
         &["dest", "next_hop"],
-    ).unwrap();
+    )
+    .unwrap();
     registry.register(Box::new(mcr_forwarded.clone())).ok();
 
     let mcr_dropped = GaugeVec::new(
         prometheus::opts!("mohawk_mcr_dropped_total", "MCR dropped packets per dest"),
         &["dest"],
-    ).unwrap();
+    )
+    .unwrap();
     registry.register(Box::new(mcr_dropped.clone())).ok();
 
     // Background updater to sync atomic globals into the prometheus gauges
@@ -255,26 +271,42 @@ pub fn start_metrics_http(bind_addr: &str) {
             let mut prev_labels: HashSet<String> = HashSet::new();
             loop {
                 let r = afxdp::AF_XDP_RETRY_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
-                let b = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
-                let af_from = afxdp::AF_XDP_ALLOC_FROM_FREELIST_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
-                let af_fb = afxdp::AF_XDP_ALLOC_FALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
-                let af_drop = afxdp::AF_XDP_FREE_PUSH_DROP_COUNT.load(std::sync::atomic::Ordering::Relaxed) as f64;
+                let b = afxdp::AF_XDP_BACKPRESSURE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+                    as f64;
+                let af_from = afxdp::AF_XDP_ALLOC_FROM_FREELIST_COUNT
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    as f64;
+                let af_fb = afxdp::AF_XDP_ALLOC_FALLBACK_COUNT
+                    .load(std::sync::atomic::Ordering::Relaxed) as f64;
+                let af_drop = afxdp::AF_XDP_FREE_PUSH_DROP_COUNT
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    as f64;
                 g.with_label_values(&["retry_total", "global"]).set(r);
-                g.with_label_values(&["backpressure_total", "global"]).set(b);
-                g.with_label_values(&["alloc_from_freelist_total", "global"]).set(af_from);
-                g.with_label_values(&["alloc_fallback_total", "global"]).set(af_fb);
-                g.with_label_values(&["free_push_drop_total", "global"]).set(af_drop);
+                g.with_label_values(&["backpressure_total", "global"])
+                    .set(b);
+                g.with_label_values(&["alloc_from_freelist_total", "global"])
+                    .set(af_from);
+                g.with_label_values(&["alloc_fallback_total", "global"])
+                    .set(af_fb);
+                g.with_label_values(&["free_push_drop_total", "global"])
+                    .set(af_drop);
 
                 // Per-socket labeled metrics
                 let snaps = afxdp::snapshot_all_socket_metrics();
                 let mut current_labels: HashSet<String> = HashSet::new();
-                for (label, (retry, backpressure, alloc_from, alloc_fb, free_drop)) in snaps.iter() {
+                for (label, (retry, backpressure, alloc_from, alloc_fb, free_drop)) in snaps.iter()
+                {
                     current_labels.insert(label.clone());
-                    g.with_label_values(&["retry_total", label]).set(*retry as f64);
-                    g.with_label_values(&["backpressure_total", label]).set(*backpressure as f64);
-                    g.with_label_values(&["alloc_from_freelist_total", label]).set(*alloc_from as f64);
-                    g.with_label_values(&["alloc_fallback_total", label]).set(*alloc_fb as f64);
-                    g.with_label_values(&["free_push_drop_total", label]).set(*free_drop as f64);
+                    g.with_label_values(&["retry_total", label])
+                        .set(*retry as f64);
+                    g.with_label_values(&["backpressure_total", label])
+                        .set(*backpressure as f64);
+                    g.with_label_values(&["alloc_from_freelist_total", label])
+                        .set(*alloc_from as f64);
+                    g.with_label_values(&["alloc_fallback_total", label])
+                        .set(*alloc_fb as f64);
+                    g.with_label_values(&["free_push_drop_total", label])
+                        .set(*free_drop as f64);
                 }
 
                 // Optionally read routing metrics emitted to a file by the datapath process.
@@ -283,7 +315,9 @@ pub fn start_metrics_http(bind_addr: &str) {
                         // Expect CSV lines: dest_hex,next_hop_hex,count  OR dest_hex,dropped,count
                         for line in contents.lines() {
                             let parts: Vec<&str> = line.split(',').collect();
-                            if parts.len() != 3 { continue; }
+                            if parts.len() != 3 {
+                                continue;
+                            }
                             let dest = parts[0];
                             let key = parts[1];
                             let cnt = parts[2].parse::<f64>().unwrap_or(0.0);
@@ -340,11 +374,16 @@ pub fn start_metrics_http(bind_addr: &str) {
                             // simple control endpoint: body contains `headroom=<n>`
                             let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
                             if let Some(eq) = body.find("headroom=") {
-                                if let Ok(n) = body[eq + 9..].trim().split_whitespace().next().unwrap_or("").parse::<usize>() {
+                                if let Ok(n) = body[eq + 9..]
+                                    .split_whitespace()
+                                    .next()
+                                    .unwrap_or("")
+                                    .parse::<usize>()
+                                {
                                     // support optional label=<label> to set a single socket
                                     let label_opt = body.find("label=").map(|i| {
                                         body[i + 6..]
-                                            .split(|c: char| c == '&' || c == ' ' || c == '\n' || c == '\r')
+                                            .split(['&', ' ', '\n', '\r'])
                                             .next()
                                             .unwrap_or("")
                                             .to_string()
@@ -352,13 +391,15 @@ pub fn start_metrics_http(bind_addr: &str) {
 
                                     if let Some(label) = label_opt.filter(|s| !s.is_empty()) {
                                         // apply to named socket only
-                                        let res = afxdp::socket::set_freelist_headroom_for(&label, n);
+                                        let res =
+                                            afxdp::socket::set_freelist_headroom_for(&label, n);
                                         let obj = if let Some((old, new)) = res {
                                             serde_json::json!({"label": label, "old": old, "new": new, "ok": true})
                                         } else {
                                             serde_json::json!({"label": label, "old": null, "new": n, "ok": false})
                                         };
-                                        let body_json = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
+                                        let body_json = serde_json::to_string(&obj)
+                                            .unwrap_or_else(|_| "{}".to_string());
                                         let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body_json.len(), body_json);
                                         let _ = s.write_all(resp.as_bytes());
                                     } else {
@@ -380,7 +421,7 @@ pub fn start_metrics_http(bind_addr: &str) {
                                         }
                                         // any socket present before but not applied -> mark as failed
                                         for (label, old) in before.iter() {
-                                            if !applied.iter().any(|(l,_,_)| l == label) {
+                                            if !applied.iter().any(|(l, _, _)| l == label) {
                                                 let obj = serde_json::json!({
                                                     "label": label,
                                                     "old": old,
@@ -404,9 +445,8 @@ pub fn start_metrics_http(bind_addr: &str) {
                                 let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nBad Request");
                             }
                         } else {
-                            let _ = s.write_all(
-                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
-                            );
+                            let _ =
+                                s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
                         }
                     }
                     Err(e) => eprintln!("metrics http accept: {}", e),
@@ -437,7 +477,7 @@ fn main() {
     // allow tuning FreeList headroom at CLI startup
     if let Some(i) = args.iter().position(|a| a == "--freelist-headroom") {
         if let Some(v) = args.get(i + 1) {
-            if let Ok(_) = v.parse::<usize>() {
+            if v.parse::<usize>().is_ok() {
                 env::set_var("MOHAWK_FREELIST_HEADROOM", v);
             } else {
                 eprintln!("invalid value for --freelist-headroom: {}", v);
@@ -560,7 +600,7 @@ fn main() {
     }
 
     if let Some(ref addr) = metrics_http {
-        start_metrics_http(&addr);
+        start_metrics_http(addr);
     }
 
     // If any metrics endpoint was requested, keep the process alive so the
@@ -629,20 +669,42 @@ mod tests {
         let mut buf = Vec::new();
         s.read_to_end(&mut buf).ok();
         let resp = String::from_utf8_lossy(&buf);
-        assert!(resp.starts_with("HTTP/1.1 200"), "GET /control returned non-200: {}", resp);
-        assert!(resp.contains("application/json"), "GET /control did not return JSON: {}", resp);
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "GET /control returned non-200: {}",
+            resp
+        );
+        assert!(
+            resp.contains("application/json"),
+            "GET /control did not return JSON: {}",
+            resp
+        );
 
         // POST /control with headroom should accept and return JSON
         let mut s2 = TcpStream::connect(addr).expect("connect POST");
         let body = b"headroom=128";
-        let req = format!("POST /control HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}", body.len(), String::from_utf8_lossy(body));
+        let req = format!(
+            "POST /control HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
         let _ = s2.write_all(req.as_bytes());
         let mut buf2 = Vec::new();
         s2.read_to_end(&mut buf2).ok();
         let resp2 = String::from_utf8_lossy(&buf2);
         // Server may return 200 with JSON or 400 Bad Request when there are
         // no registered sockets; accept either as a sign the endpoint is reachable.
-        assert!(resp2.starts_with("HTTP/1.1 200") || resp2.starts_with("HTTP/1.1 400"), "POST /control returned unexpected status: {}", resp2);
-        assert!(resp2.contains("application/json") || resp2.contains("OK") || resp2.contains("Bad Request"), "POST /control unexpected body: {}", resp2);
+        assert!(
+            resp2.starts_with("HTTP/1.1 200") || resp2.starts_with("HTTP/1.1 400"),
+            "POST /control returned unexpected status: {}",
+            resp2
+        );
+        assert!(
+            resp2.contains("application/json")
+                || resp2.contains("OK")
+                || resp2.contains("Bad Request"),
+            "POST /control unexpected body: {}",
+            resp2
+        );
     }
 }

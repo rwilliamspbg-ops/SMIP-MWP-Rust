@@ -1,0 +1,4 @@
+chaos_benchmark packets_requested=10000 packets_sent=10000 samples=157 payload_len=512 batch_size=64 seed=1337
+fault_injection drop=0 corrupt=0 duplicate=0
+throughput_pkt_s=1240864.29
+latency_ns p50=42018 p99=84668 p99_9=458955

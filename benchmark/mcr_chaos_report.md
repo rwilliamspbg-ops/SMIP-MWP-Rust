@@ -2,7 +2,7 @@
 
 ## 5ch Channel Spraying
 
-- **Median Throughput**: 815135.75 pkt/s
-- **P99 Latency**: 86428.0 ns
+- **Median Throughput**: 926367.11 pkt/s
+- **P99 Latency**: 82373.0 ns
 - **Drop Rate**: 0.00%
 

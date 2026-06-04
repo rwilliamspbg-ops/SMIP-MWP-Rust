@@ -552,13 +552,13 @@ impl Forwarder {
                 prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
                 prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
 
-                return (pkt.clone(), encrypted, route_miss);
+                return (std::mem::take(pkt), encrypted, route_miss);
             } else {
-                return (pkt.clone(), false, true);
+                return (std::mem::take(pkt), false, true);
             }
         }
 
-        (pkt.clone(), false, false)
+        (std::mem::take(pkt), false, false)
     }
 
     fn encrypt_packet_owned(
@@ -961,7 +961,6 @@ impl Forwarder {
     pub fn process_batch_spray_full(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         self.process_batch_mcr(sock)
     }
-
 
     pub fn process_batch_slices(
         &mut self,

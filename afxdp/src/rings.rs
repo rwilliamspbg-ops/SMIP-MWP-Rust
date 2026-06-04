@@ -76,8 +76,10 @@ impl RingMmap {
     }
 
     fn fill_capacity(&self) -> usize {
-        let desc_region_bytes =
-            self.offsets.comp_desc.saturating_sub(self.offsets.fill_desc) as usize;
+        let desc_region_bytes = self
+            .offsets
+            .comp_desc
+            .saturating_sub(self.offsets.fill_desc) as usize;
         (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
     }
 
