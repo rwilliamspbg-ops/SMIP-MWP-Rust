@@ -100,6 +100,10 @@ thread_local! {
     static TLS_CIPHERTEXT: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_capacity(4096));
 }
 
+/// Forwarder manages the high-speed packet processing hot-path.
+/// Configuration options (like `mcr_enabled` and `mcr_spray_mode`) are cached on
+/// initialization inside the struct to completely avoid expensive runtime
+/// `std::env::var` environment lookups during packet processing.
 pub struct Forwarder {
     pub routes: Table,
     session: Option<HybridSession>,
