@@ -109,6 +109,10 @@ pub struct Forwarder {
     mcr_forwarded: AtomicU64,
     /// MCR telemetry: dropped outputs (route misses / encrypt failures)
     mcr_dropped: AtomicU64,
+    /// Cached configuration: MCR enabled status
+    mcr_enabled: bool,
+    /// Cached configuration: MCR spray mode
+    mcr_spray_mode: String,
 }
 
 struct Profiler {
@@ -172,6 +176,8 @@ impl Forwarder {
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
         let session = HybridSession::new(&session_secret, &session_info).ok();
+        let mcr_enabled = mcr_config::get_mcr_enabled();
+        let mcr_spray_mode = mcr_config::get_mcr_spray_mode();
         Self {
             routes,
             session,
@@ -180,6 +186,8 @@ impl Forwarder {
             offsets: Vec::with_capacity(4096),
             mcr_forwarded: AtomicU64::new(0),
             mcr_dropped: AtomicU64::new(0),
+            mcr_enabled,
+            mcr_spray_mode,
         }
     }
 
@@ -662,7 +670,7 @@ impl Forwarder {
 
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         // If MCR is enabled, use the MCR-aware processing path.
-        if mcr_config::get_mcr_enabled() {
+        if self.mcr_enabled {
             return self.process_batch_mcr(sock);
         }
         let frames = sock.poll(64);
@@ -758,9 +766,7 @@ impl Forwarder {
             ..ForwarderStats::default()
         };
 
-        let spray_mode = mcr_config::get_mcr_spray_mode();
-
-        if spray_mode != "full" {
+        if self.mcr_spray_mode != "full" {
             for mut pkt in frames {
                 let (seq_num, payload_len) = if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
