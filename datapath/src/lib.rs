@@ -109,6 +109,8 @@ pub struct Forwarder {
     mcr_forwarded: AtomicU64,
     /// MCR telemetry: dropped outputs (route misses / encrypt failures)
     mcr_dropped: AtomicU64,
+    mcr_enabled: bool,
+    mcr_spray_mode: String,
 }
 
 struct Profiler {
@@ -172,6 +174,8 @@ impl Forwarder {
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
         let session = HybridSession::new(&session_secret, &session_info).ok();
+        let mcr_enabled = mcr_config::get_mcr_enabled();
+        let mcr_spray_mode = mcr_config::get_mcr_spray_mode();
         Self {
             routes,
             session,
@@ -180,6 +184,8 @@ impl Forwarder {
             offsets: Vec::with_capacity(4096),
             mcr_forwarded: AtomicU64::new(0),
             mcr_dropped: AtomicU64::new(0),
+            mcr_enabled,
+            mcr_spray_mode,
         }
     }
 
@@ -662,7 +668,7 @@ impl Forwarder {
 
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         // If MCR is enabled, use the MCR-aware processing path.
-        if mcr_config::get_mcr_enabled() {
+        if self.mcr_enabled {
             return self.process_batch_mcr(sock);
         }
         let frames = sock.poll(64);
@@ -758,7 +764,7 @@ impl Forwarder {
             ..ForwarderStats::default()
         };
 
-        let spray_mode = mcr_config::get_mcr_spray_mode();
+        let spray_mode = &self.mcr_spray_mode;
 
         if spray_mode != "full" {
             for mut pkt in frames {
@@ -863,9 +869,15 @@ impl Forwarder {
                         continue;
                     }
 
-                    for (nh, _is_primary) in channels.iter() {
-                        let mut modified = pkt.clone();
-                        modified[32..64].copy_from_slice(nh);
+                    let mut channels = channels;
+                    if let Some((last_nh, _)) = channels.pop() {
+                        for (nh, _is_primary) in channels {
+                            let mut modified = pkt.clone();
+                            modified[32..64].copy_from_slice(&nh);
+                            duplicated.push((modified, dst_id));
+                        }
+                        let mut modified = pkt;
+                        modified[32..64].copy_from_slice(&last_nh);
                         duplicated.push((modified, dst_id));
                     }
                 } else {
