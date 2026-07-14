@@ -6,6 +6,7 @@ OUT_REPORT=${OUT_REPORT:-benchmark/chaos_report.md}
 PACKETS=${PACKETS:-10000}
 PAYLOAD_LEN=${PAYLOAD_LEN:-512}
 BASELINE_SEED=${BASELINE_SEED:-1337}
+BASELINE_CORE_SET=${BASELINE_CORE_SET:-0-1}
 LOSS_PERCENT=${LOSS_PERCENT:-5}
 CORRUPT_PERCENT=${CORRUPT_PERCENT:-2}
 DUPLICATE_PERCENT=${DUPLICATE_PERCENT:-1}
@@ -19,7 +20,7 @@ mkdir -p $(dirname "$BASELINE_FILE")
 rm -f "$BASELINE_FILE" || true
 
 echo "[ci-chaos] running ideal-mode baseline"
-cargo run --release -p benchmark -- \
+taskset -c "$BASELINE_CORE_SET" cargo run --release -p benchmark -- \
   --packets "$PACKETS" \
   --batch-size 64 \
   --payload-len "$PAYLOAD_LEN" \
@@ -62,8 +63,8 @@ for i in $(seq 1 "$REPS"); do
   # pick worst p99 row from this run and append to combined (preserve CSV)
   tail -n +2 "$tmp" | awk -F',' '{
     for(i=1;i<=NF;i++){gsub(/"/,"",$i)}
-    p=$10+0
-    if(NR==1 || p>best_p){best_p=p; t=$1; cs=$2; packets=$3; payload=$4; loss=$5; corrupt=$6; dup=$7; thr=$8; p50=$9; p99=$10; p999=$11}
+    p=$12+0
+    if(NR==1 || p>best_p){best_p=p; t=$1; cs=$2; packets=$3; payload=$4; loss=$5; corrupt=$6; dup=$7; mcr_channels=$8; spray_mode=$9; thr=$10; p50=$11; p99=$12; p999=$13}
   }END{if(best_p+0>=0)printf("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",t,cs,packets,payload,loss,corrupt,dup,thr,p50,p99,p999)}' >> "$tmp_combined"
   rm -f "$tmp"
 done

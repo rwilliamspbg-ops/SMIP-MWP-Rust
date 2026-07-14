@@ -36,3 +36,11 @@ harness = false
 [[bench]]
 name = "crypto_overhead_bench"
 harness = false
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "datapath_alloc_probe"
+path = "src/bin/datapath_alloc_probe.rs"

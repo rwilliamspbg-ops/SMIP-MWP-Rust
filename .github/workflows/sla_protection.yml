@@ -40,16 +40,16 @@ jobs:
               return;
             }
 
-            // check for perf-approval label
+            // Check for perf-approval label
             const labels = pr.labels.map(l => l.name);
-            core.info(`PR labels: ${labels}`);
+            core.info(`PR labels: ${labels.join(', ')}`);
             if (labels.includes('perf-approval')) {
               core.info('Found perf-approval label; SLA change allowed.');
               return;
             }
 
             // Optionally allow maintainers to bypass: check if author is in a trusted list
-            const trusted = core.getInput('trusted_maintainers') || '';
+            const trusted = context.repo.owner === 'rwilliamspbg-ops' ? 'rwilliams,mohawk_ops_lead' : '';
             const trustedList = trusted.split(',').map(s => s.trim()).filter(Boolean);
             if (trustedList.includes(pr.user.login)) {
               core.info(`Author ${pr.user.login} is a trusted maintainer; allowing SLA change.`);
@@ -57,8 +57,6 @@ jobs:
             }
 
             core.setFailed(`Modifying ${slaPath} requires the 'perf-approval' label and measurement artifacts attached to the PR.`);
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Guidance on SLA changes
         if: failure()

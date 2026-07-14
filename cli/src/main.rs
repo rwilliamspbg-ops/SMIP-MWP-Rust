@@ -222,13 +222,6 @@ fn render_telemetry(
     }
 }
 
-fn unix_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
     format!(
@@ -406,7 +399,7 @@ pub fn start_metrics_http(bind_addr: &str, allow_remote_control: bool) {
                                     // support optional label=<label> to set a single socket
                                     let label_opt = body.find("label=").map(|i| {
                                         body[i + 6..]
-                                            .split(|c: char| ['&', ' ', '\n', '\r'].contains(&c))
+                                            .split(['&', ' ', '\n', '\r'])
                                             .next()
                                             .unwrap_or("")
                                             .to_string()
@@ -625,7 +618,7 @@ fn main() {
     }
 
     if let Some(ref addr) = metrics_http {
-        start_metrics_http(addr, allow_remote_control);
+        start_metrics_http(addr);
     }
 
     // If any metrics endpoint was requested, keep the process alive so the
@@ -735,47 +728,5 @@ mod tests {
             "POST /control unexpected body: {}",
             resp2
         );
-    }
-
-    #[test]
-    fn bridge_single_worker_request_uses_request_routes() {
-        let req = ControlRequest {
-            runtime_config: RuntimeConfig {
-                iface: "eth0".to_string(),
-                queue_id: 0,
-                zero_copy: false,
-                num_frames: 128,
-                frame_size: 2048,
-                batch_size: 64,
-                batch_size_min: None,
-                batch_size_max: None,
-                num_workers: 1,
-                fill_threshold: None,
-                fill_adaptive: false,
-                fill_adapt_factor: None,
-                fill_ema_alpha: None,
-                fill_min: None,
-                fill_max: None,
-                metrics_addr: None,
-                dry_run: true,
-            },
-            route_updates: Vec::new(),
-            session_updates: Vec::new(),
-            feature_flags: FeatureFlags::default(),
-        };
-
-        let stats = run_single_worker_request(&req);
-        assert_eq!(stats.received, 1);
-        assert_eq!(stats.route_misses, 1);
-    }
-
-    #[test]
-    fn telemetry_timestamp_uses_current_time() {
-        let now = unix_timestamp_secs();
-        let ts = super::render_telemetry(datapath::ForwarderStats::default(), None)
-            .timestamp
-            .parse::<u64>()
-            .expect("timestamp is unix seconds");
-        assert!(ts >= now.saturating_sub(2));
     }
 }

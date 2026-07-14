@@ -76,22 +76,18 @@ struct CacheEntry {
     next_hop: [u8; 32],
 }
 
-thread_local! {
-    #[allow(clippy::missing_const_for_thread_local)]
-    static HOT_CACHE: RefCell<[Option<CacheEntry>; HOT_CACHE_SIZE]> = RefCell::new([None; HOT_CACHE_SIZE]);
-    #[allow(clippy::missing_const_for_thread_local)]
-    static HOT_CACHE_LAST: RefCell<Option<CacheEntry>> = RefCell::new(None);
-    #[allow(clippy::missing_const_for_thread_local)]
-    static HOT_CACHE_NEXT: RefCell<usize> = RefCell::new(0);
+struct ThreadCache {
+    last: Option<CacheEntry>,
+    ring: [Option<CacheEntry>; HOT_CACHE_SIZE],
+    next_idx: usize,
 }
 
-fn cache_next_idx() -> usize {
-    HOT_CACHE_NEXT.with(|n| {
-        let mut v = n.borrow_mut();
-        let idx = *v;
-        *v = (*v + 1) % HOT_CACHE_SIZE;
-        idx
-    })
+thread_local! {
+    static THREAD_CACHE: RefCell<ThreadCache> = RefCell::new(ThreadCache {
+        last: None,
+        ring: [None; HOT_CACHE_SIZE],
+        next_idx: 0,
+    });
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
@@ -164,14 +160,12 @@ impl Table {
             next_hop,
         };
 
-        HOT_CACHE_LAST.with(|slot| {
-            *slot.borrow_mut() = Some(entry);
-        });
-
-        HOT_CACHE.with(|c| {
+        THREAD_CACHE.with(|c| {
             let mut cache = c.borrow_mut();
-            let idx = cache_next_idx();
-            cache[idx] = Some(entry);
+            cache.last = Some(entry);
+            let idx = cache.next_idx;
+            cache.ring[idx] = Some(entry);
+            cache.next_idx = (idx + 1) % HOT_CACHE_SIZE;
         });
     }
 
@@ -179,7 +173,6 @@ impl Table {
     pub fn inc_channel_forwarded(&self, dest_id: [u8; 32], next_hop: [u8; 32]) {
         let mut stats = self.mcr_channel_stats.write();
         let entry = stats.entry(dest_id).or_default();
-        use std::sync::atomic::Ordering;
         if let Some(counter) = entry.per_channel_forwarded.get(&next_hop) {
             counter.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -297,8 +290,8 @@ impl Table {
                 let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
                 out.swap(0, idx);
                 // mark primary accordingly
-                for (i, channel) in out.iter_mut().enumerate() {
-                    channel.1 = i == 0;
+                for (i, (_, is_primary)) in out.iter_mut().enumerate() {
+                    *is_primary = i == 0;
                 }
             }
             return out;
@@ -362,20 +355,14 @@ impl Table {
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        if let Some(v) = HOT_CACHE_LAST.with(|slot| {
-            slot.borrow().as_ref().and_then(|ent| {
-                if ent.epoch == cur_epoch && ent.dest_id == dst_id {
-                    Some(ent.next_hop)
-                } else {
-                    None
-                }
-            })
-        }) {
-            return Some(v);
-        }
-        if let Some(v) = HOT_CACHE.with(|c| {
+        if let Some(v) = THREAD_CACHE.with(|c| {
             let cache = c.borrow();
-            for ent in cache.iter().flatten() {
+            if let Some(ref ent) = cache.last {
+                if ent.epoch == cur_epoch && ent.dest_id == dst_id {
+                    return Some(ent.next_hop);
+                }
+            }
+            for ent in cache.ring.iter().flatten() {
                 if ent.epoch == cur_epoch && ent.dest_id == dst_id {
                     return Some(ent.next_hop);
                 }

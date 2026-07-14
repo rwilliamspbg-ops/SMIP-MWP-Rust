@@ -100,6 +100,10 @@ thread_local! {
     static TLS_CIPHERTEXT: RefCell<AlignedBuffer> = RefCell::new(AlignedBuffer::with_capacity(4096));
 }
 
+/// Forwarder manages the high-speed packet processing hot-path.
+/// Configuration options (like `mcr_enabled` and `mcr_spray_mode`) are cached on
+/// initialization inside the struct to completely avoid expensive runtime
+/// `std::env::var` environment lookups during packet processing.
 pub struct Forwarder {
     pub routes: Table,
     session: Option<HybridSession>,
@@ -109,6 +113,8 @@ pub struct Forwarder {
     mcr_forwarded: AtomicU64,
     /// MCR telemetry: dropped outputs (route misses / encrypt failures)
     mcr_dropped: AtomicU64,
+    mcr_enabled: bool,
+    mcr_spray_mode: String,
 }
 
 struct Profiler {
@@ -172,6 +178,8 @@ impl Forwarder {
 
     pub fn with_session(routes: Table, session_secret: Vec<u8>, session_info: Vec<u8>) -> Self {
         let session = HybridSession::new(&session_secret, &session_info).ok();
+        let mcr_enabled = mcr_config::get_mcr_enabled();
+        let mcr_spray_mode = mcr_config::get_mcr_spray_mode();
         Self {
             routes,
             session,
@@ -180,6 +188,8 @@ impl Forwarder {
             offsets: Vec::with_capacity(4096),
             mcr_forwarded: AtomicU64::new(0),
             mcr_dropped: AtomicU64::new(0),
+            mcr_enabled,
+            mcr_spray_mode,
         }
     }
 
@@ -552,13 +562,13 @@ impl Forwarder {
                 prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
                 prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
 
-                return (pkt.clone(), encrypted, route_miss);
+                return (std::mem::take(pkt), encrypted, route_miss);
             } else {
-                return (pkt.clone(), false, true);
+                return (std::mem::take(pkt), false, true);
             }
         }
 
-        (pkt.clone(), false, false)
+        (std::mem::take(pkt), false, false)
     }
 
     fn encrypt_packet_owned(
@@ -662,7 +672,7 @@ impl Forwarder {
 
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         // If MCR is enabled, use the MCR-aware processing path.
-        if mcr_config::get_mcr_enabled() {
+        if self.mcr_enabled {
             return self.process_batch_mcr(sock);
         }
         let frames = sock.poll(64);
@@ -758,7 +768,7 @@ impl Forwarder {
             ..ForwarderStats::default()
         };
 
-        let spray_mode = mcr_config::get_mcr_spray_mode();
+        let spray_mode = &self.mcr_spray_mode;
 
         if spray_mode != "full" {
             for mut pkt in frames {
@@ -863,9 +873,15 @@ impl Forwarder {
                         continue;
                     }
 
-                    for (nh, _is_primary) in channels.iter() {
-                        let mut modified = pkt.clone();
-                        modified[32..64].copy_from_slice(nh);
+                    let mut channels = channels;
+                    if let Some((last_nh, _)) = channels.pop() {
+                        for (nh, _is_primary) in channels {
+                            let mut modified = pkt.clone();
+                            modified[32..64].copy_from_slice(&nh);
+                            duplicated.push((modified, dst_id));
+                        }
+                        let mut modified = pkt;
+                        modified[32..64].copy_from_slice(&last_nh);
                         duplicated.push((modified, dst_id));
                     }
                 } else {
@@ -955,11 +971,11 @@ impl Forwarder {
         stats
     }
 
-    /// Full-spray mode: duplicate to all channels. Currently a stub that
-    /// behaves like the normal path until spray is implemented.
+    /// Full-spray mode: duplicate to all MCR channels per-packet.
+    /// Uses lookup_spray() to get primary+alternate next-hops, then processes
+    /// each channel's copy in parallel (when batch threshold met) or serially.
     pub fn process_batch_spray_full(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
-        // TODO: build outputs for all channels per-packet
-        self.process_batch(sock)
+        self.process_batch_mcr(sock)
     }
 
     pub fn process_batch_slices(
