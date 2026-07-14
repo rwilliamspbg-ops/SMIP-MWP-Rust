@@ -197,7 +197,7 @@ impl HybridSession {
 
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
         let mut nonce = self.nonce_base;
-        let existing = u64::from_be_bytes(nonce[4..12].try_into().unwrap());
+        let existing = u64::from_be_bytes(self.nonce_base[4..12].try_into().unwrap());
         let mixed = existing ^ seq ^ self.seq_mask;
         nonce[4..12].copy_from_slice(&mixed.to_be_bytes());
         nonce
