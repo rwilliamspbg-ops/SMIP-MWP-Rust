@@ -113,9 +113,7 @@ pub struct Forwarder {
     mcr_forwarded: AtomicU64,
     /// MCR telemetry: dropped outputs (route misses / encrypt failures)
     mcr_dropped: AtomicU64,
-    /// Cached configuration: MCR enabled status
     mcr_enabled: bool,
-    /// Cached configuration: MCR spray mode
     mcr_spray_mode: String,
 }
 
@@ -770,7 +768,9 @@ impl Forwarder {
             ..ForwarderStats::default()
         };
 
-        if self.mcr_spray_mode != "full" {
+        let spray_mode = &self.mcr_spray_mode;
+
+        if spray_mode != "full" {
             for mut pkt in frames {
                 let (seq_num, payload_len) = if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
@@ -873,9 +873,15 @@ impl Forwarder {
                         continue;
                     }
 
-                    for (nh, _is_primary) in channels.iter() {
-                        let mut modified = pkt.clone();
-                        modified[32..64].copy_from_slice(nh);
+                    let mut channels = channels;
+                    if let Some((last_nh, _)) = channels.pop() {
+                        for (nh, _is_primary) in channels {
+                            let mut modified = pkt.clone();
+                            modified[32..64].copy_from_slice(&nh);
+                            duplicated.push((modified, dst_id));
+                        }
+                        let mut modified = pkt;
+                        modified[32..64].copy_from_slice(&last_nh);
                         duplicated.push((modified, dst_id));
                     }
                 } else {
