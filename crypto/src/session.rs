@@ -172,33 +172,36 @@ pub fn prederive_session(combined_secret: &[u8], session_info: &[u8]) -> Result<
 pub struct HybridSession {
     aead: SessionAead,
     nonce_base: [u8; NONCE_SIZE],
-    seq_mask: u64,
+    nonce_xor: u64,
 }
 
 impl HybridSession {
     pub fn new(combined_secret: &[u8], session_info: &[u8]) -> Result<Self, SessionError> {
         let cache_key = derive_cache_key(combined_secret, session_info);
         if let Some(entry) = HKDF_CACHE.read().get(&cache_key).cloned() {
+            let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
+            let nonce_xor = existing ^ entry.seq_mask;
             return Ok(Self {
                 aead: SessionAead::new(&entry.key)?,
                 nonce_base: entry.nonce_base,
-                seq_mask: entry.seq_mask,
+                nonce_xor,
             });
         }
         let entry = derive_session_material(combined_secret, session_info)?;
         let aead = SessionAead::new(&entry.key)?;
         HKDF_CACHE.write().insert(cache_key, entry.clone());
+        let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
+        let nonce_xor = existing ^ entry.seq_mask;
         Ok(Self {
             aead,
             nonce_base: entry.nonce_base,
-            seq_mask: entry.seq_mask,
+            nonce_xor,
         })
     }
 
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
         let mut nonce = self.nonce_base;
-        let existing = u64::from_be_bytes(self.nonce_base[4..12].try_into().unwrap());
-        let mixed = existing ^ seq ^ self.seq_mask;
+        let mixed = self.nonce_xor ^ seq;
         nonce[4..12].copy_from_slice(&mixed.to_be_bytes());
         nonce
     }
