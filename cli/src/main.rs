@@ -160,6 +160,12 @@ fn run_pinned_workers(request: &ControlRequest) -> datapath::ForwarderStats {
         })
 }
 
+fn run_single_worker_request(request: &ControlRequest) -> datapath::ForwarderStats {
+    let mut forwarder = build_forwarder_from_request(request);
+    let mut sock = build_socket(vec![demo_packet()]);
+    forwarder.process_batch(&mut *sock)
+}
+
 fn read_bridge_request(args: &[String]) -> Result<Option<ControlRequest>, String> {
     if let Some(index) = args.iter().position(|arg| arg == "--bridge-request") {
         let path = args
@@ -178,6 +184,13 @@ fn read_bridge_request(args: &[String]) -> Result<Option<ControlRequest>, String
     }
 
     Ok(None)
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn render_telemetry(
@@ -212,7 +225,7 @@ fn render_telemetry(
             worker_count: Some(worker_count),
         }),
         last_error: None,
-        timestamp: "2026-05-24T00:00:00Z".to_string(),
+        timestamp: unix_timestamp_secs().to_string(),
     }
 }
 
@@ -233,7 +246,7 @@ fn render_prometheus_metrics(count: u64, timestamp: u64) -> String {
 
 /// Start metrics and control HTTP server on `bind_addr`.
 /// This spawns background threads and returns immediately.
-pub fn start_metrics_http(bind_addr: &str) {
+pub fn start_metrics_http(bind_addr: &str, allow_remote_control: bool) {
     let bind_addr = bind_addr.to_string();
     // Setup a prometheus registry and gauges for AF_XDP counters
     let registry = prometheus::Registry::new();
@@ -371,6 +384,16 @@ pub fn start_metrics_http(bind_addr: &str) {
                             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", body_json.len(), body_json);
                             let _ = s.write_all(resp.as_bytes());
                         } else if req.starts_with("POST /control") {
+                            let peer_addr = s.peer_addr().ok();
+                            let peer_is_loopback = peer_addr
+                                .map(|addr| addr.ip().is_loopback())
+                                .unwrap_or(false);
+                            if !allow_remote_control && !peer_is_loopback {
+                                let _ = s.write_all(
+                                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 37\r\n\r\nremote control disabled for non-loopback",
+                                );
+                                continue;
+                            }
                             // simple control endpoint: body contains `headroom=<n>`
                             let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
                             if let Some(eq) = body.find("headroom=") {
@@ -499,10 +522,12 @@ fn main() {
         .position(|a| a == "--metrics-http")
         .and_then(|i| args.get(i + 1))
         .cloned();
+    let allow_remote_control = parse_flag(&args, "--allow-remote-control");
     if parse_flag(&args, "--help") || parse_flag(&args, "-h") {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
         println!("  --bridge-request <path>  run the bridge demo from a JSON control payload");
+        println!("  --allow-remote-control  allow POST /control from non-loopback clients");
         println!("  --help   show this message");
         return;
     }
@@ -524,7 +549,7 @@ fn main() {
         let stats = if request.runtime_config.num_workers > 1 {
             run_pinned_workers(request)
         } else {
-            run_demo()
+            run_single_worker_request(request)
         };
         let telemetry = render_telemetry(stats, Some(request));
         println!(
@@ -600,7 +625,7 @@ fn main() {
     }
 
     if let Some(ref addr) = metrics_http {
-        start_metrics_http(addr);
+        start_metrics_http(addr, allow_remote_control);
     }
 
     // If any metrics endpoint was requested, keep the process alive so the
@@ -619,6 +644,7 @@ fn main() {
         println!("mohawk-node (Rust rewrite)");
         println!("  --demo   run the in-process forwarding demo");
         println!("  --bridge-request <path>  run the bridge demo from a JSON control payload");
+        println!("  --allow-remote-control  allow POST /control from non-loopback clients");
         println!("  --help   show this message");
         return;
     }
@@ -658,7 +684,7 @@ mod tests {
         drop(listener);
 
         // Start server on selected addr
-        start_metrics_http(&format!("{}", addr));
+        start_metrics_http(&format!("{}", addr), false);
 
         // give the server a short moment to start
         std::thread::sleep(Duration::from_millis(50));

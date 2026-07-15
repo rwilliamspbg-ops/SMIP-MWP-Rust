@@ -1,0 +1,7 @@
+Creating package in /tmp/tmp.xzEQZam6ks
+Adding binary bench
+Adding binary benchmark
+Adding binary datapath_alloc_probe
+Adding binary mohawk-node
+dpkg-deb: building package 'smip-mwp' in 'dist/smip-mwp_0.0.0-test_arm64.deb'.
+Created dist/smip-mwp_0.0.0-test_arm64.deb

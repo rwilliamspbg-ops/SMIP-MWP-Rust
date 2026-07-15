@@ -81,6 +81,15 @@ When running local smoke or chaos benchmarks that affect CI baselines, prefer th
 - License: AGPL-3.0
 - Rust toolchain: pinned via `rust-toolchain.toml` (workspace uses the Rust stable toolchain)
 
+**Supported Platforms**
+
+- Linux x86_64 (amd64)
+- Linux aarch64 (arm64)
+
+CI builds for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. Multi-arch container images are built and published to GitHub Container Registry via CI.
+
+Badges: ![amd64](https://img.shields.io/badge/platform-amd64-blue) ![arm64](https://img.shields.io/badge/platform-arm64-green)
+
 ## Repository Layout
 
 - `crypto/` - key exchange, session derivation, and AEAD helpers
