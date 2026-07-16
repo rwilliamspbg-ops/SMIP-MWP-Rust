@@ -12,7 +12,6 @@ use std::thread_local;
 /// Application-level processed packet counter (samples per-second externally)
 pub static PACKETS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 use routing::Table;
-use std::convert::TryInto;
 use wire::{HeaderViewRef, HEADER_SIZE};
 mod mcr_config;
 
@@ -269,8 +268,8 @@ impl Forwarder {
         let mut forwarded = false;
 
         if let Ok(h) = HeaderViewRef::new(pkt) {
-            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
-            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let src_id: [u8; 32] = *h.src_id();
+            let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -405,8 +404,8 @@ impl Forwarder {
         _use_avx2: bool,
     ) -> PacketOutput {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
-            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
-            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let src_id: [u8; 32] = *h.src_id();
+            let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -450,8 +449,8 @@ impl Forwarder {
         _use_avx2: bool,
     ) -> (Vec<u8>, bool, bool) {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
-            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
-            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let src_id: [u8; 32] = *h.src_id();
+            let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -515,8 +514,8 @@ impl Forwarder {
         _use_avx2: bool,
     ) -> (Vec<u8>, bool, bool) {
         if let Ok(h) = HeaderViewRef::new(pkt) {
-            let src_id: [u8; 32] = h.src_id().try_into().unwrap();
-            let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+            let src_id: [u8; 32] = *h.src_id();
+            let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -773,7 +772,7 @@ impl Forwarder {
         if spray_mode != "full" {
             for mut pkt in frames {
                 let (seq_num, payload_len) = if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                    let dst_id: [u8; 32] = *h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
                     let payload_len = h.length() as usize;
@@ -864,7 +863,7 @@ impl Forwarder {
             let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let dst_id: [u8; 32] = h.dst_id().try_into().unwrap();
+                    let dst_id: [u8; 32] = *h.dst_id();
                     let flow_label = h.flow_label();
 
                     let channels = self.routes.lookup_spray(dst_id, flow_label);
