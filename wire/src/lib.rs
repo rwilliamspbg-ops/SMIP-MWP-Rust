@@ -100,12 +100,12 @@ impl<'a> HeaderViewRef<'a> {
         Ok(Self { buf })
     }
     #[inline]
-    pub fn src_id(&self) -> &[u8] {
-        &self.buf[SRC_OFFSET..SRC_OFFSET + 32]
+    pub fn src_id(&self) -> &[u8; 32] {
+        self.buf[SRC_OFFSET..SRC_OFFSET + 32].try_into().unwrap()
     }
     #[inline]
-    pub fn dst_id(&self) -> &[u8] {
-        &self.buf[DST_OFFSET..DST_OFFSET + 32]
+    pub fn dst_id(&self) -> &[u8; 32] {
+        self.buf[DST_OFFSET..DST_OFFSET + 32].try_into().unwrap()
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
@@ -132,11 +132,11 @@ impl<'a> HeaderView<'a> {
         }
         Ok(Self { buf })
     }
-    pub fn src_id(&self) -> &[u8] {
-        &self.buf[SRC_OFFSET..SRC_OFFSET + 32]
+    pub fn src_id(&self) -> &[u8; 32] {
+        self.buf[SRC_OFFSET..SRC_OFFSET + 32].try_into().unwrap()
     }
-    pub fn dst_id(&self) -> &[u8] {
-        &self.buf[DST_OFFSET..DST_OFFSET + 32]
+    pub fn dst_id(&self) -> &[u8; 32] {
+        self.buf[DST_OFFSET..DST_OFFSET + 32].try_into().unwrap()
     }
     pub fn flow_label(&self) -> u32 {
         u32::from_be_bytes(self.buf[FLOW_OFFSET..FLOW_OFFSET + 4].try_into().unwrap())

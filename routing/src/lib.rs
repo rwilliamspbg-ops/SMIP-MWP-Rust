@@ -76,18 +76,20 @@ struct CacheEntry {
     next_hop: [u8; 32],
 }
 
+const EMPTY_ENTRY: CacheEntry = CacheEntry {
+    epoch: 0,
+    dest_id: [0; 32],
+    next_hop: [0; 32],
+};
+
 struct ThreadCache {
-    last: Option<CacheEntry>,
-    ring: [Option<CacheEntry>; HOT_CACHE_SIZE],
-    next_idx: usize,
+    slots: [CacheEntry; HOT_CACHE_SIZE],
 }
 
 thread_local! {
-    static THREAD_CACHE: RefCell<ThreadCache> = RefCell::new(ThreadCache {
-        last: None,
-        ring: [None; HOT_CACHE_SIZE],
-        next_idx: 0,
-    });
+    static THREAD_CACHE: RefCell<ThreadCache> = const { RefCell::new(ThreadCache {
+        slots: [EMPTY_ENTRY; HOT_CACHE_SIZE],
+    }) };
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
@@ -153,6 +155,16 @@ impl Table {
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
 
+    #[inline]
+    fn cache_index(dest_id: &[u8; 32]) -> usize {
+        let mut h = 0u32;
+        for i in 0..8 {
+            let val = u32::from_ne_bytes(dest_id[i * 4..(i + 1) * 4].try_into().unwrap());
+            h ^= val;
+        }
+        (h as usize) % HOT_CACHE_SIZE
+    }
+
     fn cache_hot_entry(cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
         let entry = CacheEntry {
             epoch: cur_epoch,
@@ -160,12 +172,10 @@ impl Table {
             next_hop,
         };
 
+        let idx = Self::cache_index(&dest_id);
         THREAD_CACHE.with(|c| {
             let mut cache = c.borrow_mut();
-            cache.last = Some(entry);
-            let idx = cache.next_idx;
-            cache.ring[idx] = Some(entry);
-            cache.next_idx = (idx + 1) % HOT_CACHE_SIZE;
+            cache.slots[idx] = entry;
         });
     }
 
@@ -355,19 +365,15 @@ impl Table {
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
+        let idx = Self::cache_index(&dst_id);
         if let Some(v) = THREAD_CACHE.with(|c| {
             let cache = c.borrow();
-            if let Some(ref ent) = cache.last {
-                if ent.epoch == cur_epoch && ent.dest_id == dst_id {
-                    return Some(ent.next_hop);
-                }
+            let ent = &cache.slots[idx];
+            if ent.epoch == cur_epoch && ent.dest_id == dst_id {
+                Some(ent.next_hop)
+            } else {
+                None
             }
-            for ent in cache.ring.iter().flatten() {
-                if ent.epoch == cur_epoch && ent.dest_id == dst_id {
-                    return Some(ent.next_hop);
-                }
-            }
-            None
         }) {
             return Some(v);
         }
