@@ -770,8 +770,8 @@ impl Forwarder {
         let spray_mode = &self.mcr_spray_mode;
 
         if spray_mode != "full" {
-            for mut pkt in frames {
-                let (seq_num, payload_len) = if let Ok(h) = HeaderViewRef::new(&pkt) {
+            for pkt in frames {
+                if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id: [u8; 32] = *h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
@@ -795,65 +795,87 @@ impl Forwarder {
                         }
                     };
 
-                    pkt[32..64].copy_from_slice(&next_hop);
-                    (seq_num, payload_len)
+                    let start = self.arena.len();
+                    let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                    let remaining = self.arena.capacity().saturating_sub(self.arena.len());
+                    if remaining < needed {
+                        self.arena.reserve(needed - remaining);
+                    }
+
+                    // Copy header directly into the arena
+                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                    // Overwrite next_hop field directly in the arena
+                    self.arena.as_mut_slice()[start + 32..start + 64].copy_from_slice(&next_hop);
+
+                    let mut was_encrypted = false;
+                    let mut was_route_miss = false;
+
+                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                        let payload_start = self.arena.len();
+                        self.arena
+                            .extend_from_slice(&pkt[HEADER_SIZE..HEADER_SIZE + payload_len]);
+
+                        if let Some(session) = session_ref {
+                            let enc_start = std::time::Instant::now();
+                            match session.encrypt_into_slice(
+                                &mut self.arena.as_mut_slice()
+                                    [payload_start..payload_start + payload_len],
+                                seq_num,
+                            ) {
+                                Ok(tag) => {
+                                    let enc_ns = enc_start.elapsed().as_nanos();
+                                    let prof = global_profiler();
+                                    prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
+                                    prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+
+                                    self.arena.extend_from_slice(tag.as_slice());
+                                    if pkt.len() > HEADER_SIZE + payload_len {
+                                        self.arena
+                                            .extend_from_slice(&pkt[HEADER_SIZE + payload_len..]);
+                                    }
+                                    was_encrypted = true;
+                                }
+                                Err(SessionError::AuthenticationFailed)
+                                | Err(SessionError::PayloadTooLarge)
+                                | Err(SessionError::CiphertextTooShort)
+                                | Err(SessionError::AeadError)
+                                | Err(SessionError::BufferTooSmall)
+                                | Err(SessionError::InsufficientCapacity) => {
+                                    was_route_miss = true;
+                                }
+                            }
+                        }
+                    } else if payload_len > 0 {
+                        was_route_miss = true;
+                    }
+
+                    if was_route_miss {
+                        self.arena.truncate(start);
+                        stats.route_misses += 1;
+
+                        let f_start = self.arena.len();
+                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                        self.arena.as_mut_slice()[f_start + 32..f_start + 64]
+                            .copy_from_slice(&next_hop);
+                        self.arena.extend_from_slice(&pkt[HEADER_SIZE..]);
+                        let len = self.arena.len() - f_start;
+                        self.offsets.push((f_start, len));
+                        stats.forwarded += 1;
+                    } else {
+                        let len = self.arena.len() - start;
+                        self.offsets.push((start, len));
+                        if was_encrypted {
+                            stats.encrypted += 1;
+                        } else {
+                            stats.forwarded += 1;
+                        }
+                    }
                 } else {
                     let start = self.arena.len();
                     self.arena.extend_from_slice(&pkt);
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     stats.forwarded += 1;
-                    stats.route_misses += 1;
-                    continue;
-                };
-
-                // Inline encryption into the arena to avoid allocating per-packet Vecs.
-                let enc_start = std::time::Instant::now();
-                let mut was_encrypted = false;
-                let mut was_route_miss = false;
-                if let Some(session) = session_ref {
-                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
-                        if pkt.len() < target_len {
-                            pkt.resize(target_len, 0);
-                        }
-                        match session.encrypt_into_slice(
-                            &mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len],
-                            seq_num,
-                        ) {
-                            Ok(tag) => {
-                                pkt[HEADER_SIZE + payload_len..target_len]
-                                    .copy_from_slice(tag.as_slice());
-                                was_encrypted = true;
-                            }
-                            Err(SessionError::AuthenticationFailed)
-                            | Err(SessionError::PayloadTooLarge)
-                            | Err(SessionError::CiphertextTooShort)
-                            | Err(SessionError::AeadError)
-                            | Err(SessionError::BufferTooSmall)
-                            | Err(SessionError::InsufficientCapacity) => {
-                                was_route_miss = true;
-                            }
-                        }
-                    } else if payload_len > 0 {
-                        was_route_miss = true;
-                    }
-                }
-                let enc_ns = enc_start.elapsed().as_nanos();
-                let prof = global_profiler();
-                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
-
-                let start = self.arena.len();
-                self.arena.extend_from_slice(&pkt);
-                let len = self.arena.len() - start;
-                self.offsets.push((start, len));
-                if was_encrypted {
-                    stats.encrypted += 1;
-                } else {
-                    stats.forwarded += 1;
-                }
-                if was_route_miss {
                     stats.route_misses += 1;
                 }
             }
