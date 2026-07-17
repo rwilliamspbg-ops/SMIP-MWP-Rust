@@ -157,12 +157,13 @@ impl Table {
 
     #[inline]
     fn cache_index(dest_id: &[u8; 32]) -> usize {
-        let mut h = 0u32;
-        for i in 0..8 {
-            let val = u32::from_ne_bytes(dest_id[i * 4..(i + 1) * 4].try_into().unwrap());
-            h ^= val;
-        }
-        (h as usize) % HOT_CACHE_SIZE
+        let mut h = 0u64;
+        h ^= u64::from_ne_bytes(dest_id[0..8].try_into().unwrap());
+        h ^= u64::from_ne_bytes(dest_id[8..16].try_into().unwrap());
+        h ^= u64::from_ne_bytes(dest_id[16..24].try_into().unwrap());
+        h ^= u64::from_ne_bytes(dest_id[24..32].try_into().unwrap());
+        let folded = (h ^ (h >> 32)) as usize;
+        folded & (HOT_CACHE_SIZE - 1)
     }
 
     fn cache_hot_entry(cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
@@ -380,11 +381,13 @@ impl Table {
 
         // Fast-path shard lookup
         let shard = Self::shard_for(&dst_id);
-        {
+        let nh_opt = {
             let map = self.fast_shards[shard].read();
-            if let Some(e) = map.get(&dst_id) {
-                return Some(e.next_hop_id);
-            }
+            map.get(&dst_id).map(|e| e.next_hop_id)
+        };
+        if let Some(nh) = nh_opt {
+            Self::cache_hot_entry(cur_epoch, dst_id, nh);
+            return Some(nh);
         }
 
         // Miss -> try fast-path already checked; fall back to main table under read lock and populate cache using multiple-probe insertion

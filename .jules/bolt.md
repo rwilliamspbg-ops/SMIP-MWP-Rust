@@ -11,3 +11,7 @@
 ## 2024-11-20 - [Optimize TLS Lookup via Direct-Mapped Cache & Array Reference Getters]
 **Learning:** Sequential searches over a ring-buffer in thread-local storage (`THREAD_CACHE`) introduce non-trivial branch/loop overhead in high-throughput routing. Returning dynamically sized slices (`&[u8]`) for fixed-size fields causes redundant conversions/copies (`try_into().unwrap()`).
 **Action:** Use a fast XOR-based direct-mapped cache for Thread-Local Storage lookups and return fixed-size array references (`&[u8; 32]`) for fixed-length packet fields.
+
+## 2024-11-21 - [Fast Cache Index Folding and In-Place Arena Processing]
+**Learning:** Performing a 32-bit loop-based XOR hash and a modulo operator (`%`) in the hot routing cache mapping path introduces minor but measurable ALU overhead. Also, recreating and resizing temporary `Vec<u8>` buffers per packet in `process_batch_mcr`'s primary path causes substantial dynamic memory allocation overhead.
+**Action:** Replace the 32-bit loop with optimized 64-bit folding and use a bitwise AND mask (`& (HOT_CACHE_SIZE - 1)`) for O(1) index mapping. Process and encrypt packets directly inside the pre-allocated `self.arena` buffer to completely eliminate per-packet dynamic allocations.
