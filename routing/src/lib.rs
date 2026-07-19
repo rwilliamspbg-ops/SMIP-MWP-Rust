@@ -1,6 +1,6 @@
 use ahash::{AHashMap, AHasher};
 use parking_lot::RwLock;
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -83,13 +83,30 @@ const EMPTY_ENTRY: CacheEntry = CacheEntry {
 };
 
 struct ThreadCache {
-    slots: [CacheEntry; HOT_CACHE_SIZE],
+    slots: [Cell<CacheEntry>; HOT_CACHE_SIZE],
 }
 
 thread_local! {
-    static THREAD_CACHE: RefCell<ThreadCache> = const { RefCell::new(ThreadCache {
-        slots: [EMPTY_ENTRY; HOT_CACHE_SIZE],
-    }) };
+    static THREAD_CACHE: ThreadCache = const { ThreadCache {
+        slots: [
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+            Cell::new(EMPTY_ENTRY),
+        ],
+    } };
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
@@ -175,8 +192,7 @@ impl Table {
 
         let idx = Self::cache_index(&dest_id);
         THREAD_CACHE.with(|c| {
-            let mut cache = c.borrow_mut();
-            cache.slots[idx] = entry;
+            c.slots[idx].set(entry);
         });
     }
 
@@ -368,8 +384,7 @@ impl Table {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
         let idx = Self::cache_index(&dst_id);
         if let Some(v) = THREAD_CACHE.with(|c| {
-            let cache = c.borrow();
-            let ent = &cache.slots[idx];
+            let ent = c.slots[idx].get();
             if ent.epoch == cur_epoch && ent.dest_id == dst_id {
                 Some(ent.next_hop)
             } else {
