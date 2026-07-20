@@ -3,7 +3,7 @@ use parking_lot::RwLock;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -112,11 +112,13 @@ thread_local! {
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
 /// predictive routing. AHasher replaces the previous SipHash-backed default
 /// hasher, reducing per-miss cost on the trusted datapath hot path.
+/// We call `Hasher::write` and `Hasher::write_u32` directly to avoid slice-length
+/// hashing and generic iterator dispatch overhead on the hot path.
 fn fast_flow_hash(src_id: &[u8; 32], dst_id: &[u8; 32], flow_label: u32) -> u64 {
     let mut h = AHasher::default();
-    src_id.hash(&mut h);
-    dst_id.hash(&mut h);
-    flow_label.hash(&mut h);
+    h.write(src_id);
+    h.write(dst_id);
+    h.write_u32(flow_label);
     h.finish()
 }
 
@@ -139,7 +141,7 @@ impl Table {
 
     fn shard_for(key: &[u8; 32]) -> usize {
         let mut h = AHasher::default();
-        key.hash(&mut h);
+        h.write(key);
         (h.finish() as usize) % FAST_SHARDS
     }
 

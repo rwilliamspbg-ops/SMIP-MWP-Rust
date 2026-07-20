@@ -10,7 +10,7 @@ use hkdf::Hkdf;
 use parking_lot::RwLock;
 use sha2::Sha256;
 use std::convert::TryInto;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use thiserror::Error;
 
 pub const TAG_SIZE: usize = 16;
@@ -44,10 +44,12 @@ type CacheMap = RwLock<AHashMap<u64, CacheEntry>>;
 
 /// Fast non-cryptographic cache key — replaces the previous SHA-256 call.
 /// Session cache lookups go from ~500 ns to ~10 ns.
+/// We call `Hasher::write` directly instead of generic slice `.hash(&mut h)`
+/// to avoid slice-length hashing and generic iterator dispatch overhead.
 fn derive_cache_key(combined_secret: &[u8], session_info: &[u8]) -> u64 {
     let mut h = AHasher::default();
-    combined_secret.hash(&mut h);
-    session_info.hash(&mut h);
+    h.write(combined_secret);
+    h.write(session_info);
     h.finish()
 }
 
