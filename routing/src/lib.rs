@@ -177,10 +177,43 @@ impl Table {
     #[inline]
     fn cache_index(dest_id: &[u8; 32]) -> usize {
         let mut h = 0u64;
-        h ^= u64::from_ne_bytes(dest_id[0..8].try_into().unwrap());
-        h ^= u64::from_ne_bytes(dest_id[8..16].try_into().unwrap());
-        h ^= u64::from_ne_bytes(dest_id[16..24].try_into().unwrap());
-        h ^= u64::from_ne_bytes(dest_id[24..32].try_into().unwrap());
+        // Avoid `try_into().unwrap()` slice-slicing which can cause bounds checks and branch checks.
+        // Direct array construction from known indices allows the compiler to generate optimal,
+        // completely bounds-free assembly.
+        h ^= u64::from_ne_bytes([
+            dest_id[0], dest_id[1], dest_id[2], dest_id[3], dest_id[4], dest_id[5], dest_id[6],
+            dest_id[7],
+        ]);
+        h ^= u64::from_ne_bytes([
+            dest_id[8],
+            dest_id[9],
+            dest_id[10],
+            dest_id[11],
+            dest_id[12],
+            dest_id[13],
+            dest_id[14],
+            dest_id[15],
+        ]);
+        h ^= u64::from_ne_bytes([
+            dest_id[16],
+            dest_id[17],
+            dest_id[18],
+            dest_id[19],
+            dest_id[20],
+            dest_id[21],
+            dest_id[22],
+            dest_id[23],
+        ]);
+        h ^= u64::from_ne_bytes([
+            dest_id[24],
+            dest_id[25],
+            dest_id[26],
+            dest_id[27],
+            dest_id[28],
+            dest_id[29],
+            dest_id[30],
+            dest_id[31],
+        ]);
         let folded = (h ^ (h >> 32)) as usize;
         folded & (HOT_CACHE_SIZE - 1)
     }

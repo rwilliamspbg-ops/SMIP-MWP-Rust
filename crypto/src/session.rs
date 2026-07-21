@@ -105,10 +105,12 @@ impl SessionAead {
     }
 
     fn encrypt(&self, nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
+        // Replace dynamic slice length assertion checks of GenericArray::from_slice with
+        // static/bounds-free GenericArray::from(*nonce) in the hot AEAD encryption and decryption paths.
+        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
         match self {
-            SessionAead::Aes(aead) => aead.encrypt(nonce_ref, plaintext),
-            SessionAead::ChaCha(aead) => aead.encrypt(nonce_ref, plaintext),
+            SessionAead::Aes(aead) => aead.encrypt(&nonce_ref, plaintext),
+            SessionAead::ChaCha(aead) => aead.encrypt(&nonce_ref, plaintext),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
     }
@@ -120,10 +122,10 @@ impl SessionAead {
         nonce: &[u8; NONCE_SIZE],
         buf: &mut Vec<u8>,
     ) -> Result<(), SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
+        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
         match self {
-            SessionAead::Aes(aead) => aead.encrypt_in_place(nonce_ref, b"", buf),
-            SessionAead::ChaCha(aead) => aead.encrypt_in_place(nonce_ref, b"", buf),
+            SessionAead::Aes(aead) => aead.encrypt_in_place(&nonce_ref, b"", buf),
+            SessionAead::ChaCha(aead) => aead.encrypt_in_place(&nonce_ref, b"", buf),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
     }
@@ -133,13 +135,13 @@ impl SessionAead {
         nonce: &[u8; NONCE_SIZE],
         buf: &mut [u8],
     ) -> Result<GenericArray<u8, U16>, SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
+        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
         match self {
             SessionAead::Aes(aead) => aead
-                .encrypt_in_place_detached(nonce_ref, b"", buf)
+                .encrypt_in_place_detached(&nonce_ref, b"", buf)
                 .map_err(|_| SessionError::AuthenticationFailed),
             SessionAead::ChaCha(aead) => aead
-                .encrypt_in_place_detached(nonce_ref, b"", buf)
+                .encrypt_in_place_detached(&nonce_ref, b"", buf)
                 .map_err(|_| SessionError::AuthenticationFailed),
         }
     }
@@ -149,10 +151,10 @@ impl SessionAead {
         nonce: &[u8; NONCE_SIZE],
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from_slice(nonce);
+        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
         match self {
-            SessionAead::Aes(aead) => aead.decrypt(nonce_ref, ciphertext),
-            SessionAead::ChaCha(aead) => aead.decrypt(nonce_ref, ciphertext),
+            SessionAead::Aes(aead) => aead.decrypt(&nonce_ref, ciphertext),
+            SessionAead::ChaCha(aead) => aead.decrypt(&nonce_ref, ciphertext),
         }
         .map_err(|_| SessionError::AuthenticationFailed)
     }
@@ -204,7 +206,17 @@ impl HybridSession {
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
         let mut nonce = self.nonce_base;
         let mixed = self.nonce_xor ^ seq;
-        nonce[4..12].copy_from_slice(&mixed.to_be_bytes());
+        let bytes = mixed.to_be_bytes();
+        // Avoid `copy_from_slice` and its subslice bounds check/overhead by directly writing
+        // individual bytes of the mixed u64 to the pre-allocated nonce array.
+        nonce[4] = bytes[0];
+        nonce[5] = bytes[1];
+        nonce[6] = bytes[2];
+        nonce[7] = bytes[3];
+        nonce[8] = bytes[4];
+        nonce[9] = bytes[5];
+        nonce[10] = bytes[6];
+        nonce[11] = bytes[7];
         nonce
     }
 
