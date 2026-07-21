@@ -15,3 +15,7 @@
 ## 2024-11-21 - [Fast Cache Index Folding and In-Place Arena Processing]
 **Learning:** Performing a 32-bit loop-based XOR hash and a modulo operator (`%`) in the hot routing cache mapping path introduces minor but measurable ALU overhead. Also, recreating and resizing temporary `Vec<u8>` buffers per packet in `process_batch_mcr`'s primary path causes substantial dynamic memory allocation overhead.
 **Action:** Replace the 32-bit loop with optimized 64-bit folding and use a bitwise AND mask (`& (HOT_CACHE_SIZE - 1)`) for O(1) index mapping. Process and encrypt packets directly inside the pre-allocated `self.arena` buffer to completely eliminate per-packet dynamic allocations.
+
+## 2026-05-24 - [Avoid Slice Assertions and Copy Overhead in Hot Paths]
+**Learning:** Constructing a `GenericArray` with `GenericArray::from_slice` and manipulating slices with `copy_from_slice` in packet processing loops introduces redundant runtime bounds checks and assert branches. Direct element indexing of fixed-size arrays and by-value construction of static types compiles to entirely bounds-free, branchless machine code.
+**Action:** Use fixed-size array indices and by-value types like `GenericArray::from(*fixed_array)` instead of slice-level operations on hot execution paths.
