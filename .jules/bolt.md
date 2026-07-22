@@ -19,3 +19,7 @@
 ## 2026-05-24 - [Avoid Slice Assertions and Copy Overhead in Hot Paths]
 **Learning:** Constructing a `GenericArray` with `GenericArray::from_slice` and manipulating slices with `copy_from_slice` in packet processing loops introduces redundant runtime bounds checks and assert branches. Direct element indexing of fixed-size arrays and by-value construction of static types compiles to entirely bounds-free, branchless machine code.
 **Action:** Use fixed-size array indices and by-value types like `GenericArray::from(*fixed_array)` instead of slice-level operations on hot execution paths.
+
+## 2026-05-25 - [Coarse-Grained Batching of Hot Path Telemetry and Timing]
+**Learning:** Performing multiple atomic fetch-add operations, `OnceLock::get` calls, and `Instant::now` / `elapsed` timings per packet in high-frequency data planes introduces substantial CPU overhead and cache line contention/bouncing in parallel execution threads.
+**Action:** Always accumulate telemetry counters and durations locally in a register-backed or stack-allocated struct (e.g., `LocalMetrics`) during batch processing, and commit them in a single aggregated atomic write operation at the end of the batch.
