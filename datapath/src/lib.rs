@@ -156,10 +156,56 @@ fn global_profiler() -> &'static Profiler {
     GLOBAL_PROFILER.get_or_init(Profiler::default)
 }
 
+#[derive(Default)]
+struct LocalMetrics {
+    handle_ns: u64,
+    handle_count: u64,
+    encrypt_ns: u64,
+    encrypt_count: u64,
+    lookup_calls: u64,
+    lookup_hits: u64,
+    predict_calls: u64,
+    predict_hits: u64,
+}
+
+impl LocalMetrics {
+    fn apply(&self) {
+        let prof = global_profiler();
+        if self.handle_count > 0 {
+            prof.handle_count
+                .fetch_add(self.handle_count, Ordering::Relaxed);
+            prof.handle_ns.fetch_add(self.handle_ns, Ordering::Relaxed);
+        }
+        if self.encrypt_count > 0 {
+            prof.encrypt_count
+                .fetch_add(self.encrypt_count, Ordering::Relaxed);
+            prof.encrypt_ns
+                .fetch_add(self.encrypt_ns, Ordering::Relaxed);
+        }
+        if self.lookup_calls > 0 {
+            prof.lookup_next_hop_calls
+                .fetch_add(self.lookup_calls, Ordering::Relaxed);
+        }
+        if self.lookup_hits > 0 {
+            prof.lookup_next_hop_hits
+                .fetch_add(self.lookup_hits, Ordering::Relaxed);
+        }
+        if self.predict_calls > 0 {
+            prof.lookup_predict_calls
+                .fetch_add(self.predict_calls, Ordering::Relaxed);
+        }
+        if self.predict_hits > 0 {
+            prof.lookup_predict_hits
+                .fetch_add(self.predict_hits, Ordering::Relaxed);
+        }
+    }
+}
+
 struct PacketOutput {
     bytes: Vec<u8>,
     encrypted: bool,
     route_miss: bool,
+    enc_ns: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -263,7 +309,13 @@ impl Forwarder {
         self.arena.reserve(cap);
     }
 
-    fn handle_packet(&mut self, pkt: &[u8], _use_avx2: bool, stats: &mut ForwarderStats) -> bool {
+    fn handle_packet(
+        &mut self,
+        pkt: &[u8],
+        _use_avx2: bool,
+        stats: &mut ForwarderStats,
+        metrics: &mut LocalMetrics,
+    ) -> bool {
         let start_handle = std::time::Instant::now();
         let mut forwarded = false;
 
@@ -274,14 +326,9 @@ impl Forwarder {
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
-            // instrument lookup_next_hop
-            {
-                let prof = global_profiler();
-                prof.lookup_next_hop_calls.fetch_add(1, Ordering::Relaxed);
-            }
+            metrics.lookup_calls += 1;
             if self.routes.lookup_next_hop(dst_id, flow_label).is_some() {
-                let prof = global_profiler();
-                prof.lookup_next_hop_hits.fetch_add(1, Ordering::Relaxed);
+                metrics.lookup_hits += 1;
 
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
@@ -305,10 +352,9 @@ impl Forwarder {
                             seq_num,
                         ) {
                             Ok(tag) => {
-                                let enc_ns = enc_start.elapsed().as_nanos();
-                                let prof = global_profiler();
-                                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                                metrics.encrypt_count += 1;
+                                metrics.encrypt_ns += enc_ns;
                                 self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
@@ -334,9 +380,8 @@ impl Forwarder {
                 .lookup_or_predict(src_id, dst_id, flow_label)
                 .is_some()
             {
-                let prof = global_profiler();
-                prof.lookup_predict_calls.fetch_add(1, Ordering::Relaxed);
-                prof.lookup_predict_hits.fetch_add(1, Ordering::Relaxed);
+                metrics.predict_calls += 1;
+                metrics.predict_hits += 1;
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
@@ -359,10 +404,9 @@ impl Forwarder {
                             seq_num,
                         ) {
                             Ok(tag) => {
-                                let enc_ns = enc_start.elapsed().as_nanos();
-                                let prof = global_profiler();
-                                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                                metrics.encrypt_count += 1;
+                                metrics.encrypt_ns += enc_ns;
                                 self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
@@ -388,11 +432,9 @@ impl Forwarder {
             }
         }
 
-        let handle_ns = start_handle.elapsed().as_nanos();
-        let prof = global_profiler();
-        prof.handle_count.fetch_add(1, Ordering::Relaxed);
-        prof.handle_ns
-            .fetch_add(handle_ns as u64, Ordering::Relaxed);
+        let handle_ns = start_handle.elapsed().as_nanos() as u64;
+        metrics.handle_count += 1;
+        metrics.handle_ns += handle_ns;
 
         forwarded
     }
@@ -417,17 +459,16 @@ impl Forwarder {
                     .is_some()
             {
                 let enc_start = std::time::Instant::now();
-                let out = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session);
-                let enc_ns = enc_start.elapsed().as_nanos();
-                let prof = global_profiler();
-                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                let mut out = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session);
+                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                out.enc_ns = enc_ns;
                 return out;
             } else {
                 return PacketOutput {
                     bytes: pkt,
                     encrypted: false,
                     route_miss: true,
+                    enc_ns: 0,
                 };
             }
         }
@@ -436,6 +477,7 @@ impl Forwarder {
             bytes: pkt,
             encrypted: false,
             route_miss: false,
+            enc_ns: 0,
         }
     }
 
@@ -447,7 +489,7 @@ impl Forwarder {
         routes: &Table,
         session: Option<&HybridSession>,
         _use_avx2: bool,
-    ) -> (Vec<u8>, bool, bool) {
+    ) -> (Vec<u8>, bool, bool, u64) {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
             let src_id: [u8; 32] = *h.src_id();
             let dst_id: [u8; 32] = *h.dst_id();
@@ -491,28 +533,25 @@ impl Forwarder {
                         route_miss = true;
                     }
                 }
-                let enc_ns = enc_start.elapsed().as_nanos();
-                let prof = global_profiler();
-                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                let enc_ns = enc_start.elapsed().as_nanos() as u64;
 
-                return (pkt, encrypted, route_miss);
+                return (pkt, encrypted, route_miss, enc_ns);
             } else {
-                return (pkt, false, true);
+                return (pkt, false, true, 0);
             }
         }
 
-        (pkt, false, false)
+        (pkt, false, false, 0)
     }
 
     // Inline variant used by serial MCR paths to avoid allocating PacketOutput/Vecs.
-    // Returns a tuple: (bytes, encrypted, route_miss)
+    // Returns a tuple: (bytes, encrypted, route_miss, enc_ns)
     fn process_packet_owned_inline(
         pkt: &mut Vec<u8>,
         routes: &Table,
         session: Option<&HybridSession>,
         _use_avx2: bool,
-    ) -> (Vec<u8>, bool, bool) {
+    ) -> (Vec<u8>, bool, bool, u64) {
         if let Ok(h) = HeaderViewRef::new(pkt) {
             let src_id: [u8; 32] = *h.src_id();
             let dst_id: [u8; 32] = *h.dst_id();
@@ -556,18 +595,15 @@ impl Forwarder {
                         route_miss = true;
                     }
                 }
-                let enc_ns = enc_start.elapsed().as_nanos();
-                let prof = global_profiler();
-                prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                let enc_ns = enc_start.elapsed().as_nanos() as u64;
 
-                return (std::mem::take(pkt), encrypted, route_miss);
+                return (std::mem::take(pkt), encrypted, route_miss, enc_ns);
             } else {
-                return (std::mem::take(pkt), false, true);
+                return (std::mem::take(pkt), false, true, 0);
             }
         }
 
-        (std::mem::take(pkt), false, false)
+        (std::mem::take(pkt), false, false, 0)
     }
 
     fn encrypt_packet_owned(
@@ -592,6 +628,7 @@ impl Forwarder {
                             bytes: pkt,
                             encrypted: true,
                             route_miss: false,
+                            enc_ns: 0,
                         };
                     }
                     Err(SessionError::AuthenticationFailed)
@@ -604,6 +641,7 @@ impl Forwarder {
                             bytes: pkt,
                             encrypted: false,
                             route_miss: true,
+                            enc_ns: 0,
                         };
                     }
                 }
@@ -612,6 +650,7 @@ impl Forwarder {
                     bytes: pkt,
                     encrypted: false,
                     route_miss: true,
+                    enc_ns: 0,
                 };
             }
         }
@@ -620,6 +659,7 @@ impl Forwarder {
             bytes: pkt,
             encrypted: false,
             route_miss: false,
+            enc_ns: 0,
         }
     }
 
@@ -645,6 +685,8 @@ impl Forwarder {
         );
         self.offsets.reserve(outputs.len());
 
+        let mut metrics = LocalMetrics::default();
+
         for output in outputs {
             let start = self.arena.len();
             self.arena.extend_from_slice(&output.bytes);
@@ -652,6 +694,8 @@ impl Forwarder {
             self.offsets.push((start, len));
             if output.encrypted {
                 stats.encrypted += 1;
+                metrics.encrypt_count += 1;
+                metrics.encrypt_ns += output.enc_ns;
             } else {
                 stats.forwarded += 1;
             }
@@ -659,6 +703,8 @@ impl Forwarder {
                 stats.route_misses += 1;
             }
         }
+
+        metrics.apply();
 
         let append_ns = append_start.elapsed().as_nanos();
         let prof = global_profiler();
@@ -697,8 +743,10 @@ impl Forwarder {
                 ..ForwarderStats::default()
             };
 
+            let mut metrics = LocalMetrics::default();
+
             for pkt in frames {
-                let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats);
+                let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats, &mut metrics);
 
                 if !forwarded {
                     let start = self.arena.len();
@@ -709,11 +757,10 @@ impl Forwarder {
                 }
             }
 
+            metrics.apply();
+
             let _ = sock.send(self.arena.as_slice(), &self.offsets);
             PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
-            let prof = global_profiler();
-            prof.handle_count
-                .fetch_add(stats.received as u64, Ordering::Relaxed);
             return stats;
         }
 
@@ -770,6 +817,8 @@ impl Forwarder {
         let spray_mode = &self.mcr_spray_mode;
 
         if spray_mode != "full" {
+            let mut metrics = LocalMetrics::default();
+
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id: [u8; 32] = *h.dst_id();
@@ -777,11 +826,10 @@ impl Forwarder {
                     let seq_num = h.seq_num();
                     let payload_len = h.length() as usize;
 
-                    let prof = global_profiler();
-                    prof.lookup_next_hop_calls.fetch_add(1, Ordering::Relaxed);
+                    metrics.lookup_calls += 1;
                     let next_hop = match self.routes.lookup_next_hop(dst_id, flow_label) {
                         Some(next_hop) => {
-                            prof.lookup_next_hop_hits.fetch_add(1, Ordering::Relaxed);
+                            metrics.lookup_hits += 1;
                             next_hop
                         }
                         None => {
@@ -823,10 +871,9 @@ impl Forwarder {
                                 seq_num,
                             ) {
                                 Ok(tag) => {
-                                    let enc_ns = enc_start.elapsed().as_nanos();
-                                    let prof = global_profiler();
-                                    prof.encrypt_count.fetch_add(1, Ordering::Relaxed);
-                                    prof.encrypt_ns.fetch_add(enc_ns as u64, Ordering::Relaxed);
+                                    let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                                    metrics.encrypt_count += 1;
+                                    metrics.encrypt_ns += enc_ns;
 
                                     self.arena.extend_from_slice(tag.as_slice());
                                     if pkt.len() > HEADER_SIZE + payload_len {
@@ -879,6 +926,8 @@ impl Forwarder {
                     stats.route_misses += 1;
                 }
             }
+
+            metrics.apply();
         } else {
             // Full spray keeps the existing duplication behavior because one
             // input packet can expand to multiple outputs.
@@ -913,6 +962,8 @@ impl Forwarder {
             if duplicated.len() < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
                 // Serial path: process in-place and append directly to arena to avoid
                 // allocating intermediate PacketOutput/Vecs.
+                let mut local_enc_count = 0u64;
+                let mut local_enc_ns = 0u64;
                 for (mut pkt, _dst) in duplicated.into_iter() {
                     let out = Self::process_packet_owned_inline(
                         &mut pkt,
@@ -925,13 +976,22 @@ impl Forwarder {
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     if out.1 {
-                        stats.encrypted += 1
+                        stats.encrypted += 1;
+                        local_enc_count += 1;
+                        local_enc_ns += out.3;
                     } else {
-                        stats.forwarded += 1
+                        stats.forwarded += 1;
                     }
                     if out.2 {
-                        stats.route_misses += 1
+                        stats.route_misses += 1;
                     }
+                }
+
+                if local_enc_count > 0 {
+                    let prof = global_profiler();
+                    prof.encrypt_count
+                        .fetch_add(local_enc_count, Ordering::Relaxed);
+                    prof.encrypt_ns.fetch_add(local_enc_ns, Ordering::Relaxed);
                 }
 
                 self.mcr_forwarded
@@ -949,7 +1009,7 @@ impl Forwarder {
                 // Vecs and flags to the main thread which will append into the
                 // arena. This avoids extra intermediate allocations inside the
                 // parallel map.
-                let outputs: Vec<(Vec<u8>, bool, bool)> = duplicated
+                let outputs: Vec<(Vec<u8>, bool, bool, u64)> = duplicated
                     .into_par_iter()
                     .map(|(pkt, _)| {
                         Self::process_packet_owned_consuming(pkt, routes_ref, session_ref, use_avx2)
@@ -957,19 +1017,30 @@ impl Forwarder {
                     .collect();
 
                 // Append results in the main thread to the arena.
-                for (bytes, encrypted, route_miss) in outputs {
+                let mut local_enc_count = 0u64;
+                let mut local_enc_ns = 0u64;
+                for (bytes, encrypted, route_miss, enc_ns) in outputs {
                     let start = self.arena.len();
                     self.arena.extend_from_slice(&bytes);
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     if encrypted {
-                        stats.encrypted += 1
+                        stats.encrypted += 1;
+                        local_enc_count += 1;
+                        local_enc_ns += enc_ns;
                     } else {
-                        stats.forwarded += 1
+                        stats.forwarded += 1;
                     }
                     if route_miss {
-                        stats.route_misses += 1
+                        stats.route_misses += 1;
                     }
+                }
+
+                if local_enc_count > 0 {
+                    let prof = global_profiler();
+                    prof.encrypt_count
+                        .fetch_add(local_enc_count, Ordering::Relaxed);
+                    prof.encrypt_ns.fetch_add(local_enc_ns, Ordering::Relaxed);
                 }
 
                 self.mcr_forwarded
@@ -1030,9 +1101,11 @@ impl Forwarder {
         #[cfg(not(target_arch = "x86_64"))]
         let use_avx2 = false;
 
+        let mut metrics = LocalMetrics::default();
+
         for &idx in ring.active.iter().take(received) {
             let pkt = ring.slot(idx);
-            let forwarded = self.handle_packet(pkt, use_avx2, &mut stats);
+            let forwarded = self.handle_packet(pkt, use_avx2, &mut stats, &mut metrics);
 
             if !forwarded {
                 let start = self.arena.len();
@@ -1042,6 +1115,8 @@ impl Forwarder {
                 stats.forwarded += 1;
             }
         }
+
+        metrics.apply();
 
         let _ = sock.send(self.arena.as_slice(), &self.offsets);
         // update global application pconf counter
