@@ -1,9 +1,8 @@
-use ahash::{AHashMap, AHasher};
+use ahash::AHashMap;
 use parking_lot::RwLock;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::hash::Hasher;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -112,14 +111,20 @@ thread_local! {
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
 /// predictive routing. AHasher replaces the previous SipHash-backed default
 /// hasher, reducing per-miss cost on the trusted datapath hot path.
-/// We call `Hasher::write` and `Hasher::write_u32` directly to avoid slice-length
-/// hashing and generic iterator dispatch overhead on the hot path.
+/// We use native 64-bit integer pointer casting and XOR folding via `read_unaligned`
+/// to avoid generic hashing and slice-length overhead on the hot path entirely.
 fn fast_flow_hash(src_id: &[u8; 32], dst_id: &[u8; 32], flow_label: u32) -> u64 {
-    let mut h = AHasher::default();
-    h.write(src_id);
-    h.write(dst_id);
-    h.write_u32(flow_label);
-    h.finish()
+    let s_ptr = src_id.as_ptr() as *const u64;
+    let d_ptr = dst_id.as_ptr() as *const u64;
+    let s0 = unsafe { s_ptr.read_unaligned() };
+    let s1 = unsafe { s_ptr.add(1).read_unaligned() };
+    let s2 = unsafe { s_ptr.add(2).read_unaligned() };
+    let s3 = unsafe { s_ptr.add(3).read_unaligned() };
+    let d0 = unsafe { d_ptr.read_unaligned() };
+    let d1 = unsafe { d_ptr.add(1).read_unaligned() };
+    let d2 = unsafe { d_ptr.add(2).read_unaligned() };
+    let d3 = unsafe { d_ptr.add(3).read_unaligned() };
+    s0 ^ s1 ^ s2 ^ s3 ^ d0 ^ d1 ^ d2 ^ d3 ^ (flow_label as u64)
 }
 
 impl Table {
@@ -140,9 +145,13 @@ impl Table {
     }
 
     fn shard_for(key: &[u8; 32]) -> usize {
-        let mut h = AHasher::default();
-        h.write(key);
-        (h.finish() as usize) % FAST_SHARDS
+        let ptr = key.as_ptr() as *const u64;
+        let h0 = unsafe { ptr.read_unaligned() };
+        let h1 = unsafe { ptr.add(1).read_unaligned() };
+        let h2 = unsafe { ptr.add(2).read_unaligned() };
+        let h3 = unsafe { ptr.add(3).read_unaligned() };
+        let h = h0 ^ h1 ^ h2 ^ h3;
+        (h as usize) & (FAST_SHARDS - 1)
     }
 
     fn rebuild_predictive_entries(inner: &mut TableInner) {
@@ -176,44 +185,12 @@ impl Table {
 
     #[inline]
     fn cache_index(dest_id: &[u8; 32]) -> usize {
-        let mut h = 0u64;
-        // Avoid `try_into().unwrap()` slice-slicing which can cause bounds checks and branch checks.
-        // Direct array construction from known indices allows the compiler to generate optimal,
-        // completely bounds-free assembly.
-        h ^= u64::from_ne_bytes([
-            dest_id[0], dest_id[1], dest_id[2], dest_id[3], dest_id[4], dest_id[5], dest_id[6],
-            dest_id[7],
-        ]);
-        h ^= u64::from_ne_bytes([
-            dest_id[8],
-            dest_id[9],
-            dest_id[10],
-            dest_id[11],
-            dest_id[12],
-            dest_id[13],
-            dest_id[14],
-            dest_id[15],
-        ]);
-        h ^= u64::from_ne_bytes([
-            dest_id[16],
-            dest_id[17],
-            dest_id[18],
-            dest_id[19],
-            dest_id[20],
-            dest_id[21],
-            dest_id[22],
-            dest_id[23],
-        ]);
-        h ^= u64::from_ne_bytes([
-            dest_id[24],
-            dest_id[25],
-            dest_id[26],
-            dest_id[27],
-            dest_id[28],
-            dest_id[29],
-            dest_id[30],
-            dest_id[31],
-        ]);
+        let ptr = dest_id.as_ptr() as *const u64;
+        let h0 = unsafe { ptr.read_unaligned() };
+        let h1 = unsafe { ptr.add(1).read_unaligned() };
+        let h2 = unsafe { ptr.add(2).read_unaligned() };
+        let h3 = unsafe { ptr.add(3).read_unaligned() };
+        let h = h0 ^ h1 ^ h2 ^ h3;
         let folded = (h ^ (h >> 32)) as usize;
         folded & (HOT_CACHE_SIZE - 1)
     }

@@ -316,7 +316,6 @@ impl Forwarder {
         stats: &mut ForwarderStats,
         metrics: &mut LocalMetrics,
     ) -> bool {
-        let start_handle = std::time::Instant::now();
         let mut forwarded = false;
 
         if let Ok(h) = HeaderViewRef::new(pkt) {
@@ -431,10 +430,6 @@ impl Forwarder {
                 stats.route_misses += 1;
             }
         }
-
-        let handle_ns = start_handle.elapsed().as_nanos() as u64;
-        metrics.handle_count += 1;
-        metrics.handle_ns += handle_ns;
 
         forwarded
     }
@@ -744,6 +739,7 @@ impl Forwarder {
             };
 
             let mut metrics = LocalMetrics::default();
+            let start_batch = std::time::Instant::now();
 
             for pkt in frames {
                 let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats, &mut metrics);
@@ -756,6 +752,10 @@ impl Forwarder {
                     stats.forwarded += 1;
                 }
             }
+
+            let elapsed = start_batch.elapsed().as_nanos() as u64;
+            metrics.handle_ns += elapsed;
+            metrics.handle_count += received as u64;
 
             metrics.apply();
 
@@ -818,6 +818,7 @@ impl Forwarder {
 
         if spray_mode != "full" {
             let mut metrics = LocalMetrics::default();
+            let start_batch = std::time::Instant::now();
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
@@ -926,6 +927,10 @@ impl Forwarder {
                     stats.route_misses += 1;
                 }
             }
+
+            let elapsed = start_batch.elapsed().as_nanos() as u64;
+            metrics.handle_ns += elapsed;
+            metrics.handle_count += received as u64;
 
             metrics.apply();
         } else {
@@ -1102,6 +1107,7 @@ impl Forwarder {
         let use_avx2 = false;
 
         let mut metrics = LocalMetrics::default();
+        let start_batch = std::time::Instant::now();
 
         for &idx in ring.active.iter().take(received) {
             let pkt = ring.slot(idx);
@@ -1115,6 +1121,10 @@ impl Forwarder {
                 stats.forwarded += 1;
             }
         }
+
+        let elapsed = start_batch.elapsed().as_nanos() as u64;
+        metrics.handle_ns += elapsed;
+        metrics.handle_count += received as u64;
 
         metrics.apply();
 
