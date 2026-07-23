@@ -23,3 +23,7 @@
 ## 2026-05-25 - [Coarse-Grained Batching of Hot Path Telemetry and Timing]
 **Learning:** Performing multiple atomic fetch-add operations, `OnceLock::get` calls, and `Instant::now` / `elapsed` timings per packet in high-frequency data planes introduces substantial CPU overhead and cache line contention/bouncing in parallel execution threads.
 **Action:** Always accumulate telemetry counters and durations locally in a register-backed or stack-allocated struct (e.g., `LocalMetrics`) during batch processing, and commit them in a single aggregated atomic write operation at the end of the batch.
+
+## 2026-05-26 - [Un-aligned Pointer-based XOR Folding and Batch-level Profiling]
+**Learning:** Even with local metrics accumulation, calling high-resolution timers (`Instant::now()`) per packet adds considerable VDSO/syscall overhead on high-frequency network datapath loops. Also, using generic hashing (`AHasher`) and manual slice slicing on fixed-size arrays inside hot routing caches causes significant bounds check, loop, and instruction overhead.
+**Action:** Move timing profiling to the batch/loop level and use direct unaligned pointer casting (`read_unaligned()`) to perform bounds-free 64-bit XOR folding of packet arrays combined with fast power-of-two bitwise mask index mapping.
