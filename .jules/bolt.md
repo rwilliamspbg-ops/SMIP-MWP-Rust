@@ -27,3 +27,11 @@
 ## 2026-05-26 - [Un-aligned Pointer-based XOR Folding and Batch-level Profiling]
 **Learning:** Even with local metrics accumulation, calling high-resolution timers (`Instant::now()`) per packet adds considerable VDSO/syscall overhead on high-frequency network datapath loops. Also, using generic hashing (`AHasher`) and manual slice slicing on fixed-size arrays inside hot routing caches causes significant bounds check, loop, and instruction overhead.
 **Action:** Move timing profiling to the batch/loop level and use direct unaligned pointer casting (`read_unaligned()`) to perform bounds-free 64-bit XOR folding of packet arrays combined with fast power-of-two bitwise mask index mapping.
+
+## 2026-05-27 - [Structure of Arrays Cache Optimization and Reusing Precomputed Hashes]
+**Learning:** Storing hot-path thread-local caches as unified structures causes heavy and redundant copying on every lookup. Converting to a Structure of Arrays (SoA) layout lets us check fast fields (like epoch and destination ID) first, preventing expensive 32-byte array copies on cache misses. Furthermore, recalculating unaligned 64-bit XOR folds for the same destination ID in cache indexing, shard mapping, and fallback paths is wasteful. Precomputing the hash once and passing it down eliminates redundant computation.
+**Action:** Decompose cache structs into parallel flat arrays and reuse precomputed hash values across consecutive hot-path lookups.
+
+## 2026-05-27 - [Avoid Caching Flow-Dependent Routes Under Destination-Only Keys]
+**Learning:** Caching multi-path (spray) forwarding routes (like in `lookup_spray_primary`) under destination-only keys in a flat thread-local cache breaks flow affinity. Subsequent packets with different flow labels will hit the cache and route to the same next-hop, completely disabling load balancing across alternate paths.
+**Action:** Never cache flow-dependent routes using only the destination ID as the key; keep spray primary queries as non-cached O(1) shard map lookups.

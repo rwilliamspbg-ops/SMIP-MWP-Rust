@@ -68,42 +68,31 @@ const FAST_SHARDS: usize = 16;
 
 static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Copy, Clone)]
-struct CacheEntry {
-    epoch: u64,
-    dest_id: [u8; 32],
-    next_hop: [u8; 32],
-}
-
-const EMPTY_ENTRY: CacheEntry = CacheEntry {
-    epoch: 0,
-    dest_id: [0; 32],
-    next_hop: [0; 32],
-};
-
 struct ThreadCache {
-    slots: [Cell<CacheEntry>; HOT_CACHE_SIZE],
+    epochs: [Cell<u64>; HOT_CACHE_SIZE],
+    dest_ids: [Cell<[u8; 32]>; HOT_CACHE_SIZE],
+    next_hops: [Cell<[u8; 32]>; HOT_CACHE_SIZE],
 }
 
 thread_local! {
     static THREAD_CACHE: ThreadCache = const { ThreadCache {
-        slots: [
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
-            Cell::new(EMPTY_ENTRY),
+        epochs: [
+            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
+            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
+            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
+            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
+        ],
+        dest_ids: [
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+        ],
+        next_hops: [
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
+            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
         ],
     } };
 }
@@ -144,13 +133,18 @@ impl Table {
         }
     }
 
-    fn shard_for(key: &[u8; 32]) -> usize {
-        let ptr = key.as_ptr() as *const u64;
+    #[inline]
+    fn hash_32(dest_id: &[u8; 32]) -> u64 {
+        let ptr = dest_id.as_ptr() as *const u64;
         let h0 = unsafe { ptr.read_unaligned() };
         let h1 = unsafe { ptr.add(1).read_unaligned() };
         let h2 = unsafe { ptr.add(2).read_unaligned() };
         let h3 = unsafe { ptr.add(3).read_unaligned() };
-        let h = h0 ^ h1 ^ h2 ^ h3;
+        h0 ^ h1 ^ h2 ^ h3
+    }
+
+    #[inline]
+    fn shard_for_from_hash(h: u64) -> usize {
         (h as usize) & (FAST_SHARDS - 1)
     }
 
@@ -162,7 +156,8 @@ impl Table {
         let mut e = e;
         e.last_seen = SystemTime::now();
         // update fast-path shard first
-        let shard = Self::shard_for(&e.dest_id);
+        let h = Self::hash_32(&e.dest_id);
+        let shard = Self::shard_for_from_hash(h);
         {
             let mut map = self.fast_shards[shard].write();
             map.insert(e.dest_id, e.clone());
@@ -184,27 +179,16 @@ impl Table {
     }
 
     #[inline]
-    fn cache_index(dest_id: &[u8; 32]) -> usize {
-        let ptr = dest_id.as_ptr() as *const u64;
-        let h0 = unsafe { ptr.read_unaligned() };
-        let h1 = unsafe { ptr.add(1).read_unaligned() };
-        let h2 = unsafe { ptr.add(2).read_unaligned() };
-        let h3 = unsafe { ptr.add(3).read_unaligned() };
-        let h = h0 ^ h1 ^ h2 ^ h3;
+    fn cache_index_from_hash(h: u64) -> usize {
         let folded = (h ^ (h >> 32)) as usize;
         folded & (HOT_CACHE_SIZE - 1)
     }
 
-    fn cache_hot_entry(cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
-        let entry = CacheEntry {
-            epoch: cur_epoch,
-            dest_id,
-            next_hop,
-        };
-
-        let idx = Self::cache_index(&dest_id);
+    fn cache_hot_entry_with_idx(idx: usize, cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
         THREAD_CACHE.with(|c| {
-            c.slots[idx].set(entry);
+            c.epochs[idx].set(cur_epoch);
+            c.dest_ids[idx].set(dest_id);
+            c.next_hops[idx].set(next_hop);
         });
     }
 
@@ -276,7 +260,8 @@ impl Table {
 
     pub fn remove_route(&self, dest: [u8; 32]) {
         // remove from fast-path shard first
-        let shard = Self::shard_for(&dest);
+        let h = Self::hash_32(&dest);
+        let shard = Self::shard_for_from_hash(h);
         {
             let mut map = self.fast_shards[shard].write();
             map.remove(&dest);
@@ -299,7 +284,8 @@ impl Table {
     /// Each tuple is `(next_hop_id, is_primary)` where primary is first element.
     pub fn lookup_spray(&self, dst_id: [u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
         // Try fast-path shard first
-        let shard = Self::shard_for(&dst_id);
+        let h = Self::hash_32(&dst_id);
+        let shard = Self::shard_for_from_hash(h);
         if let Some(e) = {
             let map = self.fast_shards[shard].read();
             map.get(&dst_id).cloned()
@@ -342,7 +328,8 @@ impl Table {
     /// Return the primary next-hop for spray-mode forwarding without
     /// allocating a channel vector.
     pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
-        let shard = Self::shard_for(&dst_id);
+        let h = Self::hash_32(&dst_id);
+        let shard = Self::shard_for_from_hash(h);
         if let Some(next_hop) = {
             let map = self.fast_shards[shard].read();
             map.get(&dst_id).map(|entry| entry.next_hop_id)
@@ -392,13 +379,14 @@ impl Table {
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
+        let h = Self::hash_32(&dst_id);
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::cache_index(&dst_id);
+        let idx = Self::cache_index_from_hash(h);
+
         if let Some(v) = THREAD_CACHE.with(|c| {
-            let ent = c.slots[idx].get();
-            if ent.epoch == cur_epoch && ent.dest_id == dst_id {
-                Some(ent.next_hop)
+            if c.epochs[idx].get() == cur_epoch && c.dest_ids[idx].get() == dst_id {
+                Some(c.next_hops[idx].get())
             } else {
                 None
             }
@@ -407,13 +395,13 @@ impl Table {
         }
 
         // Fast-path shard lookup
-        let shard = Self::shard_for(&dst_id);
+        let shard = Self::shard_for_from_hash(h);
         let nh_opt = {
             let map = self.fast_shards[shard].read();
             map.get(&dst_id).map(|e| e.next_hop_id)
         };
         if let Some(nh) = nh_opt {
-            Self::cache_hot_entry(cur_epoch, dst_id, nh);
+            Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
             return Some(nh);
         }
 
@@ -423,7 +411,7 @@ impl Table {
             inner.entries.get(&dst_id).map(|e| e.next_hop_id)
         };
         if let Some(nh) = res {
-            Self::cache_hot_entry(cur_epoch, dst_id, nh);
+            Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
         }
         res
     }
