@@ -828,7 +828,7 @@ impl Forwarder {
                     let payload_len = h.length() as usize;
 
                     metrics.lookup_calls += 1;
-                    let next_hop = match self.routes.lookup_next_hop(dst_id, flow_label) {
+                    let next_hop = match self.routes.lookup_spray_primary(dst_id, flow_label) {
                         Some(next_hop) => {
                             metrics.lookup_hits += 1;
                             next_hop
@@ -1399,5 +1399,58 @@ mod tests {
         // with full spray and 3 channels we expect 3 encrypted outputs
         assert_eq!(stats.encrypted, 3);
         assert_eq!(sock.sent.len(), 3);
+    }
+
+    #[test]
+    fn mcr_primary_spray_balances_flows() {
+        use std::env;
+        env::set_var("MOHAWK_MCR_SPRAY_MODE", "primary");
+        env::set_var("MOHAWK_MCR_ENABLED", "1");
+
+        // We will try multiple flow labels and ensure they don't all map to next_hop_id [3u8; 32]
+        let mut unique_next_hops = std::collections::HashSet::new();
+
+        for flow_label in 0..10 {
+            let rt = Table::new();
+            rt.update_route(RouteEntry {
+                dest_id: [2u8; 32],
+                next_hop_id: [3u8; 32],
+                metric: 1,
+                last_seen: SystemTime::now(),
+                channel_count: 3,
+                alternate_channels: vec![[4u8; 32], [5u8; 32]],
+                mcr_epoch: 1,
+            });
+            let mut fwd = Forwarder::new(rt);
+
+            let mut buf = wire::Header::new_header_buffer(4);
+            let h = Header {
+                src_id: [1u8; 32],
+                dst_id: [2u8; 32],
+                flow_label,
+                seq_num: 1,
+                session_id: [0u8; 16],
+                flags: 0,
+                length: 4,
+            };
+            h.marshal_into(&mut buf).unwrap();
+            buf[wire::HEADER_SIZE..wire::HEADER_SIZE + 4].copy_from_slice(&[0x1, 0x2, 0x3, 0x4]);
+            let mut sock = MockSocket::new(vec![buf]);
+            let stats = fwd.process_batch(&mut sock);
+            assert_eq!(stats.received, 1);
+            assert_eq!(stats.encrypted, 1);
+            assert_eq!(sock.sent.len(), 1);
+
+            let sent_pkt = &sock.sent[0];
+            let next_hop: [u8; 32] = sent_pkt[32..64].try_into().unwrap();
+            unique_next_hops.insert(next_hop);
+        }
+
+        // Verify that we saw more than 1 next hop (i.e. load balancing actually occurred!)
+        assert!(
+            unique_next_hops.len() > 1,
+            "Expected load balancing to choose multiple next hops but got {:?}",
+            unique_next_hops
+        );
     }
 }
