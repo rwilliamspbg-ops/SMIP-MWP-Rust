@@ -35,3 +35,7 @@
 ## 2026-05-27 - [Avoid Caching Flow-Dependent Routes Under Destination-Only Keys]
 **Learning:** Caching multi-path (spray) forwarding routes (like in `lookup_spray_primary`) under destination-only keys in a flat thread-local cache breaks flow affinity. Subsequent packets with different flow labels will hit the cache and route to the same next-hop, completely disabling load balancing across alternate paths.
 **Action:** Never cache flow-dependent routes using only the destination ID as the key; keep spray primary queries as non-cached O(1) shard map lookups.
+
+## 2026-05-28 - [Avoid Redundant Cloning on Routing Table Queries]
+**Learning:** Returning a cloned `RouteEntry` from the routing table lookup functions (`lookup_spray` and `lookup_spray_primary`) introduces severe heap allocation/deallocation and copying overhead under high throughput because `RouteEntry` contains a heap-allocated `Vec` for alternate routing channels.
+**Action:** Avoid calling `.cloned()` on routing table map queries. Instead, acquire the map read lock, read/resolve routing directly from references, and return only the requested values (e.g. `[u8; 32]`) or build vectors in-place on the stack, maintaining a zero-allocation hot routing path.

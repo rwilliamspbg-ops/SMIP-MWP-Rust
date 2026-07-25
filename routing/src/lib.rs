@@ -282,14 +282,14 @@ impl Table {
 
     /// Return list of channels for spraying for given destination and flow label.
     /// Each tuple is `(next_hop_id, is_primary)` where primary is first element.
+    /// Optimized: holds the read lock and avoids cloning RouteEntry (which contains a heap-allocated Vec).
     pub fn lookup_spray(&self, dst_id: [u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
         // Try fast-path shard first
         let h = Self::hash_32(&dst_id);
         let shard = Self::shard_for_from_hash(h);
-        if let Some(e) = {
-            let map = self.fast_shards[shard].read();
-            map.get(&dst_id).cloned()
-        } {
+
+        let map = self.fast_shards[shard].read();
+        if let Some(e) = map.get(&dst_id) {
             // construct channels vector: primary + alternates
             let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
             out.push((e.next_hop_id, true));
@@ -300,10 +300,8 @@ impl Table {
         }
 
         // Fall back to main table
-        if let Some(e) = {
-            let inner = self.inner.read();
-            inner.entries.get(&dst_id).cloned()
-        } {
+        let inner = self.inner.read();
+        if let Some(e) = inner.entries.get(&dst_id) {
             let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
             out.push((e.next_hop_id, true));
             for ch in &e.alternate_channels {
@@ -327,37 +325,40 @@ impl Table {
 
     /// Return the primary next-hop for spray-mode forwarding without
     /// allocating a channel vector.
+    /// Optimized: holds read lock and performs flow-affinity spraying over alternate channels
+    /// directly on reference to avoid cloning RouteEntry.
     pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
         let h = Self::hash_32(&dst_id);
         let shard = Self::shard_for_from_hash(h);
-        if let Some(next_hop) = {
-            let map = self.fast_shards[shard].read();
-            map.get(&dst_id).map(|entry| entry.next_hop_id)
-        } {
-            return Some(next_hop);
+
+        let map = self.fast_shards[shard].read();
+        if let Some(entry) = map.get(&dst_id) {
+            if entry.alternate_channels.is_empty() {
+                return Some(entry.next_hop_id);
+            } else {
+                let choices = 1 + entry.alternate_channels.len();
+                let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                if idx == 0 {
+                    return Some(entry.next_hop_id);
+                } else {
+                    return Some(entry.alternate_channels[idx - 1]);
+                }
+            }
         }
 
-        let next_hop = {
-            let inner = self.inner.read();
-            if let Some(entry) = inner.entries.get(&dst_id) {
-                if entry.alternate_channels.is_empty() {
-                    Some(entry.next_hop_id)
-                } else {
-                    let choices = 1 + entry.alternate_channels.len();
-                    let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
-                    if idx == 0 {
-                        Some(entry.next_hop_id)
-                    } else {
-                        Some(entry.alternate_channels[idx - 1])
-                    }
-                }
+        let inner = self.inner.read();
+        if let Some(entry) = inner.entries.get(&dst_id) {
+            if entry.alternate_channels.is_empty() {
+                return Some(entry.next_hop_id);
             } else {
-                None
+                let choices = 1 + entry.alternate_channels.len();
+                let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                if idx == 0 {
+                    return Some(entry.next_hop_id);
+                } else {
+                    return Some(entry.alternate_channels[idx - 1]);
+                }
             }
-        };
-
-        if let Some(next_hop) = next_hop {
-            return Some(next_hop);
         }
 
         None
