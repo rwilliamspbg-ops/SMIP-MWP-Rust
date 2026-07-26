@@ -48,13 +48,13 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
-        buf[SRC_OFFSET..SRC_OFFSET + 32].copy_from_slice(&self.src_id);
-        buf[DST_OFFSET..DST_OFFSET + 32].copy_from_slice(&self.dst_id);
-        buf[FLOW_OFFSET..FLOW_OFFSET + 4].copy_from_slice(&self.flow_label.to_be_bytes());
-        buf[SEQ_OFFSET..SEQ_OFFSET + 8].copy_from_slice(&self.seq_num.to_be_bytes());
-        buf[SESSION_OFFSET..SESSION_OFFSET + 16].copy_from_slice(&self.session_id);
-        buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&self.flags.to_be_bytes());
-        buf[LEN_OFFSET..LEN_OFFSET + 2].copy_from_slice(&self.length.to_be_bytes());
+        *<&mut [u8; 32]>::try_from(&mut buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap() = self.src_id;
+        *<&mut [u8; 32]>::try_from(&mut buf[DST_OFFSET..DST_OFFSET + 32]).unwrap() = self.dst_id;
+        *<&mut [u8; 4]>::try_from(&mut buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() = self.flow_label.to_be_bytes();
+        *<&mut [u8; 8]>::try_from(&mut buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap() = self.seq_num.to_be_bytes();
+        *<&mut [u8; 16]>::try_from(&mut buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap() = self.session_id;
+        *<&mut [u8; 2]>::try_from(&mut buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap() = self.flags.to_be_bytes();
+        *<&mut [u8; 2]>::try_from(&mut buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap() = self.length.to_be_bytes();
         Ok(())
     }
 
@@ -62,16 +62,22 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
-        let mut h = Header::new();
-        h.src_id.copy_from_slice(&buf[SRC_OFFSET..SRC_OFFSET + 32]);
-        h.dst_id.copy_from_slice(&buf[DST_OFFSET..DST_OFFSET + 32]);
-        h.flow_label = u32::from_be_bytes(buf[FLOW_OFFSET..FLOW_OFFSET + 4].try_into().unwrap());
-        h.seq_num = u64::from_be_bytes(buf[SEQ_OFFSET..SEQ_OFFSET + 8].try_into().unwrap());
-        h.session_id
-            .copy_from_slice(&buf[SESSION_OFFSET..SESSION_OFFSET + 16]);
-        h.flags = u16::from_be_bytes(buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].try_into().unwrap());
-        h.length = u16::from_be_bytes(buf[LEN_OFFSET..LEN_OFFSET + 2].try_into().unwrap());
-        Ok(h)
+        let src_id = *<&[u8; 32]>::try_from(&buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap();
+        let dst_id = *<&[u8; 32]>::try_from(&buf[DST_OFFSET..DST_OFFSET + 32]).unwrap();
+        let flow_label = u32::from_be_bytes(*<&[u8; 4]>::try_from(&buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap());
+        let seq_num = u64::from_be_bytes(*<&[u8; 8]>::try_from(&buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap());
+        let session_id = *<&[u8; 16]>::try_from(&buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap();
+        let flags = u16::from_be_bytes(*<&[u8; 2]>::try_from(&buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap());
+        let length = u16::from_be_bytes(*<&[u8; 2]>::try_from(&buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap());
+        Ok(Header {
+            src_id,
+            dst_id,
+            flow_label,
+            seq_num,
+            session_id,
+            flags,
+            length,
+        })
     }
 
     pub fn new_header_buffer(payload_len: usize) -> Vec<u8> {
@@ -156,25 +162,25 @@ impl<'a> HeaderView<'a> {
 
     // Setters
     pub fn set_src_id(&mut self, id: [u8; 32]) {
-        self.buf[SRC_OFFSET..SRC_OFFSET + 32].copy_from_slice(&id);
+        *<&mut [u8; 32]>::try_from(&mut self.buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap() = id;
     }
     pub fn set_dst_id(&mut self, id: [u8; 32]) {
-        self.buf[DST_OFFSET..DST_OFFSET + 32].copy_from_slice(&id);
+        *<&mut [u8; 32]>::try_from(&mut self.buf[DST_OFFSET..DST_OFFSET + 32]).unwrap() = id;
     }
     pub fn set_flow_label(&mut self, v: u32) {
-        self.buf[FLOW_OFFSET..FLOW_OFFSET + 4].copy_from_slice(&v.to_be_bytes());
+        *<&mut [u8; 4]>::try_from(&mut self.buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() = v.to_be_bytes();
     }
     pub fn set_seq_num(&mut self, v: u64) {
-        self.buf[SEQ_OFFSET..SEQ_OFFSET + 8].copy_from_slice(&v.to_be_bytes());
+        *<&mut [u8; 8]>::try_from(&mut self.buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap() = v.to_be_bytes();
     }
     pub fn set_session_id(&mut self, id: [u8; 16]) {
-        self.buf[SESSION_OFFSET..SESSION_OFFSET + 16].copy_from_slice(&id);
+        *<&mut [u8; 16]>::try_from(&mut self.buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap() = id;
     }
     pub fn set_flags(&mut self, v: u16) {
-        self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&v.to_be_bytes());
+        *<&mut [u8; 2]>::try_from(&mut self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap() = v.to_be_bytes();
     }
     pub fn set_length(&mut self, v: u16) {
-        self.buf[LEN_OFFSET..LEN_OFFSET + 2].copy_from_slice(&v.to_be_bytes());
+        *<&mut [u8; 2]>::try_from(&mut self.buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap() = v.to_be_bytes();
     }
 }
 

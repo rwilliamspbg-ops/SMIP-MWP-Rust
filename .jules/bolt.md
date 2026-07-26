@@ -39,3 +39,7 @@
 ## 2026-05-28 - [Avoid Redundant Cloning on Routing Table Queries]
 **Learning:** Returning a cloned `RouteEntry` from the routing table lookup functions (`lookup_spray` and `lookup_spray_primary`) introduces severe heap allocation/deallocation and copying overhead under high throughput because `RouteEntry` contains a heap-allocated `Vec` for alternate routing channels.
 **Action:** Avoid calling `.cloned()` on routing table map queries. Instead, acquire the map read lock, read/resolve routing directly from references, and return only the requested values (e.g. `[u8; 32]`) or build vectors in-place on the stack, maintaining a zero-allocation hot routing path.
+
+## 2026-05-29 - [Safe Vectorized Array Assignments and Cache Scalability]
+**Learning:** Generic slice-copy functions like `copy_from_slice` incur runtime bounds-checking and generic `memcpy` call overhead. Using safe Rust array-reference casts and assignments (e.g., `*<&mut [u8; 32]>::try_from(...).unwrap() = value`) allows LLVM to statically verify bounds safety and emit register-level vectorized moves without using `unsafe` blocks. Additionally, increasing thread-local cache capacity (from 16 to 256) using inline const array repetition prevents cache thrashing under dense routing tables.
+**Action:** Always prefer safe array-reference conversions (`try_from`) over generic `copy_from_slice` when sizes are statically known, and use clean array repetition syntax (`[const { ... }; SIZE]`) to initialize larger thread-local caches.
