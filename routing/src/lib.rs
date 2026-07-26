@@ -63,7 +63,7 @@ struct TableInner {
     predictive_entries: Vec<RouteEntry>,
 }
 
-const HOT_CACHE_SIZE: usize = 16;
+const HOT_CACHE_SIZE: usize = 256;
 const FAST_SHARDS: usize = 16;
 
 static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
@@ -76,24 +76,9 @@ struct ThreadCache {
 
 thread_local! {
     static THREAD_CACHE: ThreadCache = const { ThreadCache {
-        epochs: [
-            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
-            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
-            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
-            Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0),
-        ],
-        dest_ids: [
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-        ],
-        next_hops: [
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-            Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]), Cell::new([0; 32]),
-        ],
+        epochs: [const { Cell::new(0) }; HOT_CACHE_SIZE],
+        dest_ids: [const { Cell::new([0; 32]) }; HOT_CACHE_SIZE],
+        next_hops: [const { Cell::new([0; 32]) }; HOT_CACHE_SIZE],
     } };
 }
 
