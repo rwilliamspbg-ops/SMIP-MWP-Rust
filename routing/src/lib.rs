@@ -295,7 +295,10 @@ impl Table {
             // If there are multiple channels, re-order by hash selection so primary reflects flow affinity
             if out.len() > 1 {
                 let choices = out.len();
-                let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
+                // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
+                // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
+                let idx = (flow_label as usize) % choices;
                 out.swap(0, idx);
                 // mark primary accordingly
                 for (i, (_, is_primary)) in out.iter_mut().enumerate() {
@@ -322,7 +325,10 @@ impl Table {
                 return Some(entry.next_hop_id);
             } else {
                 let choices = 1 + entry.alternate_channels.len();
-                let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
+                // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
+                // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
+                let idx = (flow_label as usize) % choices;
                 if idx == 0 {
                     return Some(entry.next_hop_id);
                 } else {
@@ -337,7 +343,10 @@ impl Table {
                 return Some(entry.next_hop_id);
             } else {
                 let choices = 1 + entry.alternate_channels.len();
-                let idx = (fast_flow_hash(&dst_id, &dst_id, flow_label) as usize) % choices;
+                // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
+                // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
+                // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
+                let idx = (flow_label as usize) % choices;
                 if idx == 0 {
                     return Some(entry.next_hop_id);
                 } else {

@@ -43,3 +43,7 @@
 ## 2026-05-29 - [Safe Vectorized Array Assignments and Cache Scalability]
 **Learning:** Generic slice-copy functions like `copy_from_slice` incur runtime bounds-checking and generic `memcpy` call overhead. Using safe Rust array-reference casts and assignments (e.g., `*<&mut [u8; 32]>::try_from(...).unwrap() = value`) allows LLVM to statically verify bounds safety and emit register-level vectorized moves without using `unsafe` blocks. Additionally, increasing thread-local cache capacity (from 16 to 256) using inline const array repetition prevents cache thrashing under dense routing tables.
 **Action:** Always prefer safe array-reference conversions (`try_from`) over generic `copy_from_slice` when sizes are statically known, and use clean array repetition syntax (`[const { ... }; SIZE]`) to initialize larger thread-local caches.
+
+## 2026-05-30 - [Eliminate Redundant XOR Hashing on Identical Keys and Optimize Slices]
+**Learning:** Passing identical arrays to XOR-folded hash functions (such as `fast_flow_hash(&dst_id, &dst_id, flow_label)`) is completely redundant as identical elements cancel out to zero ($x \oplus x = 0$). This wastes clock cycles on unaligned reads and XOR fold logic. Additionally, replacing slice-level `copy_from_slice` on statically known sizes with array-reference assignments allows LLVM to emit register-level AVX/SSE moves in hot datapaths.
+**Action:** Always inspect hash parameters for self-canceling inputs, and utilize try_from reference assignments for zero-overhead, statically-sized array copies.
