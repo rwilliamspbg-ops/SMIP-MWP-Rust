@@ -50,11 +50,16 @@ impl Header {
         }
         *<&mut [u8; 32]>::try_from(&mut buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap() = self.src_id;
         *<&mut [u8; 32]>::try_from(&mut buf[DST_OFFSET..DST_OFFSET + 32]).unwrap() = self.dst_id;
-        *<&mut [u8; 4]>::try_from(&mut buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() = self.flow_label.to_be_bytes();
-        *<&mut [u8; 8]>::try_from(&mut buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap() = self.seq_num.to_be_bytes();
-        *<&mut [u8; 16]>::try_from(&mut buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap() = self.session_id;
-        *<&mut [u8; 2]>::try_from(&mut buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap() = self.flags.to_be_bytes();
-        *<&mut [u8; 2]>::try_from(&mut buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap() = self.length.to_be_bytes();
+        *<&mut [u8; 4]>::try_from(&mut buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() =
+            self.flow_label.to_be_bytes();
+        *<&mut [u8; 8]>::try_from(&mut buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap() =
+            self.seq_num.to_be_bytes();
+        *<&mut [u8; 16]>::try_from(&mut buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap() =
+            self.session_id;
+        *<&mut [u8; 2]>::try_from(&mut buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap() =
+            self.flags.to_be_bytes();
+        *<&mut [u8; 2]>::try_from(&mut buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap() =
+            self.length.to_be_bytes();
         Ok(())
     }
 
@@ -64,11 +69,16 @@ impl Header {
         }
         let src_id = *<&[u8; 32]>::try_from(&buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap();
         let dst_id = *<&[u8; 32]>::try_from(&buf[DST_OFFSET..DST_OFFSET + 32]).unwrap();
-        let flow_label = u32::from_be_bytes(*<&[u8; 4]>::try_from(&buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap());
-        let seq_num = u64::from_be_bytes(*<&[u8; 8]>::try_from(&buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap());
+        let flow_label =
+            u32::from_be_bytes(*<&[u8; 4]>::try_from(&buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap());
+        let seq_num =
+            u64::from_be_bytes(*<&[u8; 8]>::try_from(&buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap());
         let session_id = *<&[u8; 16]>::try_from(&buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap();
-        let flags = u16::from_be_bytes(*<&[u8; 2]>::try_from(&buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap());
-        let length = u16::from_be_bytes(*<&[u8; 2]>::try_from(&buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap());
+        let flags = u16::from_be_bytes(
+            *<&[u8; 2]>::try_from(&buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap(),
+        );
+        let length =
+            u16::from_be_bytes(*<&[u8; 2]>::try_from(&buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap());
         Ok(Header {
             src_id,
             dst_id,
@@ -168,19 +178,24 @@ impl<'a> HeaderView<'a> {
         *<&mut [u8; 32]>::try_from(&mut self.buf[DST_OFFSET..DST_OFFSET + 32]).unwrap() = id;
     }
     pub fn set_flow_label(&mut self, v: u32) {
-        *<&mut [u8; 4]>::try_from(&mut self.buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() = v.to_be_bytes();
+        *<&mut [u8; 4]>::try_from(&mut self.buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() =
+            v.to_be_bytes();
     }
     pub fn set_seq_num(&mut self, v: u64) {
-        *<&mut [u8; 8]>::try_from(&mut self.buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap() = v.to_be_bytes();
+        *<&mut [u8; 8]>::try_from(&mut self.buf[SEQ_OFFSET..SEQ_OFFSET + 8]).unwrap() =
+            v.to_be_bytes();
     }
     pub fn set_session_id(&mut self, id: [u8; 16]) {
-        *<&mut [u8; 16]>::try_from(&mut self.buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap() = id;
+        *<&mut [u8; 16]>::try_from(&mut self.buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap() =
+            id;
     }
     pub fn set_flags(&mut self, v: u16) {
-        *<&mut [u8; 2]>::try_from(&mut self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap() = v.to_be_bytes();
+        *<&mut [u8; 2]>::try_from(&mut self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2]).unwrap() =
+            v.to_be_bytes();
     }
     pub fn set_length(&mut self, v: u16) {
-        *<&mut [u8; 2]>::try_from(&mut self.buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap() = v.to_be_bytes();
+        *<&mut [u8; 2]>::try_from(&mut self.buf[LEN_OFFSET..LEN_OFFSET + 2]).unwrap() =
+            v.to_be_bytes();
     }
 }
 

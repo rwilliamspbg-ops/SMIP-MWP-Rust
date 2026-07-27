@@ -853,8 +853,11 @@ impl Forwarder {
 
                     // Copy header directly into the arena
                     self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                    // Overwrite next_hop field directly in the arena
-                    self.arena.as_mut_slice()[start + 32..start + 64].copy_from_slice(&next_hop);
+                    // Overwrite next_hop field directly in the arena using register-level vectorized assignment
+                    *<&mut [u8; 32]>::try_from(
+                        &mut self.arena.as_mut_slice()[start + 32..start + 64],
+                    )
+                    .unwrap() = next_hop;
 
                     let mut was_encrypted = false;
                     let mut was_route_miss = false;
@@ -903,8 +906,11 @@ impl Forwarder {
 
                         let f_start = self.arena.len();
                         self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                        self.arena.as_mut_slice()[f_start + 32..f_start + 64]
-                            .copy_from_slice(&next_hop);
+                        // Overwrite next_hop field directly in the arena using register-level vectorized assignment
+                        *<&mut [u8; 32]>::try_from(
+                            &mut self.arena.as_mut_slice()[f_start + 32..f_start + 64],
+                        )
+                        .unwrap() = next_hop;
                         self.arena.extend_from_slice(&pkt[HEADER_SIZE..]);
                         let len = self.arena.len() - f_start;
                         self.offsets.push((f_start, len));
@@ -952,11 +958,13 @@ impl Forwarder {
                     if let Some((last_nh, _)) = channels.pop() {
                         for (nh, _is_primary) in channels {
                             let mut modified = pkt.clone();
-                            modified[32..64].copy_from_slice(&nh);
+                            // Overwrite next_hop field using register-level vectorized assignment
+                            *<&mut [u8; 32]>::try_from(&mut modified[32..64]).unwrap() = nh;
                             duplicated.push((modified, dst_id));
                         }
                         let mut modified = pkt;
-                        modified[32..64].copy_from_slice(&last_nh);
+                        // Overwrite next_hop field using register-level vectorized assignment
+                        *<&mut [u8; 32]>::try_from(&mut modified[32..64]).unwrap() = last_nh;
                         duplicated.push((modified, dst_id));
                     }
                 } else {
