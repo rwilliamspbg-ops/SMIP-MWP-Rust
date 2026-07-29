@@ -47,3 +47,7 @@
 ## 2026-05-30 - [Eliminate Redundant XOR Hashing on Identical Keys and Optimize Slices]
 **Learning:** Passing identical arrays to XOR-folded hash functions (such as `fast_flow_hash(&dst_id, &dst_id, flow_label)`) is completely redundant as identical elements cancel out to zero ($x \oplus x = 0$). This wastes clock cycles on unaligned reads and XOR fold logic. Additionally, replacing slice-level `copy_from_slice` on statically known sizes with array-reference assignments allows LLVM to emit register-level AVX/SSE moves in hot datapaths.
 **Action:** Always inspect hash parameters for self-canceling inputs, and utilize try_from reference assignments for zero-overhead, statically-sized array copies.
+
+## 2026-05-31 - [Defer Expensive 256-bit Hash Computations Until Thread-Local Cache Misses]
+**Learning:** Performing a full 256-bit XOR fold of the 32-byte destination ID before checking the thread-local routing cache introduces avoidable ALU and memory load overhead. Checking the cache using a simplified hash (e.g., reading just the first 32 bits unaligned and masking) completely avoids loading the rest of the 32-byte array and performing the XOR folds on hot cache hits.
+**Action:** Check hot-key caches using lightweight, partial-key indices, and defer any full key hashing or expensive calculations until after a cache miss is confirmed.
