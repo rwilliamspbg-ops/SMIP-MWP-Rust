@@ -90,6 +90,7 @@ fn derive_session_material(
     })
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SessionAead {
     Aes(Aes256Gcm),
     ChaCha(ChaCha20Poly1305),

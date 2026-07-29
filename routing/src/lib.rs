@@ -164,6 +164,14 @@ impl Table {
     }
 
     #[inline]
+    fn simple_cache_index(dest_id: &[u8; 32]) -> usize {
+        let ptr = dest_id.as_ptr() as *const u32;
+        let val = unsafe { ptr.read_unaligned() };
+        (val as usize) & (HOT_CACHE_SIZE - 1)
+    }
+
+    #[inline]
+    #[allow(dead_code)]
     fn cache_index_from_hash(h: u64) -> usize {
         let folded = (h ^ (h >> 32)) as usize;
         folded & (HOT_CACHE_SIZE - 1)
@@ -374,10 +382,9 @@ impl Table {
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
-        let h = Self::hash_32(&dst_id);
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::cache_index_from_hash(h);
+        let idx = Self::simple_cache_index(&dst_id);
 
         if let Some(v) = THREAD_CACHE.with(|c| {
             if c.epochs[idx].get() == cur_epoch && c.dest_ids[idx].get() == dst_id {
@@ -389,6 +396,7 @@ impl Table {
             return Some(v);
         }
 
+        let h = Self::hash_32(&dst_id);
         // Fast-path shard lookup
         let shard = Self::shard_for_from_hash(h);
         let nh_opt = {
