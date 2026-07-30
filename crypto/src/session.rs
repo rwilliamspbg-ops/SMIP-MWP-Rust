@@ -207,17 +207,13 @@ impl HybridSession {
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
         let mut nonce = self.nonce_base;
         let mixed = self.nonce_xor ^ seq;
-        let bytes = mixed.to_be_bytes();
-        // Avoid `copy_from_slice` and its subslice bounds check/overhead by directly writing
-        // individual bytes of the mixed u64 to the pre-allocated nonce array.
-        nonce[4] = bytes[0];
-        nonce[5] = bytes[1];
-        nonce[6] = bytes[2];
-        nonce[7] = bytes[3];
-        nonce[8] = bytes[4];
-        nonce[9] = bytes[5];
-        nonce[10] = bytes[6];
-        nonce[11] = bytes[7];
+        // Perform a single, unaligned 64-bit big-endian write to indices 4 to 11.
+        // This avoids individual byte assignments and multiple bounds check branches,
+        // allowing LLVM to emit a single register-level store instruction.
+        unsafe {
+            let ptr = nonce.as_mut_ptr().add(4) as *mut u64;
+            ptr.write_unaligned(mixed.to_be());
+        }
         nonce
     }
 

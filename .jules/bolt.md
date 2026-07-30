@@ -51,3 +51,11 @@
 ## 2026-05-31 - [Defer Expensive 256-bit Hash Computations Until Thread-Local Cache Misses]
 **Learning:** Performing a full 256-bit XOR fold of the 32-byte destination ID before checking the thread-local routing cache introduces avoidable ALU and memory load overhead. Checking the cache using a simplified hash (e.g., reading just the first 32 bits unaligned and masking) completely avoids loading the rest of the 32-byte array and performing the XOR folds on hot cache hits.
 **Action:** Check hot-key caches using lightweight, partial-key indices, and defer any full key hashing or expensive calculations until after a cache miss is confirmed.
+
+## 2026-06-01 - [Avoid Copying Large Values from Cell on Thread-Local Hits]
+**Learning:** Storing hot thread-local caches using parallel arrays of `Cell` requires retrieving those values via `.get()`, which triggers redundant copies of large structures (such as 32-byte arrays) onto the stack on every single cache hit. Wrapping the entire `ThreadCache` in `std::cell::UnsafeCell` instead allows safe, synchronous, and direct reference comparisons/reads on plain arrays with zero copying or borrow-checking overhead.
+**Action:** Use a single `std::cell::UnsafeCell` for hot, synchronous, non-yielding thread-local caches containing larger Copy types, allowing bounds-free direct element reads and in-place updates.
+
+## 2026-06-02 - [Vectorized Unaligned u64 Writes for Nonce Construction]
+**Learning:** Assigning elements of a fixed-size byte array byte-by-byte (e.g. `nonce[4] = bytes[0]; ...`) to construct cryptographic nonces introduces multiple bounds-check branches and indexing overhead. Doing an unaligned 64-bit big-endian write (`ptr.write_unaligned(mixed.to_be())`) allows LLVM to compile the entire nonce modification down to a single register-level store instruction without bounds checking.
+**Action:** Use unaligned mut pointer writes (`write_unaligned`) to write multi-byte integer values to contiguous indices of fixed-size arrays on performance-critical paths.
