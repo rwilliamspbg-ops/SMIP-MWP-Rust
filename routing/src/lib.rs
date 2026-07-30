@@ -1,6 +1,5 @@
 use ahash::AHashMap;
 use parking_lot::RwLock;
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -69,17 +68,17 @@ const FAST_SHARDS: usize = 16;
 static GLOBAL_TABLE_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 struct ThreadCache {
-    epochs: [Cell<u64>; HOT_CACHE_SIZE],
-    dest_ids: [Cell<[u8; 32]>; HOT_CACHE_SIZE],
-    next_hops: [Cell<[u8; 32]>; HOT_CACHE_SIZE],
+    epochs: [u64; HOT_CACHE_SIZE],
+    dest_ids: [[u8; 32]; HOT_CACHE_SIZE],
+    next_hops: [[u8; 32]; HOT_CACHE_SIZE],
 }
 
 thread_local! {
-    static THREAD_CACHE: ThreadCache = const { ThreadCache {
-        epochs: [const { Cell::new(0) }; HOT_CACHE_SIZE],
-        dest_ids: [const { Cell::new([0; 32]) }; HOT_CACHE_SIZE],
-        next_hops: [const { Cell::new([0; 32]) }; HOT_CACHE_SIZE],
-    } };
+    static THREAD_CACHE: std::cell::UnsafeCell<ThreadCache> = const { std::cell::UnsafeCell::new(ThreadCache {
+        epochs: [0; HOT_CACHE_SIZE],
+        dest_ids: [[0; 32]; HOT_CACHE_SIZE],
+        next_hops: [[0; 32]; HOT_CACHE_SIZE],
+    }) };
 }
 
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
@@ -179,9 +178,10 @@ impl Table {
 
     fn cache_hot_entry_with_idx(idx: usize, cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
         THREAD_CACHE.with(|c| {
-            c.epochs[idx].set(cur_epoch);
-            c.dest_ids[idx].set(dest_id);
-            c.next_hops[idx].set(next_hop);
+            let cache = unsafe { &mut *c.get() };
+            cache.epochs[idx] = cur_epoch;
+            cache.dest_ids[idx] = dest_id;
+            cache.next_hops[idx] = next_hop;
         });
     }
 
@@ -387,8 +387,9 @@ impl Table {
         let idx = Self::simple_cache_index(&dst_id);
 
         if let Some(v) = THREAD_CACHE.with(|c| {
-            if c.epochs[idx].get() == cur_epoch && c.dest_ids[idx].get() == dst_id {
-                Some(c.next_hops[idx].get())
+            let cache = unsafe { &*c.get() };
+            if cache.epochs[idx] == cur_epoch && cache.dest_ids[idx] == dst_id {
+                Some(cache.next_hops[idx])
             } else {
                 None
             }
