@@ -59,3 +59,7 @@
 ## 2026-06-02 - [Vectorized Unaligned u64 Writes for Nonce Construction]
 **Learning:** Assigning elements of a fixed-size byte array byte-by-byte (e.g. `nonce[4] = bytes[0]; ...`) to construct cryptographic nonces introduces multiple bounds-check branches and indexing overhead. Doing an unaligned 64-bit big-endian write (`ptr.write_unaligned(mixed.to_be())`) allows LLVM to compile the entire nonce modification down to a single register-level store instruction without bounds checking.
 **Action:** Use unaligned mut pointer writes (`write_unaligned`) to write multi-byte integer values to contiguous indices of fixed-size arrays on performance-critical paths.
+
+## 2026-06-03 - [Flow-Aware Thread-Local Cache for Multi-Path Spraying]
+**Learning:** While destination-only caching breaks multi-path routing flow affinity, caching spray-routing decisions under a joint key composed of both the destination ID and the flow label provides safe, incredibly high-performance O(1) thread-local caching without breaking load balancing or flow affinity.
+**Action:** Use multi-key or joint-key thread-local caches to fast-path load-balanced/spray routing lookups, and validate both the destination ID and flow label on cache hits.
