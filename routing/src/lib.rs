@@ -81,6 +81,22 @@ thread_local! {
     }) };
 }
 
+struct SprayCache {
+    epochs: [u64; HOT_CACHE_SIZE],
+    dest_ids: [[u8; 32]; HOT_CACHE_SIZE],
+    flow_labels: [u32; HOT_CACHE_SIZE],
+    next_hops: [[u8; 32]; HOT_CACHE_SIZE],
+}
+
+thread_local! {
+    static SPRAY_CACHE: std::cell::UnsafeCell<SprayCache> = const { std::cell::UnsafeCell::new(SprayCache {
+        epochs: [0; HOT_CACHE_SIZE],
+        dest_ids: [[0; 32]; HOT_CACHE_SIZE],
+        flow_labels: [0; HOT_CACHE_SIZE],
+        next_hops: [[0; 32]; HOT_CACHE_SIZE],
+    }) };
+}
+
 /// Fast non-cryptographic hash of (src_id, dst_id, flow_label) used for
 /// predictive routing. AHasher replaces the previous SipHash-backed default
 /// hasher, reducing per-miss cost on the trusted datapath hot path.
@@ -167,6 +183,13 @@ impl Table {
         let ptr = dest_id.as_ptr() as *const u32;
         let val = unsafe { ptr.read_unaligned() };
         (val as usize) & (HOT_CACHE_SIZE - 1)
+    }
+
+    #[inline]
+    fn spray_cache_index(dest_id: &[u8; 32], flow_label: u32) -> usize {
+        let ptr = dest_id.as_ptr() as *const u32;
+        let val = unsafe { ptr.read_unaligned() };
+        ((val ^ flow_label) as usize) & (HOT_CACHE_SIZE - 1)
     }
 
     #[inline]
@@ -324,46 +347,77 @@ impl Table {
     /// Optimized: holds read lock and performs flow-affinity spraying over alternate channels
     /// directly on reference to avoid cloning RouteEntry.
     pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
+        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
+        let idx = Self::spray_cache_index(&dst_id, flow_label);
+
+        if let Some(v) = SPRAY_CACHE.with(|c| {
+            let cache = unsafe { &*c.get() };
+            if cache.epochs[idx] == cur_epoch
+                && cache.dest_ids[idx] == dst_id
+                && cache.flow_labels[idx] == flow_label
+            {
+                Some(cache.next_hops[idx])
+            } else {
+                None
+            }
+        }) {
+            return Some(v);
+        }
+
         let h = Self::hash_32(&dst_id);
         let shard = Self::shard_for_from_hash(h);
 
-        let map = self.fast_shards[shard].read();
-        if let Some(entry) = map.get(&dst_id) {
-            if entry.alternate_channels.is_empty() {
-                return Some(entry.next_hop_id);
-            } else {
-                let choices = 1 + entry.alternate_channels.len();
-                // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
-                // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
-                // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
-                let idx = (flow_label as usize) % choices;
-                if idx == 0 {
-                    return Some(entry.next_hop_id);
+        let nh = {
+            let map = self.fast_shards[shard].read();
+            if let Some(entry) = map.get(&dst_id) {
+                if entry.alternate_channels.is_empty() {
+                    Some(entry.next_hop_id)
                 } else {
-                    return Some(entry.alternate_channels[idx - 1]);
+                    let choices = 1 + entry.alternate_channels.len();
+                    // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
+                    // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
+                    // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
+                    let idx = (flow_label as usize) % choices;
+                    if idx == 0 {
+                        Some(entry.next_hop_id)
+                    } else {
+                        Some(entry.alternate_channels[idx - 1])
+                    }
+                }
+            } else {
+                let inner = self.inner.read();
+                if let Some(entry) = inner.entries.get(&dst_id) {
+                    if entry.alternate_channels.is_empty() {
+                        Some(entry.next_hop_id)
+                    } else {
+                        let choices = 1 + entry.alternate_channels.len();
+                        // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
+                        // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
+                        // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
+                        let idx = (flow_label as usize) % choices;
+                        if idx == 0 {
+                            Some(entry.next_hop_id)
+                        } else {
+                            Some(entry.alternate_channels[idx - 1])
+                        }
+                    }
+                } else {
+                    None
                 }
             }
+        };
+
+        if let Some(v) = nh {
+            SPRAY_CACHE.with(|c| {
+                let cache = unsafe { &mut *c.get() };
+                cache.epochs[idx] = cur_epoch;
+                cache.dest_ids[idx] = dst_id;
+                cache.flow_labels[idx] = flow_label;
+                cache.next_hops[idx] = v;
+            });
         }
 
-        let inner = self.inner.read();
-        if let Some(entry) = inner.entries.get(&dst_id) {
-            if entry.alternate_channels.is_empty() {
-                return Some(entry.next_hop_id);
-            } else {
-                let choices = 1 + entry.alternate_channels.len();
-                // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
-                // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
-                // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
-                let idx = (flow_label as usize) % choices;
-                if idx == 0 {
-                    return Some(entry.next_hop_id);
-                } else {
-                    return Some(entry.alternate_channels[idx - 1]);
-                }
-            }
-        }
-
-        None
+        nh
     }
 
     /// Select a single channel by index (round-robin if out of range)
