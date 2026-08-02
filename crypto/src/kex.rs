@@ -141,19 +141,19 @@ impl HybridKEX {
         let (ct, mlkem_ss) = init_ek
             .encapsulate(&mut OsRng)
             .map_err(|_| KexError::EncapsulateFailed)?;
-        let ct_bytes: Vec<u8> = ct.as_slice().to_vec();
+        let ct_bytes = ct.as_slice();
 
         // Wire message: responder x25519 pub || mlkem ciphertext
         let mut msg = Vec::with_capacity(RESPONDER_MSG_LEN);
         msg.extend_from_slice(self.x25519_pub.as_bytes());
-        msg.extend_from_slice(&ct_bytes);
+        msg.extend_from_slice(ct_bytes);
 
         // Derive shared secret
         let transcript = build_transcript(
             &peer_x25519_bytes,
             self.x25519_pub.as_bytes(),
             init_mlkem_pub_bytes,
-            &ct_bytes,
+            ct_bytes,
         );
         let ss = derive_session_secret(x25519_ss.as_bytes(), mlkem_ss.as_slice(), &transcript)?;
 
@@ -231,9 +231,11 @@ fn derive_session_secret(
     let (prk_pqc, _) = Hkdf::<Sha256>::extract(Some(transcript), mlkem_ss);
 
     // combined_prk = HKDF-Extract(transcript, prk_classical || prk_pqc)
-    let mut combined = Vec::with_capacity(prk_classical.len() + prk_pqc.len());
-    combined.extend_from_slice(&prk_classical);
-    combined.extend_from_slice(&prk_pqc);
+    // Both prk_classical and prk_pqc are exactly 32 bytes (SHA-256 size).
+    // Using a 64-byte stack array avoids dynamic heap allocations in hot-path handshakes.
+    let mut combined = [0u8; 64];
+    combined[..32].copy_from_slice(prk_classical.as_ref());
+    combined[32..].copy_from_slice(prk_pqc.as_ref());
     let (prk_combined, _) = Hkdf::<Sha256>::extract(Some(transcript), &combined);
 
     // session_secret = HKDF-Expand(combined_prk, "smip-mwp-kex-v1", 64)
