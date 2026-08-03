@@ -63,3 +63,7 @@
 ## 2026-06-03 - [Flow-Aware Thread-Local Cache for Multi-Path Spraying]
 **Learning:** While destination-only caching breaks multi-path routing flow affinity, caching spray-routing decisions under a joint key composed of both the destination ID and the flow label provides safe, incredibly high-performance O(1) thread-local caching without breaking load balancing or flow affinity.
 **Action:** Use multi-key or joint-key thread-local caches to fast-path load-balanced/spray routing lookups, and validate both the destination ID and flow label on cache hits.
+
+## 2026-06-04 - [Stack-Allocated Session Secret for Handshakes]
+**Learning:** Returning heap-allocated structures like `Vec<u8>` for cryptographic session secrets in key exchange handshakes incurs unnecessary heap allocation/deallocation overhead. Replacing `Vec<u8>` with stack-allocated fixed-size arrays (`[u8; 64]`) avoids the global memory allocator entirely, speeding up handshakes measurably.
+**Action:** Always return fixed-size arrays or stack-allocated structures instead of dynamically allocated heap types for fixed-length cryptographic material.

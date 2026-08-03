@@ -118,7 +118,10 @@ impl HybridKEX {
     /// shared secret. Returns `(responder_msg, session_secret)`.
     ///
     /// `responder_msg` wire format: x25519_resp_pub (32) || mlkem_ciphertext (1088).
-    pub fn respond(&mut self, initiator_pub: &[u8]) -> Result<(Vec<u8>, Vec<u8>), KexError> {
+    pub fn respond(
+        &mut self,
+        initiator_pub: &[u8],
+    ) -> Result<(Vec<u8>, [u8; SESSION_SECRET_LEN]), KexError> {
         if initiator_pub.len() < INITIATOR_PUB_LEN {
             return Err(KexError::BadInitiatorPub);
         }
@@ -165,7 +168,7 @@ impl HybridKEX {
 
     /// **Initiator side**: receive the responder's message, decapsulate, and derive the
     /// matching shared secret.
-    pub fn finish(&mut self, responder_msg: &[u8]) -> Result<Vec<u8>, KexError> {
+    pub fn finish(&mut self, responder_msg: &[u8]) -> Result<[u8; SESSION_SECRET_LEN], KexError> {
         if responder_msg.len() < RESPONDER_MSG_LEN {
             return Err(KexError::BadResponderMsg);
         }
@@ -224,7 +227,7 @@ fn derive_session_secret(
     x25519_ss: &[u8],
     mlkem_ss: &[u8],
     transcript: &[u8],
-) -> Result<Vec<u8>, KexError> {
+) -> Result<[u8; SESSION_SECRET_LEN], KexError> {
     // prk_classical = HKDF-Extract(transcript, x25519_ss)
     let (prk_classical, _) = Hkdf::<Sha256>::extract(Some(transcript), x25519_ss);
     // prk_pqc = HKDF-Extract(transcript, mlkem_ss)
@@ -240,7 +243,7 @@ fn derive_session_secret(
 
     // session_secret = HKDF-Expand(combined_prk, "smip-mwp-kex-v1", 64)
     let hkdf = Hkdf::<Sha256>::from_prk(&prk_combined).map_err(|_| KexError::HkdfExpandFailed)?;
-    let mut session_secret = vec![0u8; SESSION_SECRET_LEN];
+    let mut session_secret = [0u8; SESSION_SECRET_LEN];
     hkdf.expand(b"smip-mwp-kex-v1", &mut session_secret)
         .map_err(|_| KexError::HkdfExpandFailed)?;
 
