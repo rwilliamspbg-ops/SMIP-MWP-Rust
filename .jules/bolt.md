@@ -67,3 +67,7 @@
 ## 2026-06-04 - [Stack-Allocated Session Secret for Handshakes]
 **Learning:** Returning heap-allocated structures like `Vec<u8>` for cryptographic session secrets in key exchange handshakes incurs unnecessary heap allocation/deallocation overhead. Replacing `Vec<u8>` with stack-allocated fixed-size arrays (`[u8; 64]`) avoids the global memory allocator entirely, speeding up handshakes measurably.
 **Action:** Always return fixed-size arrays or stack-allocated structures instead of dynamically allocated heap types for fixed-length cryptographic material.
+
+## 2026-06-05 - [Compile-Time Array Casting for Bounds-Free Header Parsing]
+**Learning:** Slicing dynamic byte slices (`&[u8]`) even after checking the minimum length causes the compiler to insert runtime bounds checks on every subsequent offset read or write. Casting the slice to a fixed-size array reference (`&[u8; HEADER_SIZE]`) once allows LLVM to statically prove bounds safety, completely eliminating all bounds-checking branches and yielding high instruction-density register-level moves.
+**Action:** Cast validated slices to fixed-size array references (`try_into().unwrap()`) on performance-critical paths to enable complete compile-time bounds elimination.

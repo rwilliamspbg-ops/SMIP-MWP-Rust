@@ -48,6 +48,7 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
+        let buf: &mut [u8; HEADER_SIZE] = (&mut buf[..HEADER_SIZE]).try_into().unwrap();
         *<&mut [u8; 32]>::try_from(&mut buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap() = self.src_id;
         *<&mut [u8; 32]>::try_from(&mut buf[DST_OFFSET..DST_OFFSET + 32]).unwrap() = self.dst_id;
         *<&mut [u8; 4]>::try_from(&mut buf[FLOW_OFFSET..FLOW_OFFSET + 4]).unwrap() =
@@ -67,6 +68,7 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
+        let buf: &[u8; HEADER_SIZE] = buf[..HEADER_SIZE].try_into().unwrap();
         let src_id = *<&[u8; 32]>::try_from(&buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap();
         let dst_id = *<&[u8; 32]>::try_from(&buf[DST_OFFSET..DST_OFFSET + 32]).unwrap();
         let flow_label =
@@ -105,7 +107,7 @@ impl Default for Header {
 /// struct allocation.  Use this on the read-only hot path instead of
 /// `Header::parse()`.
 pub struct HeaderViewRef<'a> {
-    buf: &'a [u8],
+    buf: &'a [u8; HEADER_SIZE],
 }
 
 impl<'a> HeaderViewRef<'a> {
@@ -113,6 +115,7 @@ impl<'a> HeaderViewRef<'a> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
+        let buf = buf[..HEADER_SIZE].try_into().unwrap();
         Ok(Self { buf })
     }
     #[inline]
@@ -138,7 +141,7 @@ impl<'a> HeaderViewRef<'a> {
 }
 
 pub struct HeaderView<'a> {
-    buf: &'a mut [u8],
+    buf: &'a mut [u8; HEADER_SIZE],
 }
 
 impl<'a> HeaderView<'a> {
@@ -146,6 +149,7 @@ impl<'a> HeaderView<'a> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
+        let buf = (&mut buf[..HEADER_SIZE]).try_into().unwrap();
         Ok(Self { buf })
     }
     pub fn src_id(&self) -> &[u8; 32] {
