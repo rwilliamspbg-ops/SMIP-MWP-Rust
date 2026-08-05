@@ -549,13 +549,26 @@ impl Router {
     }
 
     fn compute_flow_key(&self, src_id: [u8; 32], dst_id: [u8; 32], flow_label: u32) -> u64 {
-        let mut key: u64 = 0;
-        for i in 0..8 {
-            let a = src_id[i * 4] as u64;
-            let b = dst_id[i * 4] as u64;
-            key ^= (a << 32) | b;
-        }
-        key ^ (flow_label as u64)
+        // Since (a << 32) | b operates on non-overlapping bitfields, we can mathematically
+        // consolidate the XOR folding of src_id and dst_id bytes individually on the stack.
+        // This completely eliminates the loop, index multiplications, and multiple bitwise operations.
+        let a = (src_id[0] as u64)
+            ^ (src_id[4] as u64)
+            ^ (src_id[8] as u64)
+            ^ (src_id[12] as u64)
+            ^ (src_id[16] as u64)
+            ^ (src_id[20] as u64)
+            ^ (src_id[24] as u64)
+            ^ (src_id[28] as u64);
+        let b = (dst_id[0] as u64)
+            ^ (dst_id[4] as u64)
+            ^ (dst_id[8] as u64)
+            ^ (dst_id[12] as u64)
+            ^ (dst_id[16] as u64)
+            ^ (dst_id[20] as u64)
+            ^ (dst_id[24] as u64)
+            ^ (dst_id[28] as u64);
+        ((a << 32) | b) ^ (flow_label as u64)
     }
 
     pub fn lookup_policy(
