@@ -331,8 +331,6 @@ impl Forwarder {
 
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-
                         let start = self.arena.len();
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
                         let remaining = self.arena.capacity().saturating_sub(self.arena.len());
@@ -340,9 +338,10 @@ impl Forwarder {
                             self.arena.reserve(needed - remaining);
                         }
 
-                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                        let payload_start = self.arena.len();
-                        self.arena.extend_from_slice(payload);
+                        // Combine header and payload into a single copy operation to reduce slice copy overhead
+                        self.arena
+                            .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                        let payload_start = start + HEADER_SIZE;
 
                         let enc_start = std::time::Instant::now();
                         match session.encrypt_into_slice(
@@ -383,8 +382,6 @@ impl Forwarder {
                 metrics.predict_hits += 1;
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let payload = &pkt[HEADER_SIZE..HEADER_SIZE + payload_len];
-
                         let start = self.arena.len();
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
                         let remaining = self.arena.capacity().saturating_sub(self.arena.len());
@@ -392,9 +389,10 @@ impl Forwarder {
                             self.arena.reserve(needed - remaining);
                         }
 
-                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                        let payload_start = self.arena.len();
-                        self.arena.extend_from_slice(payload);
+                        // Combine header and payload into a single copy operation to reduce slice copy overhead
+                        self.arena
+                            .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                        let payload_start = start + HEADER_SIZE;
 
                         let enc_start = std::time::Instant::now();
                         match session.encrypt_into_slice(
@@ -845,27 +843,26 @@ impl Forwarder {
                     };
 
                     let start = self.arena.len();
-                    let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                    let remaining = self.arena.capacity().saturating_sub(self.arena.len());
-                    if remaining < needed {
-                        self.arena.reserve(needed - remaining);
-                    }
-
-                    // Copy header directly into the arena
-                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                    // Overwrite next_hop field directly in the arena using register-level vectorized assignment
-                    *<&mut [u8; 32]>::try_from(
-                        &mut self.arena.as_mut_slice()[start + 32..start + 64],
-                    )
-                    .unwrap() = next_hop;
-
                     let mut was_encrypted = false;
                     let mut was_route_miss = false;
 
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let payload_start = self.arena.len();
+                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
+                        if remaining < needed {
+                            self.arena.reserve(needed - remaining);
+                        }
+
+                        // Combine header and payload into a single copy operation to reduce slice copy overhead
                         self.arena
-                            .extend_from_slice(&pkt[HEADER_SIZE..HEADER_SIZE + payload_len]);
+                            .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                        // Overwrite next_hop field directly in the arena using register-level vectorized assignment
+                        *<&mut [u8; 32]>::try_from(
+                            &mut self.arena.as_mut_slice()[start + 32..start + 64],
+                        )
+                        .unwrap() = next_hop;
+
+                        let payload_start = start + HEADER_SIZE;
 
                         if let Some(session) = session_ref {
                             let enc_start = std::time::Instant::now();
@@ -896,8 +893,23 @@ impl Forwarder {
                                 }
                             }
                         }
-                    } else if payload_len > 0 {
-                        was_route_miss = true;
+                    } else {
+                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
+                        if remaining < needed {
+                            self.arena.reserve(needed - remaining);
+                        }
+
+                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                        // Overwrite next_hop field directly in the arena using register-level vectorized assignment
+                        *<&mut [u8; 32]>::try_from(
+                            &mut self.arena.as_mut_slice()[start + 32..start + 64],
+                        )
+                        .unwrap() = next_hop;
+
+                        if payload_len > 0 {
+                            was_route_miss = true;
+                        }
                     }
 
                     if was_route_miss {
@@ -905,13 +917,13 @@ impl Forwarder {
                         stats.route_misses += 1;
 
                         let f_start = self.arena.len();
-                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
+                        // Copy entire packet in a single operation to reduce slice copy overhead
+                        self.arena.extend_from_slice(&pkt);
                         // Overwrite next_hop field directly in the arena using register-level vectorized assignment
                         *<&mut [u8; 32]>::try_from(
                             &mut self.arena.as_mut_slice()[f_start + 32..f_start + 64],
                         )
                         .unwrap() = next_hop;
-                        self.arena.extend_from_slice(&pkt[HEADER_SIZE..]);
                         let len = self.arena.len() - f_start;
                         self.offsets.push((f_start, len));
                         stats.forwarded += 1;
