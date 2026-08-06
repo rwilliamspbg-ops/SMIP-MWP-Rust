@@ -71,3 +71,7 @@
 ## 2026-06-05 - [Compile-Time Array Casting for Bounds-Free Header Parsing]
 **Learning:** Slicing dynamic byte slices (`&[u8]`) even after checking the minimum length causes the compiler to insert runtime bounds checks on every subsequent offset read or write. Casting the slice to a fixed-size array reference (`&[u8; HEADER_SIZE]`) once allows LLVM to statically prove bounds safety, completely eliminating all bounds-checking branches and yielding high instruction-density register-level moves.
 **Action:** Cast validated slices to fixed-size array references (`try_into().unwrap()`) on performance-critical paths to enable complete compile-time bounds elimination.
+
+## 2026-06-06 - [Consolidate Consecutive Slice Copies on Hot Paths]
+**Learning:** Copying consecutive slices of the same source buffer (e.g., copying a packet header and then its payload) in multiple `extend_from_slice` calls introduces redundant bounds checks, branch evaluations, and pointer increments.
+**Action:** Always combine consecutive slice copies from a single source buffer into a single larger slice copy operation, and offset subsequent indexing mathematically.
