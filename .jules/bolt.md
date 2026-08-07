@@ -75,3 +75,7 @@
 ## 2026-06-06 - [Consolidate Consecutive Slice Copies on Hot Paths]
 **Learning:** Copying consecutive slices of the same source buffer (e.g., copying a packet header and then its payload) in multiple `extend_from_slice` calls introduces redundant bounds checks, branch evaluations, and pointer increments.
 **Action:** Always combine consecutive slice copies from a single source buffer into a single larger slice copy operation, and offset subsequent indexing mathematically.
+
+## 2026-06-07 - [Disable Hot-Path Profiling/Timer Syscalls by Default]
+**Learning:** Querying the clock via `std::time::Instant::now()` and `.elapsed()` per-packet or per-batch in high-throughput network loops introduces non-trivial system/vDSO syscall and CPU cache overhead, consuming up to 10% of forwarding budgets.
+**Action:** Cache profiling configs at construction and conditionalize all performance timers behind a flag (e.g. `profile_enabled`), disabling them by default to maximize raw forwarding throughput.
