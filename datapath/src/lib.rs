@@ -114,6 +114,7 @@ pub struct Forwarder {
     mcr_dropped: AtomicU64,
     mcr_enabled: bool,
     mcr_spray_mode: String,
+    profile_enabled: bool,
 }
 
 struct Profiler {
@@ -225,6 +226,7 @@ impl Forwarder {
         let session = HybridSession::new(&session_secret, &session_info).ok();
         let mcr_enabled = mcr_config::get_mcr_enabled();
         let mcr_spray_mode = mcr_config::get_mcr_spray_mode();
+        let profile_enabled = mcr_config::get_profile_enabled();
         Self {
             routes,
             session,
@@ -235,6 +237,7 @@ impl Forwarder {
             mcr_dropped: AtomicU64::new(0),
             mcr_enabled,
             mcr_spray_mode,
+            profile_enabled,
         }
     }
 
@@ -343,16 +346,22 @@ impl Forwarder {
                             .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
                         let payload_start = start + HEADER_SIZE;
 
-                        let enc_start = std::time::Instant::now();
+                        let enc_start = if self.profile_enabled {
+                            Some(std::time::Instant::now())
+                        } else {
+                            None
+                        };
                         match session.encrypt_into_slice(
                             &mut self.arena.as_mut_slice()
                                 [payload_start..payload_start + payload_len],
                             seq_num,
                         ) {
                             Ok(tag) => {
-                                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                                if let Some(start) = enc_start {
+                                    let enc_ns = start.elapsed().as_nanos() as u64;
+                                    metrics.encrypt_ns += enc_ns;
+                                }
                                 metrics.encrypt_count += 1;
-                                metrics.encrypt_ns += enc_ns;
                                 self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
@@ -394,16 +403,22 @@ impl Forwarder {
                             .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
                         let payload_start = start + HEADER_SIZE;
 
-                        let enc_start = std::time::Instant::now();
+                        let enc_start = if self.profile_enabled {
+                            Some(std::time::Instant::now())
+                        } else {
+                            None
+                        };
                         match session.encrypt_into_slice(
                             &mut self.arena.as_mut_slice()
                                 [payload_start..payload_start + payload_len],
                             seq_num,
                         ) {
                             Ok(tag) => {
-                                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                                if let Some(start) = enc_start {
+                                    let enc_ns = start.elapsed().as_nanos() as u64;
+                                    metrics.encrypt_ns += enc_ns;
+                                }
                                 metrics.encrypt_count += 1;
-                                metrics.encrypt_ns += enc_ns;
                                 self.arena.extend_from_slice(tag.as_slice());
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
@@ -437,6 +452,7 @@ impl Forwarder {
         routes: &Table,
         session: Option<&HybridSession>,
         _use_avx2: bool,
+        profile_enabled: bool,
     ) -> PacketOutput {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
             let src_id: [u8; 32] = *h.src_id();
@@ -451,10 +467,15 @@ impl Forwarder {
                     .lookup_or_predict(src_id, dst_id, flow_label)
                     .is_some()
             {
-                let enc_start = std::time::Instant::now();
+                let enc_start = if profile_enabled {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let mut out = Self::encrypt_packet_owned(pkt, seq_num, payload_len, session);
-                let enc_ns = enc_start.elapsed().as_nanos() as u64;
-                out.enc_ns = enc_ns;
+                if let Some(start) = enc_start {
+                    out.enc_ns = start.elapsed().as_nanos() as u64;
+                }
                 return out;
             } else {
                 return PacketOutput {
@@ -482,6 +503,7 @@ impl Forwarder {
         routes: &Table,
         session: Option<&HybridSession>,
         _use_avx2: bool,
+        profile_enabled: bool,
     ) -> (Vec<u8>, bool, bool, u64) {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
             let src_id: [u8; 32] = *h.src_id();
@@ -495,7 +517,11 @@ impl Forwarder {
                     .lookup_or_predict(src_id, dst_id, flow_label)
                     .is_some()
             {
-                let enc_start = std::time::Instant::now();
+                let enc_start = if profile_enabled {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let mut encrypted = false;
                 let mut route_miss = false;
                 if let Some(session) = session {
@@ -526,7 +552,11 @@ impl Forwarder {
                         route_miss = true;
                     }
                 }
-                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                let enc_ns = if let Some(start) = enc_start {
+                    start.elapsed().as_nanos() as u64
+                } else {
+                    0
+                };
 
                 return (pkt, encrypted, route_miss, enc_ns);
             } else {
@@ -544,6 +574,7 @@ impl Forwarder {
         routes: &Table,
         session: Option<&HybridSession>,
         _use_avx2: bool,
+        profile_enabled: bool,
     ) -> (Vec<u8>, bool, bool, u64) {
         if let Ok(h) = HeaderViewRef::new(pkt) {
             let src_id: [u8; 32] = *h.src_id();
@@ -557,7 +588,11 @@ impl Forwarder {
                     .lookup_or_predict(src_id, dst_id, flow_label)
                     .is_some()
             {
-                let enc_start = std::time::Instant::now();
+                let enc_start = if profile_enabled {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let mut encrypted = false;
                 let mut route_miss = false;
                 if let Some(session) = session {
@@ -588,7 +623,11 @@ impl Forwarder {
                         route_miss = true;
                     }
                 }
-                let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                let enc_ns = if let Some(start) = enc_start {
+                    start.elapsed().as_nanos() as u64
+                } else {
+                    0
+                };
 
                 return (std::mem::take(pkt), encrypted, route_miss, enc_ns);
             } else {
@@ -657,7 +696,11 @@ impl Forwarder {
     }
 
     fn append_outputs(&mut self, outputs: Vec<PacketOutput>, received: usize) -> ForwarderStats {
-        let append_start = std::time::Instant::now();
+        let append_start = if self.profile_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         self.arena.clear();
         self.offsets.clear();
 
@@ -699,11 +742,13 @@ impl Forwarder {
 
         metrics.apply();
 
-        let append_ns = append_start.elapsed().as_nanos();
-        let prof = global_profiler();
-        prof.append_count.fetch_add(1, Ordering::Relaxed);
-        prof.append_ns
-            .fetch_add(append_ns as u64, Ordering::Relaxed);
+        if let Some(start) = append_start {
+            let append_ns = start.elapsed().as_nanos();
+            let prof = global_profiler();
+            prof.append_count.fetch_add(1, Ordering::Relaxed);
+            prof.append_ns
+                .fetch_add(append_ns as u64, Ordering::Relaxed);
+        }
 
         stats
     }
@@ -737,7 +782,11 @@ impl Forwarder {
             };
 
             let mut metrics = LocalMetrics::default();
-            let start_batch = std::time::Instant::now();
+            let start_batch = if self.profile_enabled {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
 
             for pkt in frames {
                 let forwarded = self.handle_packet(&pkt, use_avx2, &mut stats, &mut metrics);
@@ -751,8 +800,10 @@ impl Forwarder {
                 }
             }
 
-            let elapsed = start_batch.elapsed().as_nanos() as u64;
-            metrics.handle_ns += elapsed;
+            if let Some(start) = start_batch {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                metrics.handle_ns += elapsed;
+            }
             metrics.handle_count += received as u64;
 
             metrics.apply();
@@ -764,9 +815,10 @@ impl Forwarder {
 
         let routes = &self.routes;
         let session = self.session.as_ref();
+        let profile_enabled = self.profile_enabled;
         let outputs = frames
             .into_par_iter()
-            .map(|pkt| Self::process_packet_owned(pkt, routes, session, use_avx2))
+            .map(|pkt| Self::process_packet_owned(pkt, routes, session, use_avx2, profile_enabled))
             .collect::<Vec<_>>();
 
         let stats = self.append_outputs(outputs, received);
@@ -816,7 +868,11 @@ impl Forwarder {
 
         if spray_mode != "full" {
             let mut metrics = LocalMetrics::default();
-            let start_batch = std::time::Instant::now();
+            let start_batch = if self.profile_enabled {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
@@ -865,16 +921,22 @@ impl Forwarder {
                         let payload_start = start + HEADER_SIZE;
 
                         if let Some(session) = session_ref {
-                            let enc_start = std::time::Instant::now();
+                            let enc_start = if self.profile_enabled {
+                                Some(std::time::Instant::now())
+                            } else {
+                                None
+                            };
                             match session.encrypt_into_slice(
                                 &mut self.arena.as_mut_slice()
                                     [payload_start..payload_start + payload_len],
                                 seq_num,
                             ) {
                                 Ok(tag) => {
-                                    let enc_ns = enc_start.elapsed().as_nanos() as u64;
+                                    if let Some(start) = enc_start {
+                                        let enc_ns = start.elapsed().as_nanos() as u64;
+                                        metrics.encrypt_ns += enc_ns;
+                                    }
                                     metrics.encrypt_count += 1;
-                                    metrics.encrypt_ns += enc_ns;
 
                                     self.arena.extend_from_slice(tag.as_slice());
                                     if pkt.len() > HEADER_SIZE + payload_len {
@@ -946,8 +1008,10 @@ impl Forwarder {
                 }
             }
 
-            let elapsed = start_batch.elapsed().as_nanos() as u64;
-            metrics.handle_ns += elapsed;
+            if let Some(start) = start_batch {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                metrics.handle_ns += elapsed;
+            }
             metrics.handle_count += received as u64;
 
             metrics.apply();
@@ -989,12 +1053,14 @@ impl Forwarder {
                 // allocating intermediate PacketOutput/Vecs.
                 let mut local_enc_count = 0u64;
                 let mut local_enc_ns = 0u64;
+                let profile_enabled = self.profile_enabled;
                 for (mut pkt, _dst) in duplicated.into_iter() {
                     let out = Self::process_packet_owned_inline(
                         &mut pkt,
                         routes_ref,
                         session_ref,
                         use_avx2,
+                        profile_enabled,
                     );
                     let start = self.arena.len();
                     self.arena.extend_from_slice(&out.0);
@@ -1034,10 +1100,17 @@ impl Forwarder {
                 // Vecs and flags to the main thread which will append into the
                 // arena. This avoids extra intermediate allocations inside the
                 // parallel map.
+                let profile_enabled = self.profile_enabled;
                 let outputs: Vec<(Vec<u8>, bool, bool, u64)> = duplicated
                     .into_par_iter()
                     .map(|(pkt, _)| {
-                        Self::process_packet_owned_consuming(pkt, routes_ref, session_ref, use_avx2)
+                        Self::process_packet_owned_consuming(
+                            pkt,
+                            routes_ref,
+                            session_ref,
+                            use_avx2,
+                            profile_enabled,
+                        )
                     })
                     .collect();
 
@@ -1127,7 +1200,11 @@ impl Forwarder {
         let use_avx2 = false;
 
         let mut metrics = LocalMetrics::default();
-        let start_batch = std::time::Instant::now();
+        let start_batch = if self.profile_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         for &idx in ring.active.iter().take(received) {
             let pkt = ring.slot(idx);
@@ -1142,8 +1219,10 @@ impl Forwarder {
             }
         }
 
-        let elapsed = start_batch.elapsed().as_nanos() as u64;
-        metrics.handle_ns += elapsed;
+        if let Some(start) = start_batch {
+            let elapsed = start.elapsed().as_nanos() as u64;
+            metrics.handle_ns += elapsed;
+        }
         metrics.handle_count += received as u64;
 
         metrics.apply();
