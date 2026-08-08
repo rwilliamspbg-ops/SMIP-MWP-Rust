@@ -79,3 +79,7 @@
 ## 2026-06-07 - [Disable Hot-Path Profiling/Timer Syscalls by Default]
 **Learning:** Querying the clock via `std::time::Instant::now()` and `.elapsed()` per-packet or per-batch in high-throughput network loops introduces non-trivial system/vDSO syscall and CPU cache overhead, consuming up to 10% of forwarding budgets.
 **Action:** Cache profiling configs at construction and conditionalize all performance timers behind a flag (e.g. `profile_enabled`), disabling them by default to maximize raw forwarding throughput.
+
+## 2026-06-08 - [Zero-Allocation Transactional Full-Spray in Arena]
+**Learning:** Optimizing duplicate-packet spray loops to write directly to a shared arena avoids heavy heap allocation and clones. However, copying sub-slices before encryption requires careful handling of payload boundaries so that tags do not misalign trailing bytes. Furthermore, to avoid permanent packet truncation if encryption fails, the loop must transactionally roll back the arena length and append the unmodified fallback packet.
+**Action:** When performing in-place mutations in a pre-allocated buffer with fallbacks, always track the transaction start offset and utilize truncation rollbacks to safely restore original packets on failure.
