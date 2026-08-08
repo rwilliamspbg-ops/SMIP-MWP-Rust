@@ -567,77 +567,6 @@ impl Forwarder {
         (pkt, false, false, 0)
     }
 
-    // Inline variant used by serial MCR paths to avoid allocating PacketOutput/Vecs.
-    // Returns a tuple: (bytes, encrypted, route_miss, enc_ns)
-    fn process_packet_owned_inline(
-        pkt: &mut Vec<u8>,
-        routes: &Table,
-        session: Option<&HybridSession>,
-        _use_avx2: bool,
-        profile_enabled: bool,
-    ) -> (Vec<u8>, bool, bool, u64) {
-        if let Ok(h) = HeaderViewRef::new(pkt) {
-            let src_id: [u8; 32] = *h.src_id();
-            let dst_id: [u8; 32] = *h.dst_id();
-            let flow_label = h.flow_label();
-            let seq_num = h.seq_num();
-            let payload_len = h.length() as usize;
-
-            if routes.lookup_next_hop(dst_id, flow_label).is_some()
-                || routes
-                    .lookup_or_predict(src_id, dst_id, flow_label)
-                    .is_some()
-            {
-                let enc_start = if profile_enabled {
-                    Some(std::time::Instant::now())
-                } else {
-                    None
-                };
-                let mut encrypted = false;
-                let mut route_miss = false;
-                if let Some(session) = session {
-                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
-                        if pkt.len() < target_len {
-                            pkt.resize(target_len, 0);
-                        }
-                        match session.encrypt_into_slice(
-                            &mut pkt[HEADER_SIZE..HEADER_SIZE + payload_len],
-                            seq_num,
-                        ) {
-                            Ok(tag) => {
-                                pkt[HEADER_SIZE + payload_len..target_len]
-                                    .copy_from_slice(tag.as_slice());
-                                encrypted = true;
-                            }
-                            Err(SessionError::AuthenticationFailed)
-                            | Err(SessionError::PayloadTooLarge)
-                            | Err(SessionError::CiphertextTooShort)
-                            | Err(SessionError::AeadError)
-                            | Err(SessionError::BufferTooSmall)
-                            | Err(SessionError::InsufficientCapacity) => {
-                                route_miss = true;
-                            }
-                        }
-                    } else if payload_len > 0 {
-                        route_miss = true;
-                    }
-                }
-                let enc_ns = if let Some(start) = enc_start {
-                    start.elapsed().as_nanos() as u64
-                } else {
-                    0
-                };
-
-                return (std::mem::take(pkt), encrypted, route_miss, enc_ns);
-            } else {
-                return (std::mem::take(pkt), false, true, 0);
-            }
-        }
-
-        (std::mem::take(pkt), false, false, 0)
-    }
-
     fn encrypt_packet_owned(
         pkt: Vec<u8>,
         seq_num: u64,
@@ -876,6 +805,7 @@ impl Forwarder {
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
+                    let _src_id: [u8; 32] = *h.src_id();
                     let dst_id: [u8; 32] = *h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
@@ -1015,8 +945,228 @@ impl Forwarder {
             metrics.handle_count += received as u64;
 
             metrics.apply();
+        } else if frames.len() < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
+            // Serial path for full spray: process directly into self.arena, bypassing intermediate duplicated Vec allocations and clones.
+            let mut local_enc_count = 0u64;
+            let mut local_enc_ns = 0u64;
+            let mut metrics = LocalMetrics::default();
+            let start_batch = if self.profile_enabled {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+
+            for pkt in frames {
+                if let Ok(h) = HeaderViewRef::new(&pkt) {
+                    let src_id: [u8; 32] = *h.src_id();
+                    let dst_id: [u8; 32] = *h.dst_id();
+                    let flow_label = h.flow_label();
+                    let seq_num = h.seq_num();
+                    let payload_len = h.length() as usize;
+
+                    metrics.lookup_calls += 1;
+                    let channels = self.routes.lookup_spray(dst_id, flow_label);
+                    if channels.is_empty() {
+                        let start = self.arena.len();
+
+                        let route_exists = self.routes.lookup_next_hop(dst_id, flow_label).is_some()
+                            || self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some();
+
+                        let mut was_encrypted = false;
+                        let mut was_route_miss = false;
+
+                        if route_exists {
+                            metrics.lookup_hits += 1;
+                            if let Some(session) = session_ref {
+                                if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                                    let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                                    let remaining = self.arena.capacity().saturating_sub(start);
+                                    if remaining < needed {
+                                        self.arena.reserve(needed - remaining);
+                                    }
+                                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+
+                                    let payload_start = start + HEADER_SIZE;
+                                    let enc_start = if self.profile_enabled {
+                                        Some(std::time::Instant::now())
+                                    } else {
+                                        None
+                                    };
+                                    match session.encrypt_into_slice(
+                                        &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
+                                        seq_num,
+                                    ) {
+                                        Ok(tag) => {
+                                            if let Some(st) = enc_start {
+                                                local_enc_ns += st.elapsed().as_nanos() as u64;
+                                            }
+                                            local_enc_count += 1;
+                                            self.arena.extend_from_slice(tag.as_slice());
+                                            let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
+                                            if pkt.len() > target_len {
+                                                self.arena.extend_from_slice(&pkt[target_len..]);
+                                            }
+                                            was_encrypted = true;
+                                        }
+                                        Err(_) => {
+                                            self.arena.truncate(start);
+                                            self.arena.extend_from_slice(&pkt);
+                                            was_route_miss = true;
+                                        }
+                                    }
+                                } else {
+                                    self.arena.extend_from_slice(&pkt);
+                                    if payload_len > 0 {
+                                        was_route_miss = true;
+                                    }
+                                }
+                            } else {
+                                self.arena.extend_from_slice(&pkt);
+                            }
+                        } else {
+                            self.arena.extend_from_slice(&pkt);
+                            was_route_miss = true;
+                        }
+
+                        let len = self.arena.len() - start;
+                        self.offsets.push((start, len));
+                        if was_encrypted {
+                            stats.encrypted += 1;
+                        } else {
+                            stats.forwarded += 1;
+                        }
+                        if was_route_miss {
+                            stats.route_misses += 1;
+                        }
+                        continue;
+                    }
+                    metrics.lookup_hits += 1;
+
+                    for (nh, _is_primary) in channels {
+                        let start = self.arena.len();
+
+                        let route_exists = self.routes.lookup_next_hop(nh, flow_label).is_some()
+                            || self.routes.lookup_or_predict(src_id, nh, flow_label).is_some();
+
+                        let mut was_encrypted = false;
+                        let mut was_route_miss = false;
+
+                        if route_exists {
+                            if let Some(session) = session_ref {
+                                if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
+                                    let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                                    let remaining = self.arena.capacity().saturating_sub(start);
+                                    if remaining < needed {
+                                        self.arena.reserve(needed - remaining);
+                                    }
+                                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+
+                                    if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                        view.set_dst_id(nh);
+                                    }
+
+                                    let payload_start = start + HEADER_SIZE;
+                                    let enc_start = if self.profile_enabled {
+                                        Some(std::time::Instant::now())
+                                    } else {
+                                        None
+                                    };
+                                    match session.encrypt_into_slice(
+                                        &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
+                                        seq_num,
+                                    ) {
+                                        Ok(tag) => {
+                                            if let Some(st) = enc_start {
+                                                local_enc_ns += st.elapsed().as_nanos() as u64;
+                                            }
+                                            local_enc_count += 1;
+                                            self.arena.extend_from_slice(tag.as_slice());
+                                            let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
+                                            if pkt.len() > target_len {
+                                                self.arena.extend_from_slice(&pkt[target_len..]);
+                                            }
+                                            was_encrypted = true;
+                                        }
+                                        Err(_) => {
+                                            self.arena.truncate(start);
+                                            self.arena.extend_from_slice(&pkt);
+                                            if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                                view.set_dst_id(nh);
+                                            }
+                                            was_route_miss = true;
+                                        }
+                                    }
+                                } else {
+                                    self.arena.extend_from_slice(&pkt);
+                                    if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                        view.set_dst_id(nh);
+                                    }
+                                    if payload_len > 0 {
+                                        was_route_miss = true;
+                                    }
+                                }
+                            } else {
+                                self.arena.extend_from_slice(&pkt);
+                                if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                    view.set_dst_id(nh);
+                                }
+                            }
+                        } else {
+                            self.arena.extend_from_slice(&pkt);
+                            if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                view.set_dst_id(nh);
+                            }
+                            was_route_miss = true;
+                        }
+
+                        let len = self.arena.len() - start;
+                        self.offsets.push((start, len));
+                        if was_encrypted {
+                            stats.encrypted += 1;
+                        } else {
+                            stats.forwarded += 1;
+                        }
+                        if was_route_miss {
+                            stats.route_misses += 1;
+                        }
+                    }
+                } else {
+                    let start = self.arena.len();
+                    self.arena.extend_from_slice(&pkt);
+                    let len = self.arena.len() - start;
+                    self.offsets.push((start, len));
+                    stats.forwarded += 1;
+                    stats.route_misses += 1;
+                }
+            }
+
+            if let Some(start) = start_batch {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                metrics.handle_ns += elapsed;
+            }
+            metrics.handle_count += received as u64;
+
+            metrics.apply();
+
+            if local_enc_count > 0 {
+                let prof = global_profiler();
+                prof.encrypt_count
+                    .fetch_add(local_enc_count, Ordering::Relaxed);
+                prof.encrypt_ns.fetch_add(local_enc_ns, Ordering::Relaxed);
+            }
+
+            self.mcr_forwarded
+                .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+            self.mcr_dropped
+                .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+            let _ = sock.send(self.arena.as_slice(), &self.offsets);
+            PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+            let prof = global_profiler();
+            prof.handle_count
+                .fetch_add(stats.received as u64, Ordering::Relaxed);
+            return stats;
         } else {
-            // Full spray keeps the existing duplication behavior because one
+            // Parallel path keeps the existing duplication behavior because one
             // input packet can expand to multiple outputs.
             let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
             for pkt in frames {
@@ -1047,55 +1197,6 @@ impl Forwarder {
                     duplicated.push((pkt, [0u8; 32]));
                 }
             }
-
-            if duplicated.len() < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
-                // Serial path: process in-place and append directly to arena to avoid
-                // allocating intermediate PacketOutput/Vecs.
-                let mut local_enc_count = 0u64;
-                let mut local_enc_ns = 0u64;
-                let profile_enabled = self.profile_enabled;
-                for (mut pkt, _dst) in duplicated.into_iter() {
-                    let out = Self::process_packet_owned_inline(
-                        &mut pkt,
-                        routes_ref,
-                        session_ref,
-                        use_avx2,
-                        profile_enabled,
-                    );
-                    let start = self.arena.len();
-                    self.arena.extend_from_slice(&out.0);
-                    let len = self.arena.len() - start;
-                    self.offsets.push((start, len));
-                    if out.1 {
-                        stats.encrypted += 1;
-                        local_enc_count += 1;
-                        local_enc_ns += out.3;
-                    } else {
-                        stats.forwarded += 1;
-                    }
-                    if out.2 {
-                        stats.route_misses += 1;
-                    }
-                }
-
-                if local_enc_count > 0 {
-                    let prof = global_profiler();
-                    prof.encrypt_count
-                        .fetch_add(local_enc_count, Ordering::Relaxed);
-                    prof.encrypt_ns.fetch_add(local_enc_ns, Ordering::Relaxed);
-                }
-
-                self.mcr_forwarded
-                    .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
-                self.mcr_dropped
-                    .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
-                let _ = sock.send(self.arena.as_slice(), &self.offsets);
-                PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
-                let prof = global_profiler();
-                prof.handle_count
-                    .fetch_add(stats.received as u64, Ordering::Relaxed);
-                return stats;
-            } else {
                 // Parallel path: process packets in parallel but return owned
                 // Vecs and flags to the main thread which will append into the
                 // arena. This avoids extra intermediate allocations inside the
@@ -1148,7 +1249,6 @@ impl Forwarder {
                 let _ = sock.send(self.arena.as_slice(), &self.offsets);
                 PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
                 return stats;
-            }
         }
 
         self.mcr_forwarded
