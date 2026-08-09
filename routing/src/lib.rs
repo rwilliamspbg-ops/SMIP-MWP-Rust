@@ -182,14 +182,18 @@ impl Table {
     fn simple_cache_index(dest_id: &[u8; 32]) -> usize {
         let ptr = dest_id.as_ptr() as *const u32;
         let val = unsafe { ptr.read_unaligned() };
-        (val as usize) & (HOT_CACHE_SIZE - 1)
+        // Use Knuth's multiplicative hashing to scramble the index across the cache size
+        let hash = val.wrapping_mul(0x9e3779b9);
+        (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
     #[inline]
     fn spray_cache_index(dest_id: &[u8; 32], flow_label: u32) -> usize {
         let ptr = dest_id.as_ptr() as *const u32;
         let val = unsafe { ptr.read_unaligned() };
-        ((val ^ flow_label) as usize) & (HOT_CACHE_SIZE - 1)
+        // Use Knuth's multiplicative hashing to scramble both the dest_id fragment and flow_label across the cache size
+        let hash = (val ^ flow_label).wrapping_mul(0x9e3779b9);
+        (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
     #[inline]
