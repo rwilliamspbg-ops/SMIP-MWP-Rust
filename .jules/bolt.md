@@ -83,3 +83,7 @@
 ## 2026-06-08 - [Zero-Allocation Transactional Full-Spray in Arena]
 **Learning:** Optimizing duplicate-packet spray loops to write directly to a shared arena avoids heavy heap allocation and clones. However, copying sub-slices before encryption requires careful handling of payload boundaries so that tags do not misalign trailing bytes. Furthermore, to avoid permanent packet truncation if encryption fails, the loop must transactionally roll back the arena length and append the unmodified fallback packet.
 **Action:** When performing in-place mutations in a pre-allocated buffer with fallbacks, always track the transaction start offset and utilize truncation rollbacks to safely restore original packets on failure.
+
+## 2026-06-09 - [Hybrid Threshold-based BTreeMap Miss Bypass]
+**Learning:** Checking thread-local or shard-level hash maps (`fast_shards`) to bypass BTreeMap lookups on routing misses introduces more lock and hashing overhead than a simple BTreeMap search of size <= 8. However, for larger tables (size > 8), the shard map check is significantly faster and avoids pointer-chasing in the BTreeMap.
+**Action:** Use a hybrid threshold-based check when bypassing BTreeMap searches: directly query the BTreeMap for tiny collections (<= 8), and bypass it using fast O(1) shard maps for larger collections.
