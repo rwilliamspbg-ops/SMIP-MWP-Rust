@@ -79,7 +79,8 @@ pub struct HybridKEXState {
     pub retry_count: usize,
     pub handshake_done: bool,
     pub seq_counter: u64,
-    seq_window: std::collections::BTreeSet<u64>,
+    seq_window: [u64; MAX_REPLAY_WINDOW as usize],
+    seq_window_len: usize,
 }
 
 impl HybridKEXState {
@@ -92,7 +93,8 @@ impl HybridKEXState {
             retry_count: 0,
             handshake_done: false,
             seq_counter: 0,
-            seq_window: std::collections::BTreeSet::new(),
+            seq_window: [0; MAX_REPLAY_WINDOW as usize],
+            seq_window_len: 0,
         }
     }
 
@@ -112,20 +114,39 @@ impl HybridKEXState {
     pub fn increment_seq_counter(&mut self) -> Result<u64, String> {
         self.seq_counter = self.seq_counter.saturating_add(1);
         let seq = self.seq_counter;
-        if self.seq_window.contains(&seq) {
+
+        // binary_search expects the slice to be sorted.
+        // We maintain seq_window in sorted order.
+        let window = &self.seq_window[..self.seq_window_len];
+        if window.binary_search(&seq).is_ok() {
             return Err(format!(
                 "crypto: replay attack detected for session {:02x?}",
                 self.session_id
             ));
         }
-        while self.seq_window.len() as u64 >= MAX_REPLAY_WINDOW {
-            if let Some(oldest) = self.seq_window.iter().next().copied() {
-                self.seq_window.remove(&oldest);
-            } else {
-                break;
-            }
+
+        if self.seq_window_len >= MAX_REPLAY_WINDOW as usize {
+            // Reached window capacity. Evict the oldest (smallest) sequence number.
+            // Since seq_window is sorted, the smallest is at index 0.
+            // Shift remaining elements left to overwrite index 0.
+            self.seq_window.copy_within(1..self.seq_window_len, 0);
+            self.seq_window_len -= 1;
         }
-        self.seq_window.insert(seq);
+
+        // Insert seq in sorted order. Since seq is strictly increasing (under normal increments),
+        // we can check if it is greater than the last element and append, or perform binary search and insert.
+        let insert_idx = match self.seq_window[..self.seq_window_len].binary_search(&seq) {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+
+        if insert_idx < self.seq_window_len {
+            self.seq_window
+                .copy_within(insert_idx..self.seq_window_len, insert_idx + 1);
+        }
+        self.seq_window[insert_idx] = seq;
+        self.seq_window_len += 1;
+
         Ok(seq)
     }
 
@@ -174,5 +195,30 @@ mod tests {
         assert!(state.check_retries().is_ok());
         state.cleanup();
         assert_eq!(state.kex_started, SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn test_kex_state_sliding_window_eviction_and_replay_detection() {
+        let mut state = HybridKEXState::new([2u8; 16]);
+
+        // Fill the window up to max replay window size (64)
+        for i in 1..=MAX_REPLAY_WINDOW {
+            let seq = state.increment_seq_counter().unwrap();
+            assert_eq!(seq, i);
+        }
+
+        // Try to increment again, which will trigger eviction of '1' because we reached capacity
+        let next_seq = state.increment_seq_counter().unwrap();
+        assert_eq!(next_seq, MAX_REPLAY_WINDOW + 1);
+
+        // Check replay attack detection on the sliding window.
+        // Let's manually trigger duplicates of already recorded sequences.
+        // We can do this by setting state.seq_counter to something already in the window
+        state.seq_counter = 10;
+        assert!(state.increment_seq_counter().is_err());
+
+        // Evicted '1' shouldn't cause replay detection anymore if we force seq_counter to 1
+        state.seq_counter = 0;
+        assert_eq!(state.increment_seq_counter().unwrap(), 1);
     }
 }
