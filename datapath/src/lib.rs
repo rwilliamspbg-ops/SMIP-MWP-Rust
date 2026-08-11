@@ -969,8 +969,12 @@ impl Forwarder {
                     if channels.is_empty() {
                         let start = self.arena.len();
 
-                        let route_exists = self.routes.lookup_next_hop(dst_id, flow_label).is_some()
-                            || self.routes.lookup_or_predict(src_id, dst_id, flow_label).is_some();
+                        let route_exists =
+                            self.routes.lookup_next_hop(dst_id, flow_label).is_some()
+                                || self
+                                    .routes
+                                    .lookup_or_predict(src_id, dst_id, flow_label)
+                                    .is_some();
 
                         let mut was_encrypted = false;
                         let mut was_route_miss = false;
@@ -984,7 +988,8 @@ impl Forwarder {
                                     if remaining < needed {
                                         self.arena.reserve(needed - remaining);
                                     }
-                                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                                    self.arena
+                                        .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
 
                                     let payload_start = start + HEADER_SIZE;
                                     let enc_start = if self.profile_enabled {
@@ -993,7 +998,8 @@ impl Forwarder {
                                         None
                                     };
                                     match session.encrypt_into_slice(
-                                        &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
+                                        &mut self.arena.as_mut_slice()
+                                            [payload_start..payload_start + payload_len],
                                         seq_num,
                                     ) {
                                         Ok(tag) => {
@@ -1046,7 +1052,10 @@ impl Forwarder {
                         let start = self.arena.len();
 
                         let route_exists = self.routes.lookup_next_hop(nh, flow_label).is_some()
-                            || self.routes.lookup_or_predict(src_id, nh, flow_label).is_some();
+                            || self
+                                .routes
+                                .lookup_or_predict(src_id, nh, flow_label)
+                                .is_some();
 
                         let mut was_encrypted = false;
                         let mut was_route_miss = false;
@@ -1059,9 +1068,12 @@ impl Forwarder {
                                     if remaining < needed {
                                         self.arena.reserve(needed - remaining);
                                     }
-                                    self.arena.extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                                    self.arena
+                                        .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
 
-                                    if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                    if let Ok(mut view) = wire::HeaderView::view(
+                                        &mut self.arena.as_mut_slice()[start..],
+                                    ) {
                                         view.set_dst_id(nh);
                                     }
 
@@ -1072,7 +1084,8 @@ impl Forwarder {
                                         None
                                     };
                                     match session.encrypt_into_slice(
-                                        &mut self.arena.as_mut_slice()[payload_start..payload_start + payload_len],
+                                        &mut self.arena.as_mut_slice()
+                                            [payload_start..payload_start + payload_len],
                                         seq_num,
                                     ) {
                                         Ok(tag) => {
@@ -1090,7 +1103,9 @@ impl Forwarder {
                                         Err(_) => {
                                             self.arena.truncate(start);
                                             self.arena.extend_from_slice(&pkt);
-                                            if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                            if let Ok(mut view) = wire::HeaderView::view(
+                                                &mut self.arena.as_mut_slice()[start..],
+                                            ) {
                                                 view.set_dst_id(nh);
                                             }
                                             was_route_miss = true;
@@ -1098,7 +1113,9 @@ impl Forwarder {
                                     }
                                 } else {
                                     self.arena.extend_from_slice(&pkt);
-                                    if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                    if let Ok(mut view) = wire::HeaderView::view(
+                                        &mut self.arena.as_mut_slice()[start..],
+                                    ) {
                                         view.set_dst_id(nh);
                                     }
                                     if payload_len > 0 {
@@ -1107,13 +1124,17 @@ impl Forwarder {
                                 }
                             } else {
                                 self.arena.extend_from_slice(&pkt);
-                                if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                                if let Ok(mut view) =
+                                    wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..])
+                                {
                                     view.set_dst_id(nh);
                                 }
                             }
                         } else {
                             self.arena.extend_from_slice(&pkt);
-                            if let Ok(mut view) = wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..]) {
+                            if let Ok(mut view) =
+                                wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..])
+                            {
                                 view.set_dst_id(nh);
                             }
                             was_route_miss = true;
@@ -1197,58 +1218,58 @@ impl Forwarder {
                     duplicated.push((pkt, [0u8; 32]));
                 }
             }
-                // Parallel path: process packets in parallel but return owned
-                // Vecs and flags to the main thread which will append into the
-                // arena. This avoids extra intermediate allocations inside the
-                // parallel map.
-                let profile_enabled = self.profile_enabled;
-                let outputs: Vec<(Vec<u8>, bool, bool, u64)> = duplicated
-                    .into_par_iter()
-                    .map(|(pkt, _)| {
-                        Self::process_packet_owned_consuming(
-                            pkt,
-                            routes_ref,
-                            session_ref,
-                            use_avx2,
-                            profile_enabled,
-                        )
-                    })
-                    .collect();
+            // Parallel path: process packets in parallel but return owned
+            // Vecs and flags to the main thread which will append into the
+            // arena. This avoids extra intermediate allocations inside the
+            // parallel map.
+            let profile_enabled = self.profile_enabled;
+            let outputs: Vec<(Vec<u8>, bool, bool, u64)> = duplicated
+                .into_par_iter()
+                .map(|(pkt, _)| {
+                    Self::process_packet_owned_consuming(
+                        pkt,
+                        routes_ref,
+                        session_ref,
+                        use_avx2,
+                        profile_enabled,
+                    )
+                })
+                .collect();
 
-                // Append results in the main thread to the arena.
-                let mut local_enc_count = 0u64;
-                let mut local_enc_ns = 0u64;
-                for (bytes, encrypted, route_miss, enc_ns) in outputs {
-                    let start = self.arena.len();
-                    self.arena.extend_from_slice(&bytes);
-                    let len = self.arena.len() - start;
-                    self.offsets.push((start, len));
-                    if encrypted {
-                        stats.encrypted += 1;
-                        local_enc_count += 1;
-                        local_enc_ns += enc_ns;
-                    } else {
-                        stats.forwarded += 1;
-                    }
-                    if route_miss {
-                        stats.route_misses += 1;
-                    }
+            // Append results in the main thread to the arena.
+            let mut local_enc_count = 0u64;
+            let mut local_enc_ns = 0u64;
+            for (bytes, encrypted, route_miss, enc_ns) in outputs {
+                let start = self.arena.len();
+                self.arena.extend_from_slice(&bytes);
+                let len = self.arena.len() - start;
+                self.offsets.push((start, len));
+                if encrypted {
+                    stats.encrypted += 1;
+                    local_enc_count += 1;
+                    local_enc_ns += enc_ns;
+                } else {
+                    stats.forwarded += 1;
                 }
-
-                if local_enc_count > 0 {
-                    let prof = global_profiler();
-                    prof.encrypt_count
-                        .fetch_add(local_enc_count, Ordering::Relaxed);
-                    prof.encrypt_ns.fetch_add(local_enc_ns, Ordering::Relaxed);
+                if route_miss {
+                    stats.route_misses += 1;
                 }
+            }
 
-                self.mcr_forwarded
-                    .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
-                self.mcr_dropped
-                    .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
-                let _ = sock.send(self.arena.as_slice(), &self.offsets);
-                PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
-                return stats;
+            if local_enc_count > 0 {
+                let prof = global_profiler();
+                prof.encrypt_count
+                    .fetch_add(local_enc_count, Ordering::Relaxed);
+                prof.encrypt_ns.fetch_add(local_enc_ns, Ordering::Relaxed);
+            }
+
+            self.mcr_forwarded
+                .fetch_add(stats.forwarded as u64, Ordering::Relaxed);
+            self.mcr_dropped
+                .fetch_add(stats.route_misses as u64, Ordering::Relaxed);
+            let _ = sock.send(self.arena.as_slice(), &self.offsets);
+            PACKETS_PROCESSED.fetch_add(stats.received as u64, Ordering::Relaxed);
+            return stats;
         }
 
         self.mcr_forwarded
