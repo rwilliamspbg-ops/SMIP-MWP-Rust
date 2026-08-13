@@ -164,8 +164,10 @@ impl<'a> HeaderView<'a> {
     pub fn seq_num(&self) -> u64 {
         u64::from_be_bytes(self.buf[SEQ_OFFSET..SEQ_OFFSET + 8].try_into().unwrap())
     }
-    pub fn session_id(&self) -> &[u8] {
-        &self.buf[SESSION_OFFSET..SESSION_OFFSET + 16]
+    pub fn session_id(&self) -> &[u8; 16] {
+        (&self.buf[SESSION_OFFSET..SESSION_OFFSET + 16])
+            .try_into()
+            .unwrap()
     }
     pub fn flags(&self) -> u16 {
         u16::from_be_bytes(self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].try_into().unwrap())

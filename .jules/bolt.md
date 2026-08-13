@@ -87,3 +87,11 @@
 ## 2026-06-09 - [Hybrid Threshold-based BTreeMap Miss Bypass]
 **Learning:** Checking thread-local or shard-level hash maps (`fast_shards`) to bypass BTreeMap lookups on routing misses introduces more lock and hashing overhead than a simple BTreeMap search of size <= 8. However, for larger tables (size > 8), the shard map check is significantly faster and avoids pointer-chasing in the BTreeMap.
 **Action:** Use a hybrid threshold-based check when bypassing BTreeMap searches: directly query the BTreeMap for tiny collections (<= 8), and bypass it using fast O(1) shard maps for larger collections.
+
+## 2026-06-10 - [Bypass Binary Search for Strictly Increasing Sequence Windows]
+**Learning:** Performing binary search on every packet's sequence number inside a sliding replay-protection window introduces branch and memory latency overhead. Since sequence numbers are strictly increasing under normal non-attack traffic, we can fast-path checks by comparing with the last element of the window.
+**Action:** Always check the strictly increasing common-case before falling back to full binary search in sequence windows.
+
+## 2026-06-11 - [Type Optimization for Fixed-Size Fields]
+**Learning:** Returning dynamically-sized slices `&[u8]` for fixed-size fields like `session_id` in headers incurs slice-to-array assertions at runtime. Returning fixed-size array references `&[u8; 16]` allows LLVM to optimize with register-sized loads and comparisons.
+**Action:** Prefer returning fixed-size array references for fixed-size fields instead of dynamically-sized slices.
