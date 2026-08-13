@@ -115,8 +115,21 @@ impl HybridKEXState {
         self.seq_counter = self.seq_counter.saturating_add(1);
         let seq = self.seq_counter;
 
-        // binary_search expects the slice to be sorted.
-        // We maintain seq_window in sorted order.
+        // Common-case optimization: if seq is strictly greater than the largest element in the window,
+        // we can bypass binary search completely, knowing it is not a replay.
+        if self.seq_window_len > 0 && seq > self.seq_window[self.seq_window_len - 1] {
+            if self.seq_window_len >= MAX_REPLAY_WINDOW as usize {
+                // Shift left to evict index 0 (oldest element)
+                self.seq_window.copy_within(1..self.seq_window_len, 0);
+                self.seq_window[self.seq_window_len - 1] = seq;
+            } else {
+                self.seq_window[self.seq_window_len] = seq;
+                self.seq_window_len += 1;
+            }
+            return Ok(seq);
+        }
+
+        // Fallback for non-strictly-increasing sequence or first element
         let window = &self.seq_window[..self.seq_window_len];
         if window.binary_search(&seq).is_ok() {
             return Err(format!(
@@ -133,8 +146,6 @@ impl HybridKEXState {
             self.seq_window_len -= 1;
         }
 
-        // Insert seq in sorted order. Since seq is strictly increasing (under normal increments),
-        // we can check if it is greater than the last element and append, or perform binary search and insert.
         let insert_idx = match self.seq_window[..self.seq_window_len].binary_search(&seq) {
             Ok(idx) => idx,
             Err(idx) => idx,
