@@ -155,24 +155,25 @@ impl Table {
     pub fn update_route(&self, e: RouteEntry) {
         let mut e = e;
         e.last_seen = SystemTime::now();
+        let dest_id = e.dest_id;
         // update fast-path shard first
-        let h = Self::hash_32(&e.dest_id);
+        let h = Self::hash_32(&dest_id);
         let shard = Self::shard_for_from_hash(h);
         {
             let mut map = self.fast_shards[shard].write();
-            map.insert(e.dest_id, e.clone());
+            map.insert(dest_id, e.clone());
         }
 
         // update main table under write lock
         {
             let mut inner = self.inner.write();
-            inner.entries.insert(e.dest_id, e.clone());
+            inner.entries.insert(dest_id, e);
             Self::rebuild_predictive_entries(&mut inner);
         }
         // ensure channel stats entry exists
         {
             let mut stats = self.mcr_channel_stats.write();
-            stats.entry(e.dest_id).or_default();
+            stats.entry(dest_id).or_default();
         }
         // Invalidate per-thread caches
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
