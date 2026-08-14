@@ -95,3 +95,11 @@
 ## 2026-06-11 - [Type Optimization for Fixed-Size Fields]
 **Learning:** Returning dynamically-sized slices `&[u8]` for fixed-size fields like `session_id` in headers incurs slice-to-array assertions at runtime. Returning fixed-size array references `&[u8; 16]` allows LLVM to optimize with register-sized loads and comparisons.
 **Action:** Prefer returning fixed-size array references for fixed-size fields instead of dynamically-sized slices.
+
+## 2026-06-12 - [Consolidate Redundant Route Lookups on Fallback Paths]
+**Learning:** Performing multiple sequential checks like `lookup_next_hop(...) || lookup_or_predict(...)` in packet processing loops introduces duplicate thread-local cache lookups and table shard queries on fallback paths. Since `lookup_or_predict` is a strict superset of `lookup_next_hop`, calling it directly avoids redundant checks completely.
+**Action:** Eliminate redundant check sequences on fallback paths by calling the unified query function directly.
+
+## 2026-06-13 - [Avoid Redundant Cloning of RouteEntry in Table Updates]
+**Learning:** Cloning a `RouteEntry` multiple times during table insertion incurs unnecessary allocations on the heap because `RouteEntry` contains a heap-allocated `Vec`.
+**Action:** Copy cheap `Copy` fields like `dest_id` to local variables and move the `RouteEntry` value on the final insertion.

@@ -462,10 +462,9 @@ impl Forwarder {
             let payload_len = h.length() as usize;
 
             // measure encrypt under caller's profiler by timing around call sites
-            if routes.lookup_next_hop(dst_id, flow_label).is_some()
-                || routes
-                    .lookup_or_predict(src_id, dst_id, flow_label)
-                    .is_some()
+            if routes
+                .lookup_or_predict(src_id, dst_id, flow_label)
+                .is_some()
             {
                 let enc_start = if profile_enabled {
                     Some(std::time::Instant::now())
@@ -512,10 +511,9 @@ impl Forwarder {
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
-            if routes.lookup_next_hop(dst_id, flow_label).is_some()
-                || routes
-                    .lookup_or_predict(src_id, dst_id, flow_label)
-                    .is_some()
+            if routes
+                .lookup_or_predict(src_id, dst_id, flow_label)
+                .is_some()
             {
                 let enc_start = if profile_enabled {
                     Some(std::time::Instant::now())
@@ -969,9 +967,7 @@ impl Forwarder {
                     if channels.is_empty() {
                         let start = self.arena.len();
 
-                        let route_exists =
-                            self.routes.lookup_next_hop(dst_id, flow_label).is_some()
-                                || self
+                        let route_exists = self
                                     .routes
                                     .lookup_or_predict(src_id, dst_id, flow_label)
                                     .is_some();
@@ -1051,8 +1047,7 @@ impl Forwarder {
                     for (nh, _is_primary) in channels {
                         let start = self.arena.len();
 
-                        let route_exists = self.routes.lookup_next_hop(nh, flow_label).is_some()
-                            || self
+                        let route_exists = self
                                 .routes
                                 .lookup_or_predict(src_id, nh, flow_label)
                                 .is_some();
