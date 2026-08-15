@@ -968,9 +968,9 @@ impl Forwarder {
                         let start = self.arena.len();
 
                         let route_exists = self
-                                    .routes
-                                    .lookup_or_predict(src_id, dst_id, flow_label)
-                                    .is_some();
+                            .routes
+                            .lookup_or_predict(src_id, dst_id, flow_label)
+                            .is_some();
 
                         let mut was_encrypted = false;
                         let mut was_route_miss = false;
@@ -1048,9 +1048,9 @@ impl Forwarder {
                         let start = self.arena.len();
 
                         let route_exists = self
-                                .routes
-                                .lookup_or_predict(src_id, nh, flow_label)
-                                .is_some();
+                            .routes
+                            .lookup_or_predict(src_id, nh, flow_label)
+                            .is_some();
 
                         let mut was_encrypted = false;
                         let mut was_route_miss = false;

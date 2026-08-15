@@ -304,8 +304,9 @@ impl Table {
     /// Return list of channels for spraying for given destination and flow label.
     /// Each tuple is `(next_hop_id, is_primary)` where primary is first element.
     /// Optimized: holds the read lock and avoids cloning RouteEntry (which contains a heap-allocated Vec).
+    /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
+    /// main table BTreeMap search redundant on misses.
     pub fn lookup_spray(&self, dst_id: [u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
-        // Try fast-path shard first
         let h = Self::hash_32(&dst_id);
         let shard = Self::shard_for_from_hash(h);
 
@@ -317,23 +318,9 @@ impl Table {
             for ch in &e.alternate_channels {
                 out.push((*ch, false));
             }
-            return out;
-        }
-
-        // Fall back to main table
-        let inner = self.inner.read();
-        if let Some(e) = inner.entries.get(&dst_id) {
-            let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
-            out.push((e.next_hop_id, true));
-            for ch in &e.alternate_channels {
-                out.push((*ch, false));
-            }
             // If there are multiple channels, re-order by hash selection so primary reflects flow affinity
             if out.len() > 1 {
                 let choices = out.len();
-                // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
-                // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
-                // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
                 let idx = (flow_label as usize) % choices;
                 out.swap(0, idx);
                 // mark primary accordingly
@@ -351,6 +338,8 @@ impl Table {
     /// allocating a channel vector.
     /// Optimized: holds read lock and performs flow-affinity spraying over alternate channels
     /// directly on reference to avoid cloning RouteEntry.
+    /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
+    /// main table BTreeMap search redundant on misses.
     pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
         let idx = Self::spray_cache_index(&dst_id, flow_label);
@@ -390,25 +379,7 @@ impl Table {
                     }
                 }
             } else {
-                let inner = self.inner.read();
-                if let Some(entry) = inner.entries.get(&dst_id) {
-                    if entry.alternate_channels.is_empty() {
-                        Some(entry.next_hop_id)
-                    } else {
-                        let choices = 1 + entry.alternate_channels.len();
-                        // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
-                        // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
-                        // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
-                        let idx = (flow_label as usize) % choices;
-                        if idx == 0 {
-                            Some(entry.next_hop_id)
-                        } else {
-                            Some(entry.alternate_channels[idx - 1])
-                        }
-                    }
-                } else {
-                    None
-                }
+                None
             }
         };
 
@@ -456,8 +427,8 @@ impl Table {
             return Some(v);
         }
 
+        // Fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table)
         let h = Self::hash_32(&dst_id);
-        // Fast-path shard lookup
         let shard = Self::shard_for_from_hash(h);
         let nh_opt = {
             let map = self.fast_shards[shard].read();
@@ -468,15 +439,7 @@ impl Table {
             return Some(nh);
         }
 
-        // Miss -> try fast-path already checked; fall back to main table under read lock and populate cache using multiple-probe insertion
-        let res = {
-            let inner = self.inner.read();
-            inner.entries.get(&dst_id).map(|e| e.next_hop_id)
-        };
-        if let Some(nh) = res {
-            Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
-        }
-        res
+        None
     }
 
     pub fn predictive_next_hop(
