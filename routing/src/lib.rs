@@ -396,19 +396,41 @@ impl Table {
         nh
     }
 
-    /// Select a single channel by index (round-robin if out of range)
+    /// Select a single channel by index (round-robin if out of range).
+    /// Optimized: performs direct zero-allocation shard lookup without constructing
+    /// or cloning an intermediate vector of channel entries.
     pub fn lookup_spray_single(
         &self,
         dst_id: [u8; 32],
         flow_label: u32,
         channel_idx: usize,
     ) -> Option<[u8; 32]> {
-        let channels = self.lookup_spray(dst_id, flow_label);
-        if channels.is_empty() {
-            return None;
-        }
-        let idx = channel_idx % channels.len();
-        Some(channels[idx].0)
+        let h = Self::hash_32(&dst_id);
+        let shard = Self::shard_for_from_hash(h);
+
+        let map = self.fast_shards[shard].read();
+        let e = map.get(&dst_id)?;
+        let count = 1 + e.alternate_channels.len();
+        let flow_idx = if count > 1 {
+            (flow_label as usize) % count
+        } else {
+            0
+        };
+        let target_idx = channel_idx % count;
+
+        let nh = if target_idx == 0 {
+            if flow_idx == 0 {
+                e.next_hop_id
+            } else {
+                e.alternate_channels[flow_idx - 1]
+            }
+        } else if target_idx == flow_idx {
+            e.next_hop_id
+        } else {
+            e.alternate_channels[target_idx - 1]
+        };
+
+        Some(nh)
     }
 
     pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
@@ -703,6 +725,58 @@ mod tests {
         let dst = [99u8; 32];
         let choice = t.predictive_next_hop(src, dst, 7).unwrap();
         assert!(choice == [9u8; 32] || choice == [8u8; 32]);
+    }
+
+    #[test]
+    fn test_lookup_spray_single() {
+        let t = Table::new();
+        let dest = [10u8; 32];
+        let nh0 = [20u8; 32];
+        let nh1 = [21u8; 32];
+        let nh2 = [22u8; 32];
+
+        // 1. Missing destination returns None
+        assert!(t.lookup_spray_single(dest, 0, 0).is_none());
+
+        // 2. Single-channel route
+        t.update_route(RouteEntry {
+            dest_id: dest,
+            next_hop_id: nh0,
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
+        });
+
+        assert_eq!(t.lookup_spray_single(dest, 0, 0).unwrap(), nh0);
+        assert_eq!(t.lookup_spray_single(dest, 0, 1).unwrap(), nh0);
+
+        // 3. Multi-channel route
+        t.update_route(RouteEntry {
+            dest_id: dest,
+            next_hop_id: nh0,
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 3,
+            alternate_channels: vec![nh1, nh2],
+            mcr_epoch: 1,
+        });
+
+        for flow_label in 0..10 {
+            let full_spray = t.lookup_spray(dest, flow_label);
+            assert_eq!(full_spray.len(), 3);
+
+            for ch_idx in 0..5 {
+                let single = t.lookup_spray_single(dest, flow_label, ch_idx).unwrap();
+                let expected = full_spray[ch_idx % full_spray.len()].0;
+                assert_eq!(
+                    single, expected,
+                    "Mismatch at flow_label={}, ch_idx={}",
+                    flow_label, ch_idx
+                );
+            }
+        }
     }
 
     #[test]
