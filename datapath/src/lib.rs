@@ -322,7 +322,6 @@ impl Forwarder {
         let mut forwarded = false;
 
         if let Ok(h) = HeaderViewRef::new(pkt) {
-            let src_id: [u8; 32] = *h.src_id();
             let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
@@ -384,7 +383,7 @@ impl Forwarder {
                 }
             } else if self
                 .routes
-                .lookup_or_predict(src_id, dst_id, flow_label)
+                .lookup_or_predict(*h.src_id(), dst_id, flow_label)
                 .is_some()
             {
                 metrics.predict_calls += 1;
@@ -455,7 +454,6 @@ impl Forwarder {
         profile_enabled: bool,
     ) -> PacketOutput {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
-            let src_id: [u8; 32] = *h.src_id();
             let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
@@ -463,7 +461,7 @@ impl Forwarder {
 
             // measure encrypt under caller's profiler by timing around call sites
             if routes
-                .lookup_or_predict(src_id, dst_id, flow_label)
+                .lookup_or_predict(*h.src_id(), dst_id, flow_label)
                 .is_some()
             {
                 let enc_start = if profile_enabled {
@@ -505,14 +503,13 @@ impl Forwarder {
         profile_enabled: bool,
     ) -> (Vec<u8>, bool, bool, u64) {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
-            let src_id: [u8; 32] = *h.src_id();
             let dst_id: [u8; 32] = *h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
 
             if routes
-                .lookup_or_predict(src_id, dst_id, flow_label)
+                .lookup_or_predict(*h.src_id(), dst_id, flow_label)
                 .is_some()
             {
                 let enc_start = if profile_enabled {
@@ -803,7 +800,6 @@ impl Forwarder {
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let _src_id: [u8; 32] = *h.src_id();
                     let dst_id: [u8; 32] = *h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
@@ -956,7 +952,6 @@ impl Forwarder {
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let src_id: [u8; 32] = *h.src_id();
                     let dst_id: [u8; 32] = *h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
@@ -969,7 +964,7 @@ impl Forwarder {
 
                         let route_exists = self
                             .routes
-                            .lookup_or_predict(src_id, dst_id, flow_label)
+                            .lookup_or_predict(*h.src_id(), dst_id, flow_label)
                             .is_some();
 
                         let mut was_encrypted = false;
@@ -1049,7 +1044,7 @@ impl Forwarder {
 
                         let route_exists = self
                             .routes
-                            .lookup_or_predict(src_id, nh, flow_label)
+                            .lookup_or_predict(*h.src_id(), nh, flow_label)
                             .is_some();
 
                         let mut was_encrypted = false;
