@@ -103,3 +103,7 @@
 ## 2026-06-13 - [Avoid Redundant Cloning of RouteEntry in Table Updates]
 **Learning:** Cloning a `RouteEntry` multiple times during table insertion incurs unnecessary allocations on the heap because `RouteEntry` contains a heap-allocated `Vec`.
 **Action:** Copy cheap `Copy` fields like `dest_id` to local variables and move the `RouteEntry` value on the final insertion.
+
+## 2026-06-14 - [Direct Unaligned Pointer Indexing in AF_XDP Ring Buffer Pops]
+**Learning:** Popping descriptors from AF_XDP ring buffers (`rx_pop` and `comp_pop`) using helper functions like `read_u64_at` inside loops introduces redundant bounds checks and per-element capacity checks when pushing to `Vec`. Computing base descriptor pointers once and performing direct unaligned 64-bit reads into pre-allocated `Vec` memory (`as_mut_ptr()` + `set_len()`) completely eliminates per-descriptor bounds assertions and vector reallocation checks on high-rate AF_XDP ring processing paths.
+**Action:** On hot ring-buffer pop/push loops with known counts, compute base raw pointers once and write/read elements directly via unaligned pointer arithmetic.

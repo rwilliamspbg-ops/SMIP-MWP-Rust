@@ -106,13 +106,19 @@ impl RingMmap {
             let mask = capacity - 1;
 
             let to_take = std::cmp::min(avail, max);
-            let mut out = Vec::with_capacity(to_take);
+            let mut out: Vec<u64> = Vec::with_capacity(to_take);
+            let out_ptr: *mut u64 = out.as_mut_ptr();
+            let desc_base = self.base.as_ptr().add(rx_desc_off as usize) as *const u64;
+
+            // Direct pointer indexing and unaligned 64-bit reads bypass per-element assertion
+            // and out.push capacity checks on the hot ring-pop datapath.
             for i in 0..to_take {
                 let idx = (cons as usize + i) & mask;
-                let d_off = rx_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
-                let desc = self.read_u64_at(d_off);
-                out.push(desc);
+                let desc_ptr = desc_base.add(idx);
+                let desc = u64::from_le(std::ptr::read_unaligned(desc_ptr));
+                out_ptr.add(i).write(desc);
             }
+            out.set_len(to_take);
 
             let new_cons = cons.wrapping_add(to_take as u32);
             self.write_u32_at(rx_meta_off + 4, new_cons);
@@ -139,13 +145,19 @@ impl RingMmap {
             let mask = capacity - 1;
 
             let to_take = std::cmp::min(avail, max);
-            let mut out = Vec::with_capacity(to_take);
+            let mut out: Vec<u64> = Vec::with_capacity(to_take);
+            let out_ptr: *mut u64 = out.as_mut_ptr();
+            let desc_base = self.base.as_ptr().add(comp_desc_off as usize) as *const u64;
+
+            // Direct pointer indexing and unaligned 64-bit reads bypass per-element assertion
+            // and out.push capacity checks on the hot ring-pop datapath.
             for i in 0..to_take {
                 let idx = (cons as usize + i) & mask;
-                let d_off = comp_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
-                let desc = self.read_u64_at(d_off);
-                out.push(desc);
+                let desc_ptr = desc_base.add(idx);
+                let desc = u64::from_le(std::ptr::read_unaligned(desc_ptr));
+                out_ptr.add(i).write(desc);
             }
+            out.set_len(to_take);
 
             let new_cons = cons.wrapping_add(to_take as u32);
             self.write_u32_at(comp_meta_off + 4, new_cons);
@@ -174,10 +186,13 @@ impl RingMmap {
             }
 
             let to_push = std::cmp::min(free, addrs.len());
+            let desc_base = self.base.as_ptr().add(fill_desc_off as usize) as *mut u64;
+
+            // Direct pointer indexing and unaligned 64-bit writes bypass per-element assertion checks.
             for (i, &addr) in addrs.iter().enumerate().take(to_push) {
                 let idx = (prod as usize + i) & mask;
-                let d_off = fill_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
-                self.write_u64_at(d_off, addr);
+                let desc_ptr = desc_base.add(idx);
+                std::ptr::write_unaligned(desc_ptr, addr.to_le());
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
@@ -206,10 +221,13 @@ impl RingMmap {
             }
 
             let to_push = std::cmp::min(free, addrs.len());
+            let desc_base = self.base.as_ptr().add(tx_desc_off as usize) as *mut u64;
+
+            // Direct pointer indexing and unaligned 64-bit writes bypass per-element assertion checks.
             for (i, &addr) in addrs.iter().enumerate().take(to_push) {
                 let idx = (prod as usize + i) & mask;
-                let d_off = tx_desc_off + (idx * std::mem::size_of::<u64>()) as u64;
-                self.write_u64_at(d_off, addr);
+                let desc_ptr = desc_base.add(idx);
+                std::ptr::write_unaligned(desc_ptr, addr.to_le());
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
