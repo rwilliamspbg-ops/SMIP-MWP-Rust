@@ -59,7 +59,8 @@ pub struct Table {
 struct TableInner {
     // BTreeMap keeps keys sorted automatically — no manual re-sort needed
     entries: BTreeMap<[u8; 32], RouteEntry>,
-    predictive_entries: Vec<RouteEntry>,
+    /// Compact flat array of next-hop IDs for fast predictive routing fallback
+    predictive_next_hops: Vec<[u8; 32]>,
 }
 
 const HOT_CACHE_SIZE: usize = 256;
@@ -120,7 +121,7 @@ impl Table {
     pub fn new() -> Self {
         let init = TableInner {
             entries: BTreeMap::new(),
-            predictive_entries: Vec::new(),
+            predictive_next_hops: Vec::new(),
         };
         let mut shards = Vec::with_capacity(FAST_SHARDS);
         for _ in 0..FAST_SHARDS {
@@ -149,7 +150,7 @@ impl Table {
     }
 
     fn rebuild_predictive_entries(inner: &mut TableInner) {
-        inner.predictive_entries = inner.entries.values().cloned().collect();
+        inner.predictive_next_hops = inner.entries.values().map(|e| e.next_hop_id).collect();
     }
 
     pub fn update_route(&self, e: RouteEntry) {
@@ -464,60 +465,8 @@ impl Table {
         None
     }
 
-    pub fn predictive_next_hop(
-        &self,
-        src_id: [u8; 32],
-        dst_id: [u8; 32],
-        flow_label: u32,
-    ) -> Option<[u8; 32]> {
-        // 1. Fast per-thread hot-key cache check
-        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::simple_cache_index(&dst_id);
-
-        if let Some(v) = THREAD_CACHE.with(|c| {
-            let cache = unsafe { &*c.get() };
-            if cache.epochs[idx] == cur_epoch && cache.dest_ids[idx] == dst_id {
-                Some(cache.next_hops[idx])
-            } else {
-                None
-            }
-        }) {
-            return Some(v);
-        }
-
-        // 2. Fall back to main table
-        let inner = self.inner.read();
-        if inner.entries.is_empty() {
-            return None;
-        }
-
-        // For small tables, BTreeMap search is extremely fast.
-        // For larger tables, checking fast_shards (AHashMap) is faster to bypass BTreeMap search on misses.
-        let mut nh_opt = None;
-        if inner.entries.len() <= 8 {
-            if let Some(e) = inner.entries.get(&dst_id) {
-                nh_opt = Some(e.next_hop_id);
-            }
-        } else {
-            let h = Self::hash_32(&dst_id);
-            let shard = Self::shard_for_from_hash(h);
-            let map = self.fast_shards[shard].read();
-            if let Some(e) = map.get(&dst_id) {
-                nh_opt = Some(e.next_hop_id);
-            }
-        }
-
-        if let Some(nh) = nh_opt {
-            Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
-            return Some(nh);
-        }
-
-        let n = inner.predictive_entries.len();
-        let idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
-        let chosen = inner.predictive_entries.get(idx).unwrap();
-        Some(chosen.next_hop_id)
-    }
-
+    /// Look up exact next hop for `dst_id` via hot cache / table shards,
+    /// or fall back to predictive flow hash over `predictive_next_hops` if not found.
     pub fn lookup_or_predict(
         &self,
         src_id: [u8; 32],
@@ -539,7 +488,7 @@ impl Table {
             return Some(v);
         }
 
-        // 2. Fall back to main table
+        // 2. Fall back to main table search / shard lookup
         let inner = self.inner.read();
         if inner.entries.is_empty() {
             return None;
@@ -566,10 +515,19 @@ impl Table {
             return Some(nh);
         }
 
-        let n = inner.predictive_entries.len();
+        // 3. Fall back to predictive flow hash selection over flat compact array
+        let n = inner.predictive_next_hops.len();
         let idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
-        let chosen = inner.predictive_entries.get(idx).unwrap();
-        Some(chosen.next_hop_id)
+        Some(inner.predictive_next_hops[idx])
+    }
+
+    pub fn predictive_next_hop(
+        &self,
+        src_id: [u8; 32],
+        dst_id: [u8; 32],
+        flow_label: u32,
+    ) -> Option<[u8; 32]> {
+        self.lookup_or_predict(src_id, dst_id, flow_label)
     }
 }
 
