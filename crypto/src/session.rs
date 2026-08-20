@@ -147,6 +147,19 @@ impl SessionAead {
         }
     }
 
+    fn decrypt_in_place_buf(
+        &self,
+        nonce: &[u8; NONCE_SIZE],
+        buf: &mut Vec<u8>,
+    ) -> Result<(), SessionError> {
+        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
+        match self {
+            SessionAead::Aes(aead) => aead.decrypt_in_place(&nonce_ref, b"", buf),
+            SessionAead::ChaCha(aead) => aead.decrypt_in_place(&nonce_ref, b"", buf),
+        }
+        .map_err(|_| SessionError::AuthenticationFailed)
+    }
+
     fn decrypt(
         &self,
         nonce: &[u8; NONCE_SIZE],
@@ -217,13 +230,14 @@ impl HybridSession {
         nonce
     }
 
+    /// Encrypts `payload` completely in-place, appending the authentication tag.
+    /// Uses `AeadInPlace::encrypt_in_place` to avoid allocating temporary buffer vectors.
     pub fn encrypt_in_place(&self, payload: &mut Vec<u8>, seq: u64) -> Result<(), SessionError> {
         if payload.len() > (1 << 24) {
             return Err(SessionError::PayloadTooLarge);
         }
-        let ct = self.encrypt(payload, seq)?;
-        *payload = ct;
-        Ok(())
+        let nonce = self.build_nonce(seq);
+        self.aead.encrypt_in_place_buf(&nonce, payload)
     }
 
     pub fn encrypt_into_slice(
@@ -258,13 +272,14 @@ impl HybridSession {
         self.aead.encrypt_in_place_buf(&nonce, dst)
     }
 
+    /// Decrypts `payload` completely in-place and truncates the authentication tag.
+    /// Uses `AeadInPlace::decrypt_in_place` to avoid allocating temporary buffer vectors.
     pub fn decrypt_in_place(&self, payload: &mut Vec<u8>, seq: u64) -> Result<(), SessionError> {
         if payload.len() < TAG_SIZE {
             return Err(SessionError::CiphertextTooShort);
         }
-        let pt = self.decrypt(payload, seq)?;
-        *payload = pt;
-        Ok(())
+        let nonce = self.build_nonce(seq);
+        self.aead.decrypt_in_place_buf(&nonce, payload)
     }
 
     pub fn encrypt(&self, plaintext: &[u8], seq: u64) -> Result<Vec<u8>, SessionError> {
