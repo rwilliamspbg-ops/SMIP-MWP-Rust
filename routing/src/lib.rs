@@ -622,10 +622,6 @@ impl Router {
                 priority: 1,
             },
         );
-        println!(
-            "SUCCESS: Policy updated for key {:x} -> Queue {}",
-            key, queue_id
-        );
     }
 }
 
