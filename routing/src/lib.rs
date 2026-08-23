@@ -564,10 +564,10 @@ impl Router {
         );
     }
 
-    fn compute_flow_key(&self, src_id: [u8; 32], dst_id: [u8; 32], flow_label: u32) -> u64 {
+    fn compute_flow_key(&self, src_id: &[u8; 32], dst_id: &[u8; 32], flow_label: u32) -> u64 {
         // Since (a << 32) | b operates on non-overlapping bitfields, we can mathematically
         // consolidate the XOR folding of src_id and dst_id bytes individually on the stack.
-        // This completely eliminates the loop, index multiplications, and multiple bitwise operations.
+        // Taking array references (&[u8; 32]) avoids copying 64 bytes of stack data internally.
         let a = (src_id[0] as u64)
             ^ (src_id[4] as u64)
             ^ (src_id[8] as u64)
@@ -593,7 +593,7 @@ impl Router {
         dst_id: [u8; 32],
         flow_label: u32,
     ) -> Result<RoutePolicy, &'static str> {
-        let key = self.compute_flow_key(src_id, dst_id, flow_label);
+        let key = self.compute_flow_key(&src_id, &dst_id, flow_label);
         let m = self.inner.read();
         if let Some(p) = m.get(&key) {
             return Ok(p.clone());
@@ -612,7 +612,7 @@ impl Router {
         next_hop_id: [u8; 32],
         queue_id: i32,
     ) {
-        let key = self.compute_flow_key(src_id, dst_id, flow_label);
+        let key = self.compute_flow_key(&src_id, &dst_id, flow_label);
         let mut m = self.inner.write();
         m.insert(
             key,
