@@ -111,3 +111,7 @@
 ## 2026-06-15 - [Compact Flat Arrays for Predictive Fallback Storage]
 **Learning:** Storing predictive fallback entries as `Vec<RouteEntry>` in the routing table inner state incurs dynamic heap allocations and vector cloning (`alternate_channels`) on every route update. Storing a flat, compact `predictive_next_hops: Vec<[u8; 32]>` instead completely eliminates heap allocations on table updates and increases L1/L2 cache density by 4x during predictive route resolution.
 **Action:** Prefer storing flat, compact arrays of scalar or Copy types for fallback lookup lists instead of whole structs containing heap-allocated members.
+
+## 2026-06-16 - [Pre-clamp Static Rate Limits on Construction]
+**Learning:** Evaluating `self.rate_limit_ns.min(self.window_ns)` on every packet rate limit check introduces redundant branch/arithmetic comparison operations. Since `window_ns` is static, pre-clamping `rate_limit_ns` in `DoSThrottle::new` allows removing `window_ns` from the struct layout and simplifies `allow_packet` to a single comparison against `rate_limit_ns`.
+**Action:** Pre-calculate and pre-clamp bounds/limits in struct constructors when config values are static throughout the struct's lifecycle.

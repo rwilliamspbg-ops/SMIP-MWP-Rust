@@ -34,16 +34,17 @@ pub fn increment_global_seq() -> u64 {
 pub struct DoSThrottle {
     last_packet_time: AtomicI64,
     rate_limit_ns: i64,
-    window_ns: i64,
 }
 
 impl DoSThrottle {
     pub fn new(rate_per_sec: i32) -> Self {
         let safe_rate = rate_per_sec.max(1) as i64;
+        let window_ns = 1_000_000_000_i64;
+        // Pre-clamp rate_limit_ns during initialization to avoid calling .min() on every packet
+        let rate_limit_ns = (1_000_000_000_i64 / safe_rate).min(window_ns);
         Self {
             last_packet_time: AtomicI64::new(0),
-            rate_limit_ns: 1_000_000_000_i64 / safe_rate,
-            window_ns: 1_000_000_000,
+            rate_limit_ns,
         }
     }
 
@@ -54,7 +55,7 @@ impl DoSThrottle {
             .unwrap_or(0);
         let last_seen = self.last_packet_time.load(Ordering::Acquire);
         let elapsed = now.saturating_sub(last_seen);
-        if last_seen == 0 || elapsed >= self.rate_limit_ns.min(self.window_ns) {
+        if last_seen == 0 || elapsed >= self.rate_limit_ns {
             self.last_packet_time.store(now, Ordering::Release);
             return true;
         }
