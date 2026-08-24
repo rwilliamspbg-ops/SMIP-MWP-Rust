@@ -323,10 +323,11 @@ impl Table {
             if out.len() > 1 {
                 let choices = out.len();
                 let idx = (flow_label as usize) % choices;
-                out.swap(0, idx);
-                // mark primary accordingly
-                for (i, (_, is_primary)) in out.iter_mut().enumerate() {
-                    *is_primary = i == 0;
+                if idx != 0 {
+                    out.swap(0, idx);
+                    // O(1) direct update: element swapped to index 0 is now primary, and former primary at idx is no longer primary
+                    out[0].1 = true;
+                    out[idx].1 = false;
                 }
             }
             return out;
