@@ -328,59 +328,10 @@ impl Forwarder {
             let payload_len = h.length() as usize;
 
             metrics.lookup_calls += 1;
+            let mut is_hit = false;
             if self.routes.lookup_next_hop(dst_id, flow_label).is_some() {
                 metrics.lookup_hits += 1;
-
-                if let Some(session) = self.session.as_ref() {
-                    if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let start = self.arena.len();
-                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
-                        if remaining < needed {
-                            self.arena.reserve(needed - remaining);
-                        }
-
-                        // Combine header and payload into a single copy operation to reduce slice copy overhead
-                        self.arena
-                            .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
-                        let payload_start = start + HEADER_SIZE;
-
-                        let enc_start = if self.profile_enabled {
-                            Some(std::time::Instant::now())
-                        } else {
-                            None
-                        };
-                        match session.encrypt_into_slice(
-                            &mut self.arena.as_mut_slice()
-                                [payload_start..payload_start + payload_len],
-                            seq_num,
-                        ) {
-                            Ok(tag) => {
-                                if let Some(start) = enc_start {
-                                    let enc_ns = start.elapsed().as_nanos() as u64;
-                                    metrics.encrypt_ns += enc_ns;
-                                }
-                                metrics.encrypt_count += 1;
-                                self.arena.extend_from_slice(tag.as_slice());
-                                let len = self.arena.len() - start;
-                                self.offsets.push((start, len));
-                                stats.encrypted += 1;
-                                forwarded = true;
-                            }
-                            Err(SessionError::AuthenticationFailed)
-                            | Err(SessionError::PayloadTooLarge)
-                            | Err(SessionError::CiphertextTooShort)
-                            | Err(SessionError::AeadError)
-                            | Err(SessionError::BufferTooSmall)
-                            | Err(SessionError::InsufficientCapacity) => {
-                                self.arena.truncate(start);
-                                stats.route_misses += 1;
-                            }
-                        }
-                    } else if payload_len > 0 {
-                        stats.route_misses += 1;
-                    }
-                }
+                is_hit = true;
             } else if self
                 .routes
                 .lookup_or_predict(*h.src_id(), dst_id, flow_label)
@@ -388,6 +339,12 @@ impl Forwarder {
             {
                 metrics.predict_calls += 1;
                 metrics.predict_hits += 1;
+                is_hit = true;
+            } else {
+                stats.route_misses += 1;
+            }
+
+            if is_hit {
                 if let Some(session) = self.session.as_ref() {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let start = self.arena.len();
@@ -438,8 +395,6 @@ impl Forwarder {
                         stats.route_misses += 1;
                     }
                 }
-            } else {
-                stats.route_misses += 1;
             }
         }
 
