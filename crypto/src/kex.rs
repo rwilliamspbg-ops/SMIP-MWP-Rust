@@ -107,10 +107,11 @@ impl HybridKEX {
     }
 
     /// Returns the initiator's combined public key: x25519_pub (32) || mlkem_pub (1184).
-    pub fn public_key(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(INITIATOR_PUB_LEN);
-        out.extend_from_slice(self.x25519_pub.as_bytes());
-        out.extend_from_slice(self.mlkem_ek.as_bytes().as_slice());
+    /// Stack-allocated fixed-size array avoids dynamic heap allocation in handshakes.
+    pub fn public_key(&self) -> [u8; INITIATOR_PUB_LEN] {
+        let mut out = [0u8; INITIATOR_PUB_LEN];
+        out[..32].copy_from_slice(self.x25519_pub.as_bytes());
+        out[32..].copy_from_slice(self.mlkem_ek.as_bytes().as_slice());
         out
     }
 
@@ -118,10 +119,11 @@ impl HybridKEX {
     /// shared secret. Returns `(responder_msg, session_secret)`.
     ///
     /// `responder_msg` wire format: x25519_resp_pub (32) || mlkem_ciphertext (1088).
+    /// Stack-allocated fixed-size array avoids dynamic heap allocation in handshakes.
     pub fn respond(
         &mut self,
         initiator_pub: &[u8],
-    ) -> Result<(Vec<u8>, [u8; SESSION_SECRET_LEN]), KexError> {
+    ) -> Result<([u8; RESPONDER_MSG_LEN], [u8; SESSION_SECRET_LEN]), KexError> {
         if initiator_pub.len() < INITIATOR_PUB_LEN {
             return Err(KexError::BadInitiatorPub);
         }
@@ -147,9 +149,9 @@ impl HybridKEX {
         let ct_bytes = ct.as_slice();
 
         // Wire message: responder x25519 pub || mlkem ciphertext
-        let mut msg = Vec::with_capacity(RESPONDER_MSG_LEN);
-        msg.extend_from_slice(self.x25519_pub.as_bytes());
-        msg.extend_from_slice(ct_bytes);
+        let mut msg = [0u8; RESPONDER_MSG_LEN];
+        msg[..32].copy_from_slice(self.x25519_pub.as_bytes());
+        msg[32..].copy_from_slice(ct_bytes);
 
         // Derive shared secret
         let transcript = build_transcript(
