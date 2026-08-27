@@ -518,6 +518,10 @@ impl Table {
 
         // 3. Fall back to predictive flow hash selection over flat compact array
         let n = inner.predictive_next_hops.len();
+        if n == 1 {
+            // Fast path: single predictive fallback entry avoids 8 unaligned reads & XOR fold overhead
+            return Some(inner.predictive_next_hops[0]);
+        }
         let idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
         Some(inner.predictive_next_hops[idx])
     }
