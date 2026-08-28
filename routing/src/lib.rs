@@ -489,41 +489,33 @@ impl Table {
             return Some(v);
         }
 
-        // 2. Fall back to main table search / shard lookup
-        let inner = self.inner.read();
-        if inner.entries.is_empty() {
-            return None;
-        }
-
-        // For small tables, BTreeMap search is extremely fast.
-        // For larger tables, checking fast_shards (AHashMap) is faster to bypass BTreeMap search on misses.
-        let mut nh_opt = None;
-        if inner.entries.len() <= 8 {
-            if let Some(e) = inner.entries.get(&dst_id) {
-                nh_opt = Some(e.next_hop_id);
-            }
-        } else {
-            let h = Self::hash_32(&dst_id);
-            let shard = Self::shard_for_from_hash(h);
+        // 2. Direct fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table).
+        // By checking fast_shards directly without acquiring self.inner.read(), we completely eliminate global lock
+        // contention across concurrent forwarding threads on non-cached route hits.
+        let h = Self::hash_32(&dst_id);
+        let shard = Self::shard_for_from_hash(h);
+        let nh_opt = {
             let map = self.fast_shards[shard].read();
-            if let Some(e) = map.get(&dst_id) {
-                nh_opt = Some(e.next_hop_id);
-            }
-        }
+            map.get(&dst_id).map(|e| e.next_hop_id)
+        };
 
         if let Some(nh) = nh_opt {
             Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
             return Some(nh);
         }
 
-        // 3. Fall back to predictive flow hash selection over flat compact array
+        // 3. Fall back to predictive flow hash selection over flat compact array, acquiring inner read lock only on miss
+        let inner = self.inner.read();
         let n = inner.predictive_next_hops.len();
+        if n == 0 {
+            return None;
+        }
         if n == 1 {
             // Fast path: single predictive fallback entry avoids 8 unaligned reads & XOR fold overhead
             return Some(inner.predictive_next_hops[0]);
         }
-        let idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
-        Some(inner.predictive_next_hops[idx])
+        let pred_idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
+        Some(inner.predictive_next_hops[pred_idx])
     }
 
     pub fn predictive_next_hop(
