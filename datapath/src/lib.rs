@@ -328,20 +328,25 @@ impl Forwarder {
             let payload_len = h.length() as usize;
 
             metrics.lookup_calls += 1;
+            // Optimization: Attempt fast exact route lookup first; on miss, invoke predictive
+            // fallback directly to avoid re-querying the thread-local cache and fast_shards in lookup_or_predict.
+            // Preserves accurate telemetry tracking for lookup_hits vs. predict_calls/predict_hits.
             let mut is_hit = false;
             if self.routes.lookup_next_hop(dst_id, flow_label).is_some() {
                 metrics.lookup_hits += 1;
                 is_hit = true;
-            } else if self
-                .routes
-                .lookup_or_predict(*h.src_id(), dst_id, flow_label)
-                .is_some()
-            {
-                metrics.predict_calls += 1;
-                metrics.predict_hits += 1;
-                is_hit = true;
             } else {
-                stats.route_misses += 1;
+                metrics.predict_calls += 1;
+                if self
+                    .routes
+                    .lookup_predictive_fallback(*h.src_id(), dst_id, flow_label)
+                    .is_some()
+                {
+                    metrics.predict_hits += 1;
+                    is_hit = true;
+                } else {
+                    stats.route_misses += 1;
+                }
             }
 
             if is_hit {

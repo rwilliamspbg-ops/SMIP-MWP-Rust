@@ -466,45 +466,15 @@ impl Table {
         None
     }
 
-    /// Look up exact next hop for `dst_id` via hot cache / table shards,
-    /// or fall back to predictive flow hash over `predictive_next_hops` if not found.
-    pub fn lookup_or_predict(
+    /// Fast predictive flow hash fallback over `predictive_next_hops`.
+    /// Called directly when exact route lookup (`lookup_next_hop`) returns `None`,
+    /// avoiding redundant re-checks of thread-local cache and fast_shards.
+    pub fn lookup_predictive_fallback(
         &self,
         src_id: [u8; 32],
         dst_id: [u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
-        // 1. Fast per-thread hot-key cache check
-        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::simple_cache_index(&dst_id);
-
-        if let Some(v) = THREAD_CACHE.with(|c| {
-            let cache = unsafe { &*c.get() };
-            if cache.epochs[idx] == cur_epoch && cache.dest_ids[idx] == dst_id {
-                Some(cache.next_hops[idx])
-            } else {
-                None
-            }
-        }) {
-            return Some(v);
-        }
-
-        // 2. Direct fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table).
-        // By checking fast_shards directly without acquiring self.inner.read(), we completely eliminate global lock
-        // contention across concurrent forwarding threads on non-cached route hits.
-        let h = Self::hash_32(&dst_id);
-        let shard = Self::shard_for_from_hash(h);
-        let nh_opt = {
-            let map = self.fast_shards[shard].read();
-            map.get(&dst_id).map(|e| e.next_hop_id)
-        };
-
-        if let Some(nh) = nh_opt {
-            Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
-            return Some(nh);
-        }
-
-        // 3. Fall back to predictive flow hash selection over flat compact array, acquiring inner read lock only on miss
         let inner = self.inner.read();
         let n = inner.predictive_next_hops.len();
         if n == 0 {
@@ -516,6 +486,20 @@ impl Table {
         }
         let pred_idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
         Some(inner.predictive_next_hops[pred_idx])
+    }
+
+    /// Look up exact next hop for `dst_id` via hot cache / table shards,
+    /// or fall back to predictive flow hash over `predictive_next_hops` if not found.
+    pub fn lookup_or_predict(
+        &self,
+        src_id: [u8; 32],
+        dst_id: [u8; 32],
+        flow_label: u32,
+    ) -> Option<[u8; 32]> {
+        if let Some(nh) = self.lookup_next_hop(dst_id, flow_label) {
+            return Some(nh);
+        }
+        self.lookup_predictive_fallback(src_id, dst_id, flow_label)
     }
 
     pub fn predictive_next_hop(
