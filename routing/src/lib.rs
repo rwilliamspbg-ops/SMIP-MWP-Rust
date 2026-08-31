@@ -546,26 +546,10 @@ impl Router {
     }
 
     fn compute_flow_key(&self, src_id: &[u8; 32], dst_id: &[u8; 32], flow_label: u32) -> u64 {
-        // Since (a << 32) | b operates on non-overlapping bitfields, we can mathematically
-        // consolidate the XOR folding of src_id and dst_id bytes individually on the stack.
-        // Taking array references (&[u8; 32]) avoids copying 64 bytes of stack data internally.
-        let a = (src_id[0] as u64)
-            ^ (src_id[4] as u64)
-            ^ (src_id[8] as u64)
-            ^ (src_id[12] as u64)
-            ^ (src_id[16] as u64)
-            ^ (src_id[20] as u64)
-            ^ (src_id[24] as u64)
-            ^ (src_id[28] as u64);
-        let b = (dst_id[0] as u64)
-            ^ (dst_id[4] as u64)
-            ^ (dst_id[8] as u64)
-            ^ (dst_id[12] as u64)
-            ^ (dst_id[16] as u64)
-            ^ (dst_id[20] as u64)
-            ^ (dst_id[24] as u64)
-            ^ (dst_id[28] as u64);
-        ((a << 32) | b) ^ (flow_label as u64)
+        // Delegate to fast_flow_hash which uses 64-bit unaligned pointer reads and XOR folding
+        // across all 32 bytes of src_id and dst_id, replacing 16 manual byte indexed loads
+        // with 8 vector/unaligned 64-bit reads and eliminating hash collisions.
+        fast_flow_hash(src_id, dst_id, flow_label)
     }
 
     pub fn lookup_policy(
