@@ -348,9 +348,11 @@ impl Table {
 
         if let Some(v) = SPRAY_CACHE.with(|c| {
             let cache = unsafe { &*c.get() };
+            // Checking 4-byte scalar flow_label before 32-byte dest_id allows short-circuiting
+            // early on flow label misses, completely bypassing 32-byte array equality comparisons.
             if cache.epochs[idx] == cur_epoch
-                && cache.dest_ids[idx] == dst_id
                 && cache.flow_labels[idx] == flow_label
+                && cache.dest_ids[idx] == dst_id
             {
                 Some(cache.next_hops[idx])
             } else {

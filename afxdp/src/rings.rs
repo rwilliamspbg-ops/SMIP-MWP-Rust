@@ -95,8 +95,11 @@ impl RingMmap {
             let rx_meta_off = offs.rx;
             let rx_desc_off = offs.rx_desc;
 
-            let prod = self.read_u32_at(rx_meta_off);
-            let cons = self.read_u32_at(rx_meta_off + 4);
+            // Direct metadata raw pointer access avoids repetitive assert! bounds checking
+            // and recalculations of pointer arithmetic on every ring pop operation.
+            let meta_ptr = self.base.as_ptr().add(rx_meta_off as usize) as *mut u32;
+            let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr));
+            let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1)));
             let avail = prod.wrapping_sub(cons) as usize;
             if avail == 0 {
                 return Vec::new();
@@ -121,7 +124,7 @@ impl RingMmap {
             out.set_len(to_take);
 
             let new_cons = cons.wrapping_add(to_take as u32);
-            self.write_u32_at(rx_meta_off + 4, new_cons);
+            std::ptr::write_unaligned(meta_ptr.add(1), new_cons.to_le());
 
             out
         }
@@ -134,8 +137,11 @@ impl RingMmap {
             let comp_meta_off = offs.comp;
             let comp_desc_off = offs.comp_desc;
 
-            let prod = self.read_u32_at(comp_meta_off);
-            let cons = self.read_u32_at(comp_meta_off + 4);
+            // Direct metadata raw pointer access avoids repetitive assert! bounds checking
+            // and recalculations of pointer arithmetic on every ring pop operation.
+            let meta_ptr = self.base.as_ptr().add(comp_meta_off as usize) as *mut u32;
+            let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr));
+            let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1)));
             let avail = prod.wrapping_sub(cons) as usize;
             if avail == 0 {
                 return Vec::new();
@@ -160,7 +166,7 @@ impl RingMmap {
             out.set_len(to_take);
 
             let new_cons = cons.wrapping_add(to_take as u32);
-            self.write_u32_at(comp_meta_off + 4, new_cons);
+            std::ptr::write_unaligned(meta_ptr.add(1), new_cons.to_le());
 
             out
         }
@@ -173,8 +179,11 @@ impl RingMmap {
             let fill_meta_off = offs.fill;
             let fill_desc_off = offs.fill_desc;
 
-            let prod = self.read_u32_at(fill_meta_off);
-            let cons = self.read_u32_at(fill_meta_off + 4);
+            // Direct metadata raw pointer access avoids repetitive assert! bounds checking
+            // and recalculations of pointer arithmetic on every ring push operation.
+            let meta_ptr = self.base.as_ptr().add(fill_meta_off as usize) as *mut u32;
+            let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr));
+            let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1)));
 
             let capacity = self.fill_capacity();
             let mask = capacity - 1;
@@ -196,7 +205,7 @@ impl RingMmap {
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
-            self.write_u32_at(fill_meta_off, new_prod);
+            std::ptr::write_unaligned(meta_ptr, new_prod.to_le());
             to_push
         }
     }
@@ -208,8 +217,11 @@ impl RingMmap {
             let tx_meta_off = offs.tx;
             let tx_desc_off = offs.tx_desc;
 
-            let prod = self.read_u32_at(tx_meta_off);
-            let cons = self.read_u32_at(tx_meta_off + 4);
+            // Direct metadata raw pointer access avoids repetitive assert! bounds checking
+            // and recalculations of pointer arithmetic on every ring push operation.
+            let meta_ptr = self.base.as_ptr().add(tx_meta_off as usize) as *mut u32;
+            let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr));
+            let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1)));
 
             let capacity = self.tx_capacity();
             let mask = capacity - 1;
@@ -231,7 +243,7 @@ impl RingMmap {
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
-            self.write_u32_at(tx_meta_off, new_prod);
+            std::ptr::write_unaligned(meta_ptr, new_prod.to_le());
             to_push
         }
     }
