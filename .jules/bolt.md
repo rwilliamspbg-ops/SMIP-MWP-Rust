@@ -115,3 +115,7 @@
 ## 2026-06-16 - [Pre-clamp Static Rate Limits on Construction]
 **Learning:** Evaluating `self.rate_limit_ns.min(self.window_ns)` on every packet rate limit check introduces redundant branch/arithmetic comparison operations. Since `window_ns` is static, pre-clamping `rate_limit_ns` in `DoSThrottle::new` allows removing `window_ns` from the struct layout and simplifies `allow_packet` to a single comparison against `rate_limit_ns`.
 **Action:** Pre-calculate and pre-clamp bounds/limits in struct constructors when config values are static throughout the struct's lifecycle.
+
+## 2026-06-17 - [Inlined Buffer Operations and Pre-Reserved Unchecked Extension]
+**Learning:** Hot datapath functions (such as `HeaderViewRef::new`, `HeaderView::view`, `AlignedBuffer` methods, and `Forwarder::handle_packet`) defined across crate boundaries incur function call overhead if not annotated with `#[inline]`. Furthermore, when packet capacity is pre-reserved via `self.arena.reserve(needed)`, performing subsequent capacity checks inside `extend_from_slice` introduces redundant conditional branching and integer arithmetic for every slice and AEAD tag copy.
+**Action:** Annotate hot buffer and header view methods with `#[inline]`, and provide unsafe unchecked methods (`extend_from_slice_unchecked` and `extend_from_tag_unchecked`) when capacity is pre-reserved.

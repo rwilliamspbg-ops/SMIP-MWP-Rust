@@ -118,6 +118,7 @@ pub struct HeaderViewRef<'a> {
 }
 
 impl<'a> HeaderViewRef<'a> {
+    #[inline]
     pub fn new(buf: &'a [u8]) -> Result<Self, ErrBufferTooSmall> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
@@ -168,6 +169,7 @@ pub struct HeaderView<'a> {
 }
 
 impl<'a> HeaderView<'a> {
+    #[inline]
     pub fn view(buf: &'a mut [u8]) -> Result<Self, ErrBufferTooSmall> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);

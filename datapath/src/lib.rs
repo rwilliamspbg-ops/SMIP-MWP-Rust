@@ -35,22 +35,27 @@ impl AlignedBuffer {
         Self { ptr, len: 0, cap }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.len
     }
 
+    #[inline]
     fn capacity(&self) -> usize {
         self.cap
     }
 
+    #[inline]
     fn clear(&mut self) {
         self.len = 0;
     }
 
+    #[inline]
     fn truncate(&mut self, len: usize) {
         self.len = self.len.min(len);
     }
 
+    #[inline]
     fn reserve(&mut self, additional: usize) {
         let required = self.len.saturating_add(additional);
         if required <= self.cap {
@@ -66,6 +71,7 @@ impl AlignedBuffer {
         self.cap = new_cap;
     }
 
+    #[inline]
     fn extend_from_slice(&mut self, src: &[u8]) {
         self.reserve(src.len());
         unsafe {
@@ -74,10 +80,31 @@ impl AlignedBuffer {
         self.len += src.len();
     }
 
+    /// Copy slice into buffer without checking capacity.
+    /// # Safety
+    /// Caller must ensure `self.capacity() >= self.len() + src.len()`.
+    #[inline]
+    unsafe fn extend_from_slice_unchecked(&mut self, src: &[u8]) {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.as_ptr().add(self.len), src.len());
+        self.len += src.len();
+    }
+
+    /// Copy 16-byte AEAD tag into buffer without checking capacity.
+    /// # Safety
+    /// Caller must ensure `self.capacity() >= self.len() + 16`.
+    #[inline]
+    unsafe fn extend_from_tag_unchecked(&mut self, tag: &[u8; 16]) {
+        let dst = self.ptr.as_ptr().add(self.len) as *mut [u8; 16];
+        *dst = *tag;
+        self.len += 16;
+    }
+
+    #[inline]
     fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
+    #[inline]
     fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
@@ -312,6 +339,7 @@ impl Forwarder {
         self.arena.reserve(cap);
     }
 
+    #[inline]
     fn handle_packet(
         &mut self,
         pkt: &[u8],
@@ -354,14 +382,13 @@ impl Forwarder {
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let start = self.arena.len();
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
-                        if remaining < needed {
-                            self.arena.reserve(needed - remaining);
-                        }
+                        self.arena.reserve(needed);
 
                         // Combine header and payload into a single copy operation to reduce slice copy overhead
-                        self.arena
-                            .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                        unsafe {
+                            self.arena
+                                .extend_from_slice_unchecked(&pkt[..HEADER_SIZE + payload_len]);
+                        }
                         let payload_start = start + HEADER_SIZE;
 
                         let enc_start = if self.profile_enabled {
@@ -380,7 +407,9 @@ impl Forwarder {
                                     metrics.encrypt_ns += enc_ns;
                                 }
                                 metrics.encrypt_count += 1;
-                                self.arena.extend_from_slice(tag.as_slice());
+                                unsafe {
+                                    self.arena.extend_from_tag_unchecked(tag.as_ref());
+                                }
                                 let len = self.arena.len() - start;
                                 self.offsets.push((start, len));
                                 stats.encrypted += 1;
@@ -788,14 +817,13 @@ impl Forwarder {
 
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
-                        if remaining < needed {
-                            self.arena.reserve(needed - remaining);
-                        }
+                        self.arena.reserve(needed);
 
                         // Combine header and payload into a single copy operation to reduce slice copy overhead
-                        self.arena
-                            .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
+                        unsafe {
+                            self.arena
+                                .extend_from_slice_unchecked(&pkt[..HEADER_SIZE + payload_len]);
+                        }
                         // Overwrite next_hop field directly in the arena using register-level vectorized assignment
                         *<&mut [u8; 32]>::try_from(
                             &mut self.arena.as_mut_slice()[start + 32..start + 64],
@@ -822,7 +850,9 @@ impl Forwarder {
                                     }
                                     metrics.encrypt_count += 1;
 
-                                    self.arena.extend_from_slice(tag.as_slice());
+                                    unsafe {
+                                        self.arena.extend_from_tag_unchecked(tag.as_ref());
+                                    }
                                     if pkt.len() > HEADER_SIZE + payload_len {
                                         self.arena
                                             .extend_from_slice(&pkt[HEADER_SIZE + payload_len..]);
@@ -841,10 +871,7 @@ impl Forwarder {
                         }
                     } else {
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                        let remaining = self.arena.capacity().saturating_sub(self.arena.len());
-                        if remaining < needed {
-                            self.arena.reserve(needed - remaining);
-                        }
+                        self.arena.reserve(needed);
 
                         self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
                         // Overwrite next_hop field directly in the arena using register-level vectorized assignment
