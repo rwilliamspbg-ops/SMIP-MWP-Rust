@@ -687,6 +687,8 @@ impl Forwarder {
         if received < PARALLEL_BATCH_THRESHOLD || rayon::current_num_threads() <= 1 {
             self.arena.clear();
             self.offsets.clear();
+            // Pre-reserve offsets capacity to avoid reallocations during packet loop
+            self.offsets.reserve(received);
             self.arena
                 .reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
             let mut stats = ForwarderStats {
@@ -1283,6 +1285,8 @@ impl Forwarder {
             return stats;
         }
 
+        // Pre-reserve offsets capacity to avoid reallocations during packet loop
+        self.offsets.reserve(received);
         self.arena.reserve(
             ring.active
                 .iter()
