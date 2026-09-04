@@ -116,9 +116,9 @@ impl HybridKEXState {
         self.seq_counter = self.seq_counter.saturating_add(1);
         let seq = self.seq_counter;
 
-        // Common-case optimization: if seq is strictly greater than the largest element in the window,
-        // we can bypass binary search completely, knowing it is not a replay.
-        if self.seq_window_len > 0 && seq > self.seq_window[self.seq_window_len - 1] {
+        // Common-case optimization: if window is empty or seq is strictly greater than
+        // the largest element in the window, bypass binary search completely.
+        if self.seq_window_len == 0 || seq > self.seq_window[self.seq_window_len - 1] {
             if self.seq_window_len >= MAX_REPLAY_WINDOW as usize {
                 // Shift left to evict index 0 (oldest element)
                 self.seq_window.copy_within(1..self.seq_window_len, 0);
@@ -130,7 +130,7 @@ impl HybridKEXState {
             return Ok(seq);
         }
 
-        // Fallback for non-strictly-increasing sequence or first element
+        // Fallback for non-strictly-increasing sequence
         let window = &self.seq_window[..self.seq_window_len];
         if window.binary_search(&seq).is_ok() {
             return Err(format!(
