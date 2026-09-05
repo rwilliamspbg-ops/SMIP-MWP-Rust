@@ -826,11 +826,11 @@ impl Forwarder {
                             self.arena
                                 .extend_from_slice_unchecked(&pkt[..HEADER_SIZE + payload_len]);
                         }
-                        // Overwrite next_hop field directly in the arena using register-level vectorized assignment
-                        *<&mut [u8; 32]>::try_from(
-                            &mut self.arena.as_mut_slice()[start + 32..start + 64],
-                        )
-                        .unwrap() = next_hop;
+                        // Overwrite next_hop field directly in the arena using raw pointer assignment
+                        unsafe {
+                            *(self.arena.as_mut_slice().as_mut_ptr().add(start + 32)
+                                as *mut [u8; 32]) = next_hop;
+                        }
 
                         let payload_start = start + HEADER_SIZE;
 
@@ -894,11 +894,11 @@ impl Forwarder {
                         let f_start = self.arena.len();
                         // Copy entire packet in a single operation to reduce slice copy overhead
                         self.arena.extend_from_slice(&pkt);
-                        // Overwrite next_hop field directly in the arena using register-level vectorized assignment
-                        *<&mut [u8; 32]>::try_from(
-                            &mut self.arena.as_mut_slice()[f_start + 32..f_start + 64],
-                        )
-                        .unwrap() = next_hop;
+                        // Overwrite next_hop field directly in the arena using raw pointer assignment
+                        unsafe {
+                            *(self.arena.as_mut_slice().as_mut_ptr().add(f_start + 32)
+                                as *mut [u8; 32]) = next_hop;
+                        }
                         let len = self.arena.len() - f_start;
                         self.offsets.push((f_start, len));
                         stats.forwarded += 1;
@@ -1184,13 +1184,17 @@ impl Forwarder {
                     if let Some((last_nh, _)) = channels.pop() {
                         for (nh, _is_primary) in channels {
                             let mut modified = pkt.clone();
-                            // Overwrite next_hop field using register-level vectorized assignment
-                            *<&mut [u8; 32]>::try_from(&mut modified[32..64]).unwrap() = nh;
+                            // Overwrite next_hop field using raw pointer assignment
+                            unsafe {
+                                *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
+                            }
                             duplicated.push((modified, dst_id));
                         }
                         let mut modified = pkt;
-                        // Overwrite next_hop field using register-level vectorized assignment
-                        *<&mut [u8; 32]>::try_from(&mut modified[32..64]).unwrap() = last_nh;
+                        // Overwrite next_hop field using raw pointer assignment
+                        unsafe {
+                            *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = last_nh;
+                        }
                         duplicated.push((modified, dst_id));
                     }
                 } else {

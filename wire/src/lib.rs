@@ -49,14 +49,16 @@ impl Header {
             return Err(ErrBufferTooSmall);
         }
         let buf: &mut [u8; HEADER_SIZE] = (&mut buf[..HEADER_SIZE]).try_into().unwrap();
-        // Safe fixed-size array assignments without dynamic slice length checking
-        buf[SRC_OFFSET..SRC_OFFSET + 32].copy_from_slice(&self.src_id);
-        buf[DST_OFFSET..DST_OFFSET + 32].copy_from_slice(&self.dst_id);
-        buf[FLOW_OFFSET..FLOW_OFFSET + 4].copy_from_slice(&self.flow_label.to_be_bytes());
-        buf[SEQ_OFFSET..SEQ_OFFSET + 8].copy_from_slice(&self.seq_num.to_be_bytes());
-        buf[SESSION_OFFSET..SESSION_OFFSET + 16].copy_from_slice(&self.session_id);
-        buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&self.flags.to_be_bytes());
-        buf[LEN_OFFSET..LEN_OFFSET + 2].copy_from_slice(&self.length.to_be_bytes());
+        // Direct pointer writes into validated [u8; HEADER_SIZE] buffer bypass intermediate slice creation
+        unsafe {
+            *(buf.as_mut_ptr().add(SRC_OFFSET) as *mut [u8; 32]) = self.src_id;
+            *(buf.as_mut_ptr().add(DST_OFFSET) as *mut [u8; 32]) = self.dst_id;
+            *(buf.as_mut_ptr().add(FLOW_OFFSET) as *mut [u8; 4]) = self.flow_label.to_be_bytes();
+            *(buf.as_mut_ptr().add(SEQ_OFFSET) as *mut [u8; 8]) = self.seq_num.to_be_bytes();
+            *(buf.as_mut_ptr().add(SESSION_OFFSET) as *mut [u8; 16]) = self.session_id;
+            *(buf.as_mut_ptr().add(FLAGS_OFFSET) as *mut [u8; 2]) = self.flags.to_be_bytes();
+            *(buf.as_mut_ptr().add(LEN_OFFSET) as *mut [u8; 2]) = self.length.to_be_bytes();
+        }
         Ok(())
     }
 
@@ -65,38 +67,24 @@ impl Header {
             return Err(ErrBufferTooSmall);
         }
         let buf: &[u8; HEADER_SIZE] = buf[..HEADER_SIZE].try_into().unwrap();
-        let src_id = *<&[u8; 32]>::try_from(&buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap();
-        let dst_id = *<&[u8; 32]>::try_from(&buf[DST_OFFSET..DST_OFFSET + 32]).unwrap();
-        // Indexing fixed-size [u8; 96] array with constant indices allows LLVM to prove bounds safety
-        // statically at compile-time, emitting bounds-free register loads without slice or unsafe overhead.
-        let flow_label = u32::from_be_bytes([
-            buf[FLOW_OFFSET],
-            buf[FLOW_OFFSET + 1],
-            buf[FLOW_OFFSET + 2],
-            buf[FLOW_OFFSET + 3],
-        ]);
-        let seq_num = u64::from_be_bytes([
-            buf[SEQ_OFFSET],
-            buf[SEQ_OFFSET + 1],
-            buf[SEQ_OFFSET + 2],
-            buf[SEQ_OFFSET + 3],
-            buf[SEQ_OFFSET + 4],
-            buf[SEQ_OFFSET + 5],
-            buf[SEQ_OFFSET + 6],
-            buf[SEQ_OFFSET + 7],
-        ]);
-        let session_id = *<&[u8; 16]>::try_from(&buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap();
-        let flags = u16::from_be_bytes([buf[FLAGS_OFFSET], buf[FLAGS_OFFSET + 1]]);
-        let length = u16::from_be_bytes([buf[LEN_OFFSET], buf[LEN_OFFSET + 1]]);
-        Ok(Header {
-            src_id,
-            dst_id,
-            flow_label,
-            seq_num,
-            session_id,
-            flags,
-            length,
-        })
+        unsafe {
+            let src_id = *(buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]);
+            let dst_id = *(buf.as_ptr().add(DST_OFFSET) as *const [u8; 32]);
+            let flow_label = u32::from_be_bytes(*(buf.as_ptr().add(FLOW_OFFSET) as *const [u8; 4]));
+            let seq_num = u64::from_be_bytes(*(buf.as_ptr().add(SEQ_OFFSET) as *const [u8; 8]));
+            let session_id = *(buf.as_ptr().add(SESSION_OFFSET) as *const [u8; 16]);
+            let flags = u16::from_be_bytes(*(buf.as_ptr().add(FLAGS_OFFSET) as *const [u8; 2]));
+            let length = u16::from_be_bytes(*(buf.as_ptr().add(LEN_OFFSET) as *const [u8; 2]));
+            Ok(Header {
+                src_id,
+                dst_id,
+                flow_label,
+                seq_num,
+                session_id,
+                flags,
+                length,
+            })
+        }
     }
 
     pub fn new_header_buffer(payload_len: usize) -> Vec<u8> {
@@ -126,15 +114,14 @@ impl<'a> HeaderViewRef<'a> {
         let buf = buf[..HEADER_SIZE].try_into().unwrap();
         Ok(Self { buf })
     }
-    // Indexing fixed-size [u8; 96] array with constant indices allows LLVM to prove bounds safety
-    // statically at compile-time, emitting bounds-free register loads without dynamic slice creation.
+    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation and try_from length assertions.
     #[inline]
     pub fn src_id(&self) -> &[u8; 32] {
-        <&[u8; 32]>::try_from(&self.buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap()
+        unsafe { &*(self.buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]) }
     }
     #[inline]
     pub fn dst_id(&self) -> &[u8; 32] {
-        <&[u8; 32]>::try_from(&self.buf[DST_OFFSET..DST_OFFSET + 32]).unwrap()
+        unsafe { &*(self.buf.as_ptr().add(DST_OFFSET) as *const [u8; 32]) }
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
@@ -177,15 +164,14 @@ impl<'a> HeaderView<'a> {
         let buf = (&mut buf[..HEADER_SIZE]).try_into().unwrap();
         Ok(Self { buf })
     }
-    // Indexing fixed-size [u8; 96] array with constant indices allows LLVM to prove bounds safety
-    // statically at compile-time, emitting bounds-free register loads without dynamic slice creation.
+    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation and try_from length assertions.
     #[inline]
     pub fn src_id(&self) -> &[u8; 32] {
-        <&[u8; 32]>::try_from(&self.buf[SRC_OFFSET..SRC_OFFSET + 32]).unwrap()
+        unsafe { &*(self.buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]) }
     }
     #[inline]
     pub fn dst_id(&self) -> &[u8; 32] {
-        <&[u8; 32]>::try_from(&self.buf[DST_OFFSET..DST_OFFSET + 32]).unwrap()
+        unsafe { &*(self.buf.as_ptr().add(DST_OFFSET) as *const [u8; 32]) }
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
@@ -211,7 +197,7 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn session_id(&self) -> &[u8; 16] {
-        <&[u8; 16]>::try_from(&self.buf[SESSION_OFFSET..SESSION_OFFSET + 16]).unwrap()
+        unsafe { &*(self.buf.as_ptr().add(SESSION_OFFSET) as *const [u8; 16]) }
     }
     #[inline]
     pub fn flags(&self) -> u16 {
@@ -225,11 +211,15 @@ impl<'a> HeaderView<'a> {
     // Setters
     #[inline]
     pub fn set_src_id(&mut self, id: [u8; 32]) {
-        self.buf[SRC_OFFSET..SRC_OFFSET + 32].copy_from_slice(&id);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(SRC_OFFSET) as *mut [u8; 32]) = id;
+        }
     }
     #[inline]
     pub fn set_dst_id(&mut self, id: [u8; 32]) {
-        self.buf[DST_OFFSET..DST_OFFSET + 32].copy_from_slice(&id);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(DST_OFFSET) as *mut [u8; 32]) = id;
+        }
     }
     #[inline]
     pub fn set_flow_label(&mut self, v: u32) {
@@ -243,7 +233,9 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn set_session_id(&mut self, id: [u8; 16]) {
-        self.buf[SESSION_OFFSET..SESSION_OFFSET + 16].copy_from_slice(&id);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(SESSION_OFFSET) as *mut [u8; 16]) = id;
+        }
     }
     #[inline]
     pub fn set_flags(&mut self, v: u16) {
