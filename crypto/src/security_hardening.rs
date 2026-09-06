@@ -130,27 +130,25 @@ impl HybridKEXState {
             return Ok(seq);
         }
 
-        // Fallback for non-strictly-increasing sequence
-        let window = &self.seq_window[..self.seq_window_len];
-        if window.binary_search(&seq).is_ok() {
-            return Err(format!(
-                "crypto: replay attack detected for session {:02x?}",
-                self.session_id
-            ));
-        }
-
-        if self.seq_window_len >= MAX_REPLAY_WINDOW as usize {
-            // Reached window capacity. Evict the oldest (smallest) sequence number.
-            // Since seq_window is sorted, the smallest is at index 0.
-            // Shift remaining elements left to overwrite index 0.
-            self.seq_window.copy_within(1..self.seq_window_len, 0);
-            self.seq_window_len -= 1;
-        }
-
-        let insert_idx = match self.seq_window[..self.seq_window_len].binary_search(&seq) {
-            Ok(idx) => idx,
+        // Fallback for non-strictly-increasing sequence:
+        // Perform a single binary search to validate replay status and get insertion index
+        // without mutating window state on duplicate detection.
+        let mut insert_idx = match self.seq_window[..self.seq_window_len].binary_search(&seq) {
+            Ok(_) => {
+                return Err(format!(
+                    "crypto: replay attack detected for session {:02x?}",
+                    self.session_id
+                ));
+            }
             Err(idx) => idx,
         };
+
+        if self.seq_window_len >= MAX_REPLAY_WINDOW as usize {
+            // Reached window capacity. Evict the oldest (smallest) sequence number at index 0.
+            self.seq_window.copy_within(1..self.seq_window_len, 0);
+            self.seq_window_len -= 1;
+            insert_idx = insert_idx.saturating_sub(1);
+        }
 
         if insert_idx < self.seq_window_len {
             self.seq_window
