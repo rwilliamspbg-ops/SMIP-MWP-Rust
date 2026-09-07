@@ -818,7 +818,7 @@ impl Forwarder {
                     let mut was_route_miss = false;
 
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
+                        let needed = pkt.len() + TAG_SIZE;
                         self.arena.reserve(needed);
 
                         // Combine header and payload into a single copy operation to reduce slice copy overhead
@@ -856,8 +856,12 @@ impl Forwarder {
                                         self.arena.extend_from_tag_unchecked(tag.as_ref());
                                     }
                                     if pkt.len() > HEADER_SIZE + payload_len {
-                                        self.arena
-                                            .extend_from_slice(&pkt[HEADER_SIZE + payload_len..]);
+                                        // Pre-reserved frame capacity guarantees space for trailing packet bytes
+                                        unsafe {
+                                            self.arena.extend_from_slice_unchecked(
+                                                &pkt[HEADER_SIZE + payload_len..],
+                                            );
+                                        }
                                     }
                                     was_encrypted = true;
                                 }
