@@ -765,9 +765,12 @@ impl Forwarder {
 
         self.arena.clear();
         self.offsets.clear();
-        self.arena
-            .reserve(frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE);
-        self.offsets.reserve(frames.len());
+        let spray_multiplier = if self.mcr_spray_mode == "full" { 3 } else { 1 };
+        self.arena.reserve(
+            (frames.iter().map(|p| p.len()).sum::<usize>() + frames.len() * TAG_SIZE)
+                * spray_multiplier,
+        );
+        self.offsets.reserve(frames.len() * spray_multiplier);
 
         // Default primary-spray mode can process in place, avoiding a second
         // copy and an intermediate duplicated packet vector.
@@ -1172,7 +1175,8 @@ impl Forwarder {
         } else {
             // Parallel path keeps the existing duplication behavior because one
             // input packet can expand to multiple outputs.
-            let mut duplicated: Vec<(Vec<u8>, [u8; 32])> = Vec::with_capacity(received);
+            let mut duplicated: Vec<(Vec<u8>, [u8; 32])> =
+                Vec::with_capacity(received * spray_multiplier);
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id: [u8; 32] = *h.dst_id();
