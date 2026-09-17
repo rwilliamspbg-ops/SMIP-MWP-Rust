@@ -471,9 +471,10 @@ impl Table {
     /// Fast predictive flow hash fallback over `predictive_next_hops`.
     /// Called directly when exact route lookup (`lookup_next_hop`) returns `None`,
     /// avoiding redundant re-checks of thread-local cache and fast_shards.
+    /// Optimized: `src_id` is passed as a reference `&[u8; 32]` to eliminate 32-byte stack copies.
     pub fn lookup_predictive_fallback(
         &self,
-        src_id: [u8; 32],
+        src_id: &[u8; 32],
         dst_id: [u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
@@ -486,15 +487,17 @@ impl Table {
             // Fast path: single predictive fallback entry avoids 8 unaligned reads & XOR fold overhead
             return Some(inner.predictive_next_hops[0]);
         }
-        let pred_idx = fast_flow_hash(&src_id, &dst_id, flow_label) as usize % n;
+        let pred_idx = fast_flow_hash(src_id, &dst_id, flow_label) as usize % n;
         Some(inner.predictive_next_hops[pred_idx])
     }
 
     /// Look up exact next hop for `dst_id` via hot cache / table shards,
     /// or fall back to predictive flow hash over `predictive_next_hops` if not found.
+    /// Optimized: `src_id` is passed as a reference `&[u8; 32]` to completely avoid 32-byte
+    /// stack copies on hot path route hits.
     pub fn lookup_or_predict(
         &self,
-        src_id: [u8; 32],
+        src_id: &[u8; 32],
         dst_id: [u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
@@ -506,7 +509,7 @@ impl Table {
 
     pub fn predictive_next_hop(
         &self,
-        src_id: [u8; 32],
+        src_id: &[u8; 32],
         dst_id: [u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
@@ -556,11 +559,11 @@ impl Router {
 
     pub fn lookup_policy(
         &self,
-        src_id: [u8; 32],
-        dst_id: [u8; 32],
+        src_id: &[u8; 32],
+        dst_id: &[u8; 32],
         flow_label: u32,
     ) -> Result<RoutePolicy, &'static str> {
-        let key = self.compute_flow_key(&src_id, &dst_id, flow_label);
+        let key = self.compute_flow_key(src_id, dst_id, flow_label);
         let m = self.inner.read();
         if let Some(p) = m.get(&key) {
             return Ok(p.clone());
@@ -573,13 +576,13 @@ impl Router {
 
     pub fn update_policy(
         &self,
-        src_id: [u8; 32],
-        dst_id: [u8; 32],
+        src_id: &[u8; 32],
+        dst_id: &[u8; 32],
         flow_label: u32,
         next_hop_id: [u8; 32],
         queue_id: i32,
     ) {
-        let key = self.compute_flow_key(&src_id, &dst_id, flow_label);
+        let key = self.compute_flow_key(src_id, dst_id, flow_label);
         let mut m = self.inner.write();
         m.insert(
             key,
@@ -644,7 +647,7 @@ mod tests {
         });
         let src = [4u8; 32];
         let dst = [99u8; 32];
-        let choice = t.predictive_next_hop(src, dst, 7).unwrap();
+        let choice = t.predictive_next_hop(&src, dst, 7).unwrap();
         assert!(choice == [9u8; 32] || choice == [8u8; 32]);
     }
 
@@ -714,18 +717,18 @@ mod tests {
             alternate_channels: Vec::new(),
             mcr_epoch: 1,
         });
-        assert_eq!(t.lookup_or_predict([1u8; 32], dest, 0).unwrap(), nh);
+        assert_eq!(t.lookup_or_predict(&[1u8; 32], dest, 0).unwrap(), nh);
         t.remove_route(dest);
         assert!(t.lookup_next_hop(dest, 0).is_none());
 
         let router = Router::new();
         let policy = router
-            .lookup_policy([1u8; 32], [2u8; 32], 7)
+            .lookup_policy(&[1u8; 32], &[2u8; 32], 7)
             .expect("default policy");
         assert_eq!(policy.queue_id, 0);
-        router.update_policy([1u8; 32], [2u8; 32], 7, [9u8; 32], 3);
+        router.update_policy(&[1u8; 32], &[2u8; 32], 7, [9u8; 32], 3);
         let updated = router
-            .lookup_policy([1u8; 32], [2u8; 32], 7)
+            .lookup_policy(&[1u8; 32], &[2u8; 32], 7)
             .expect("updated policy");
         assert_eq!(updated.queue_id, 3);
         assert_eq!(updated.next_hop_id, [9u8; 32]);

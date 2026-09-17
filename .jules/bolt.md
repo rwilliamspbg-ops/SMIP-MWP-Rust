@@ -123,3 +123,7 @@
 ## 2026-06-18 - [Avoid State Mutation Before Duplicate Validation]
 **Learning:** Evicting elements from sliding replay windows before duplicate validation causes replay bypasses (accepting duplicates of evicted elements) and corrupts window state on invalid packets. Performing binary search first to validate replay status and calculate insertion position before modifying the window guarantees correctness while eliminating redundant binary searches.
 **Action:** Always validate inputs completely before mutating sliding window state, and reuse the insertion index returned by `binary_search` (`Err(idx)`) to update state in a single pass.
+
+## 2026-06-19 - [Pass Fixed-Size Source IDs by Reference in Hot Routing Lookups]
+**Learning:** Passing 32-byte arrays (`[u8; 32]`) by value in hot forwarding methods (`lookup_predictive_fallback`, `lookup_or_predict`, `predictive_next_hop`) forces callers to dereference header references (`*h.src_id()`), allocating 32 bytes on the stack and performing memory copies on every packet. Since `src_id` is only read when an exact route lookup misses, these 32-byte copies are completely wasted on hot-path route hits.
+**Action:** Always pass large fixed-size byte array parameters (like 32-byte source/destination IDs) as references (`&[u8; 32]`) in routing lookup methods to eliminate stack copies on fast-path hits.

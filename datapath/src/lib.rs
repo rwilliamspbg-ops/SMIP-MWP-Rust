@@ -367,7 +367,7 @@ impl Forwarder {
                 metrics.predict_calls += 1;
                 if self
                     .routes
-                    .lookup_predictive_fallback(*h.src_id(), dst_id, flow_label)
+                    .lookup_predictive_fallback(h.src_id(), dst_id, flow_label)
                     .is_some()
                 {
                     metrics.predict_hits += 1;
@@ -450,7 +450,7 @@ impl Forwarder {
 
             // measure encrypt under caller's profiler by timing around call sites
             if routes
-                .lookup_or_predict(*h.src_id(), dst_id, flow_label)
+                .lookup_or_predict(h.src_id(), dst_id, flow_label)
                 .is_some()
             {
                 let enc_start = if profile_enabled {
@@ -498,7 +498,7 @@ impl Forwarder {
             let payload_len = h.length() as usize;
 
             if routes
-                .lookup_or_predict(*h.src_id(), dst_id, flow_label)
+                .lookup_or_predict(h.src_id(), dst_id, flow_label)
                 .is_some()
             {
                 let enc_start = if profile_enabled {
@@ -960,7 +960,7 @@ impl Forwarder {
 
                         let route_exists = self
                             .routes
-                            .lookup_or_predict(*h.src_id(), dst_id, flow_label)
+                            .lookup_or_predict(h.src_id(), dst_id, flow_label)
                             .is_some();
 
                         let mut was_encrypted = false;
@@ -1040,7 +1040,7 @@ impl Forwarder {
 
                         let route_exists = self
                             .routes
-                            .lookup_or_predict(*h.src_id(), nh, flow_label)
+                            .lookup_or_predict(h.src_id(), nh, flow_label)
                             .is_some();
 
                         let mut was_encrypted = false;
