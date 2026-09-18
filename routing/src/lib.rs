@@ -344,17 +344,17 @@ impl Table {
     /// main table BTreeMap search redundant on misses.
     pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::spray_cache_index(&dst_id, flow_label);
+        let cache_idx = Self::spray_cache_index(&dst_id, flow_label);
 
         if let Some(v) = SPRAY_CACHE.with(|c| {
             let cache = unsafe { &*c.get() };
             // Checking 4-byte scalar flow_label before 32-byte dest_id allows short-circuiting
             // early on flow label misses, completely bypassing 32-byte array equality comparisons.
-            if cache.epochs[idx] == cur_epoch
-                && cache.flow_labels[idx] == flow_label
-                && cache.dest_ids[idx] == dst_id
+            if cache.epochs[cache_idx] == cur_epoch
+                && cache.flow_labels[cache_idx] == flow_label
+                && cache.dest_ids[cache_idx] == dst_id
             {
-                Some(cache.next_hops[idx])
+                Some(cache.next_hops[cache_idx])
             } else {
                 None
             }
@@ -375,11 +375,11 @@ impl Table {
                     // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
                     // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
                     // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
-                    let idx = (flow_label as usize) % choices;
-                    if idx == 0 {
+                    let ch_idx = (flow_label as usize) % choices;
+                    if ch_idx == 0 {
                         Some(entry.next_hop_id)
                     } else {
-                        Some(entry.alternate_channels[idx - 1])
+                        Some(entry.alternate_channels[ch_idx - 1])
                     }
                 }
             } else {
@@ -390,10 +390,10 @@ impl Table {
         if let Some(v) = nh {
             SPRAY_CACHE.with(|c| {
                 let cache = unsafe { &mut *c.get() };
-                cache.epochs[idx] = cur_epoch;
-                cache.dest_ids[idx] = dst_id;
-                cache.flow_labels[idx] = flow_label;
-                cache.next_hops[idx] = v;
+                cache.epochs[cache_idx] = cur_epoch;
+                cache.dest_ids[cache_idx] = dst_id;
+                cache.flow_labels[cache_idx] = flow_label;
+                cache.next_hops[cache_idx] = v;
             });
         }
 
@@ -700,6 +700,37 @@ mod tests {
                     flow_label, ch_idx
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_lookup_spray_primary_multi_channel_caching() {
+        let t = Table::new();
+        let dest = [15u8; 32];
+        let nh0 = [30u8; 32];
+        let nh1 = [31u8; 32];
+        let nh2 = [32u8; 32];
+
+        t.update_route(RouteEntry {
+            dest_id: dest,
+            next_hop_id: nh0,
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 3,
+            alternate_channels: vec![nh1, nh2],
+            mcr_epoch: 1,
+        });
+
+        for flow_label in 1..5 {
+            // First lookup populates SPRAY_CACHE at cache_idx
+            let first = t.lookup_spray_primary(dest, flow_label).unwrap();
+            // Second lookup must hit SPRAY_CACHE at cache_idx and return identical result
+            let second = t.lookup_spray_primary(dest, flow_label).unwrap();
+            assert_eq!(
+                first, second,
+                "Multi-channel spray primary cache miss or mismatch for flow_label={}",
+                flow_label
+            );
         }
     }
 
