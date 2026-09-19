@@ -114,7 +114,7 @@ impl<'a> HeaderViewRef<'a> {
         let buf = buf[..HEADER_SIZE].try_into().unwrap();
         Ok(Self { buf })
     }
-    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation and try_from length assertions.
+    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation, element-by-element indexing, and try_from length assertions.
     #[inline]
     pub fn src_id(&self) -> &[u8; 32] {
         unsafe { &*(self.buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]) }
@@ -125,29 +125,23 @@ impl<'a> HeaderViewRef<'a> {
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
-        u32::from_be_bytes([
-            self.buf[FLOW_OFFSET],
-            self.buf[FLOW_OFFSET + 1],
-            self.buf[FLOW_OFFSET + 2],
-            self.buf[FLOW_OFFSET + 3],
-        ])
+        u32::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLOW_OFFSET) as *const [u8; 4]) })
     }
     #[inline]
     pub fn seq_num(&self) -> u64 {
-        u64::from_be_bytes([
-            self.buf[SEQ_OFFSET],
-            self.buf[SEQ_OFFSET + 1],
-            self.buf[SEQ_OFFSET + 2],
-            self.buf[SEQ_OFFSET + 3],
-            self.buf[SEQ_OFFSET + 4],
-            self.buf[SEQ_OFFSET + 5],
-            self.buf[SEQ_OFFSET + 6],
-            self.buf[SEQ_OFFSET + 7],
-        ])
+        u64::from_be_bytes(unsafe { *(self.buf.as_ptr().add(SEQ_OFFSET) as *const [u8; 8]) })
+    }
+    #[inline]
+    pub fn session_id(&self) -> &[u8; 16] {
+        unsafe { &*(self.buf.as_ptr().add(SESSION_OFFSET) as *const [u8; 16]) }
+    }
+    #[inline]
+    pub fn flags(&self) -> u16 {
+        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLAGS_OFFSET) as *const [u8; 2]) })
     }
     #[inline]
     pub fn length(&self) -> u16 {
-        u16::from_be_bytes([self.buf[LEN_OFFSET], self.buf[LEN_OFFSET + 1]])
+        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(LEN_OFFSET) as *const [u8; 2]) })
     }
 }
 
@@ -164,7 +158,7 @@ impl<'a> HeaderView<'a> {
         let buf = (&mut buf[..HEADER_SIZE]).try_into().unwrap();
         Ok(Self { buf })
     }
-    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation and try_from length assertions.
+    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation, element-by-element indexing, and try_from length assertions.
     #[inline]
     pub fn src_id(&self) -> &[u8; 32] {
         unsafe { &*(self.buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]) }
@@ -175,25 +169,11 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
-        u32::from_be_bytes([
-            self.buf[FLOW_OFFSET],
-            self.buf[FLOW_OFFSET + 1],
-            self.buf[FLOW_OFFSET + 2],
-            self.buf[FLOW_OFFSET + 3],
-        ])
+        u32::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLOW_OFFSET) as *const [u8; 4]) })
     }
     #[inline]
     pub fn seq_num(&self) -> u64 {
-        u64::from_be_bytes([
-            self.buf[SEQ_OFFSET],
-            self.buf[SEQ_OFFSET + 1],
-            self.buf[SEQ_OFFSET + 2],
-            self.buf[SEQ_OFFSET + 3],
-            self.buf[SEQ_OFFSET + 4],
-            self.buf[SEQ_OFFSET + 5],
-            self.buf[SEQ_OFFSET + 6],
-            self.buf[SEQ_OFFSET + 7],
-        ])
+        u64::from_be_bytes(unsafe { *(self.buf.as_ptr().add(SEQ_OFFSET) as *const [u8; 8]) })
     }
     #[inline]
     pub fn session_id(&self) -> &[u8; 16] {
@@ -201,14 +181,14 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn flags(&self) -> u16 {
-        u16::from_be_bytes([self.buf[FLAGS_OFFSET], self.buf[FLAGS_OFFSET + 1]])
+        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLAGS_OFFSET) as *const [u8; 2]) })
     }
     #[inline]
     pub fn length(&self) -> u16 {
-        u16::from_be_bytes([self.buf[LEN_OFFSET], self.buf[LEN_OFFSET + 1]])
+        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(LEN_OFFSET) as *const [u8; 2]) })
     }
 
-    // Setters
+    // Setters - direct unaligned pointer writes into validated [u8; HEADER_SIZE] buffer bypass slice creation and copy_from_slice bounds checks.
     #[inline]
     pub fn set_src_id(&mut self, id: [u8; 32]) {
         unsafe {
@@ -223,13 +203,15 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn set_flow_label(&mut self, v: u32) {
-        let b = v.to_be_bytes();
-        self.buf[FLOW_OFFSET..FLOW_OFFSET + 4].copy_from_slice(&b);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(FLOW_OFFSET) as *mut [u8; 4]) = v.to_be_bytes();
+        }
     }
     #[inline]
     pub fn set_seq_num(&mut self, v: u64) {
-        let b = v.to_be_bytes();
-        self.buf[SEQ_OFFSET..SEQ_OFFSET + 8].copy_from_slice(&b);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(SEQ_OFFSET) as *mut [u8; 8]) = v.to_be_bytes();
+        }
     }
     #[inline]
     pub fn set_session_id(&mut self, id: [u8; 16]) {
@@ -239,13 +221,15 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn set_flags(&mut self, v: u16) {
-        let b = v.to_be_bytes();
-        self.buf[FLAGS_OFFSET..FLAGS_OFFSET + 2].copy_from_slice(&b);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(FLAGS_OFFSET) as *mut [u8; 2]) = v.to_be_bytes();
+        }
     }
     #[inline]
     pub fn set_length(&mut self, v: u16) {
-        let b = v.to_be_bytes();
-        self.buf[LEN_OFFSET..LEN_OFFSET + 2].copy_from_slice(&b);
+        unsafe {
+            *(self.buf.as_mut_ptr().add(LEN_OFFSET) as *mut [u8; 2]) = v.to_be_bytes();
+        }
     }
 }
 
