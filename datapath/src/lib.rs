@@ -883,11 +883,11 @@ impl Forwarder {
                         self.arena.reserve(needed);
 
                         self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                        // Overwrite next_hop field directly in the arena using register-level vectorized assignment
-                        *<&mut [u8; 32]>::try_from(
-                            &mut self.arena.as_mut_slice()[start + 32..start + 64],
-                        )
-                        .unwrap() = next_hop;
+                        // Overwrite next_hop field directly in the arena using raw pointer assignment
+                        unsafe {
+                            *(self.arena.as_mut_slice().as_mut_ptr().add(start + 32)
+                                as *mut [u8; 32]) = next_hop;
+                        }
 
                         if payload_len > 0 {
                             was_route_miss = true;
