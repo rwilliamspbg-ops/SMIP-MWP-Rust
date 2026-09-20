@@ -19,6 +19,10 @@ pub struct RingMmap {
     base: NonNull<u8>,
     size: usize,
     offsets: XskMmapOffsets,
+    rx_mask: usize,
+    tx_mask: usize,
+    fill_mask: usize,
+    comp_mask: usize,
 }
 
 impl RingMmap {
@@ -30,10 +34,26 @@ impl RingMmap {
     /// least `map_size` bytes long. The caller must ensure the memory remains
     /// valid for the lifetime of the returned `RingMmap`.
     pub unsafe fn new(map_ptr: *mut libc::c_void, map_size: usize, offs: XskMmapOffsets) -> Self {
+        let rx_cap = (offs.tx_desc.saturating_sub(offs.rx_desc) as usize
+            / std::mem::size_of::<u64>())
+        .max(1);
+        let tx_cap = (offs.fill_desc.saturating_sub(offs.tx_desc) as usize
+            / std::mem::size_of::<u64>())
+        .max(1);
+        let fill_cap = (offs.comp_desc.saturating_sub(offs.fill_desc) as usize
+            / std::mem::size_of::<u64>())
+        .max(1);
+        let comp_cap =
+            (map_size.saturating_sub(offs.comp_desc as usize) / std::mem::size_of::<u64>()).max(1);
+
         RingMmap {
             base: NonNull::new_unchecked(map_ptr as *mut u8),
             size: map_size,
             offsets: offs,
+            rx_mask: rx_cap - 1,
+            tx_mask: tx_cap - 1,
+            fill_mask: fill_cap - 1,
+            comp_mask: comp_cap - 1,
         }
     }
 
@@ -64,28 +84,24 @@ impl RingMmap {
         }
     }
 
-    fn rx_capacity(&self) -> usize {
-        let desc_region_bytes = self.offsets.tx_desc.saturating_sub(self.offsets.rx_desc) as usize;
-        (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
+    #[allow(dead_code)]
+    pub fn rx_capacity(&self) -> usize {
+        self.rx_mask + 1
     }
 
-    fn tx_capacity(&self) -> usize {
-        let desc_region_bytes =
-            self.offsets.fill_desc.saturating_sub(self.offsets.tx_desc) as usize;
-        (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
+    #[allow(dead_code)]
+    pub fn tx_capacity(&self) -> usize {
+        self.tx_mask + 1
     }
 
-    fn fill_capacity(&self) -> usize {
-        let desc_region_bytes = self
-            .offsets
-            .comp_desc
-            .saturating_sub(self.offsets.fill_desc) as usize;
-        (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
+    #[allow(dead_code)]
+    pub fn fill_capacity(&self) -> usize {
+        self.fill_mask + 1
     }
 
-    fn comp_capacity(&self) -> usize {
-        let desc_region_bytes = self.size.saturating_sub(self.offsets.comp_desc as usize);
-        (desc_region_bytes / std::mem::size_of::<u64>()).max(1)
+    #[allow(dead_code)]
+    pub fn comp_capacity(&self) -> usize {
+        self.comp_mask + 1
     }
 
     /// Pop up to `max` RX frame descriptors and return their offsets.
@@ -105,8 +121,8 @@ impl RingMmap {
                 return Vec::new();
             }
 
-            let capacity = self.rx_capacity();
-            let mask = capacity - 1;
+            // Precomputed bitmask avoids integer division and subtraction on the hot ring pop datapath.
+            let mask = self.rx_mask;
 
             let to_take = std::cmp::min(avail, max);
             let mut out: Vec<u64> = Vec::with_capacity(to_take);
@@ -147,8 +163,8 @@ impl RingMmap {
                 return Vec::new();
             }
 
-            let capacity = self.comp_capacity();
-            let mask = capacity - 1;
+            // Precomputed bitmask avoids integer division and subtraction on the hot ring pop datapath.
+            let mask = self.comp_mask;
 
             let to_take = std::cmp::min(avail, max);
             let mut out: Vec<u64> = Vec::with_capacity(to_take);
@@ -185,8 +201,9 @@ impl RingMmap {
             let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr));
             let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1)));
 
-            let capacity = self.fill_capacity();
-            let mask = capacity - 1;
+            // Precomputed bitmask avoids integer division and subtraction on the hot ring push datapath.
+            let mask = self.fill_mask;
+            let capacity = mask + 1;
 
             let used = prod.wrapping_sub(cons) as usize;
             let free = capacity.saturating_sub(used);
@@ -223,8 +240,9 @@ impl RingMmap {
             let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr));
             let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1)));
 
-            let capacity = self.tx_capacity();
-            let mask = capacity - 1;
+            // Precomputed bitmask avoids integer division and subtraction on the hot ring push datapath.
+            let mask = self.tx_mask;
+            let capacity = mask + 1;
 
             let used = prod.wrapping_sub(cons) as usize;
             let free = capacity.saturating_sub(used);
