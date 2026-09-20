@@ -127,3 +127,7 @@
 ## 2026-06-19 - [Pass Fixed-Size Source IDs by Reference in Hot Routing Lookups]
 **Learning:** Passing 32-byte arrays (`[u8; 32]`) by value in hot forwarding methods (`lookup_predictive_fallback`, `lookup_or_predict`, `predictive_next_hop`) forces callers to dereference header references (`*h.src_id()`), allocating 32 bytes on the stack and performing memory copies on every packet. Since `src_id` is only read when an exact route lookup misses, these 32-byte copies are completely wasted on hot-path route hits.
 **Action:** Always pass large fixed-size byte array parameters (like 32-byte source/destination IDs) as references (`&[u8; 32]`) in routing lookup methods to eliminate stack copies on fast-path hits.
+
+## 2026-06-20 - [Precompute AF_XDP Ring Masks on Construction]
+**Learning:** Recalculating descriptor ring capacities and bitmasks in AF_XDP ring methods (`rx_pop`, `tx_push`, `fill_push`, `comp_pop`) on every batch push/pop executes redundant memory region subtraction and integer division (`/ std::mem::size_of::<u64>()`) on the hot datapath.
+**Action:** Precompute ring power-of-two masks (`rx_mask`, `tx_mask`, `fill_mask`, `comp_mask`) once on struct initialization (`RingMmap::new`) to eliminate division and subtraction instructions during hot packet ring pops and pushes.
