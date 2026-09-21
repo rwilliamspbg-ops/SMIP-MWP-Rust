@@ -350,7 +350,7 @@ impl Forwarder {
         let mut forwarded = false;
 
         if let Ok(h) = HeaderViewRef::new(pkt) {
-            let dst_id: [u8; 32] = *h.dst_id();
+            let dst_id = h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -443,7 +443,7 @@ impl Forwarder {
         profile_enabled: bool,
     ) -> PacketOutput {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
-            let dst_id: [u8; 32] = *h.dst_id();
+            let dst_id = h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -492,7 +492,7 @@ impl Forwarder {
         profile_enabled: bool,
     ) -> (Vec<u8>, bool, bool, u64) {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
-            let dst_id: [u8; 32] = *h.dst_id();
+            let dst_id = h.dst_id();
             let flow_label = h.flow_label();
             let seq_num = h.seq_num();
             let payload_len = h.length() as usize;
@@ -794,7 +794,7 @@ impl Forwarder {
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let dst_id: [u8; 32] = *h.dst_id();
+                    let dst_id = h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
                     let payload_len = h.length() as usize;
@@ -948,7 +948,7 @@ impl Forwarder {
 
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let dst_id: [u8; 32] = *h.dst_id();
+                    let dst_id = h.dst_id();
                     let flow_label = h.flow_label();
                     let seq_num = h.seq_num();
                     let payload_len = h.length() as usize;
@@ -1040,7 +1040,7 @@ impl Forwarder {
 
                         let route_exists = self
                             .routes
-                            .lookup_or_predict(h.src_id(), nh, flow_label)
+                            .lookup_or_predict(h.src_id(), &nh, flow_label)
                             .is_some();
 
                         let mut was_encrypted = false;
@@ -1179,10 +1179,10 @@ impl Forwarder {
                 Vec::with_capacity(received * spray_multiplier);
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let dst_id: [u8; 32] = *h.dst_id();
+                    let dst_id = *h.dst_id();
                     let flow_label = h.flow_label();
 
-                    let channels = self.routes.lookup_spray(dst_id, flow_label);
+                    let channels = self.routes.lookup_spray(&dst_id, flow_label);
                     if channels.is_empty() {
                         duplicated.push((pkt, dst_id));
                         continue;
