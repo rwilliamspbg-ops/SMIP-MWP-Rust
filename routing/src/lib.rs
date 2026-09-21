@@ -307,12 +307,12 @@ impl Table {
     /// Optimized: holds the read lock and avoids cloning RouteEntry (which contains a heap-allocated Vec).
     /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
     /// main table BTreeMap search redundant on misses.
-    pub fn lookup_spray(&self, dst_id: [u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
-        let h = Self::hash_32(&dst_id);
+    pub fn lookup_spray(&self, dst_id: &[u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
+        let h = Self::hash_32(dst_id);
         let shard = Self::shard_for_from_hash(h);
 
         let map = self.fast_shards[shard].read();
-        if let Some(e) = map.get(&dst_id) {
+        if let Some(e) = map.get(dst_id) {
             // construct channels vector: primary + alternates
             let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
             out.push((e.next_hop_id, true));
@@ -342,9 +342,9 @@ impl Table {
     /// directly on reference to avoid cloning RouteEntry.
     /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
     /// main table BTreeMap search redundant on misses.
-    pub fn lookup_spray_primary(&self, dst_id: [u8; 32], flow_label: u32) -> Option<[u8; 32]> {
+    pub fn lookup_spray_primary(&self, dst_id: &[u8; 32], flow_label: u32) -> Option<[u8; 32]> {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let cache_idx = Self::spray_cache_index(&dst_id, flow_label);
+        let cache_idx = Self::spray_cache_index(dst_id, flow_label);
 
         if let Some(v) = SPRAY_CACHE.with(|c| {
             let cache = unsafe { &*c.get() };
@@ -352,7 +352,7 @@ impl Table {
             // early on flow label misses, completely bypassing 32-byte array equality comparisons.
             if cache.epochs[cache_idx] == cur_epoch
                 && cache.flow_labels[cache_idx] == flow_label
-                && cache.dest_ids[cache_idx] == dst_id
+                && &cache.dest_ids[cache_idx] == dst_id
             {
                 Some(cache.next_hops[cache_idx])
             } else {
@@ -362,12 +362,12 @@ impl Table {
             return Some(v);
         }
 
-        let h = Self::hash_32(&dst_id);
+        let h = Self::hash_32(dst_id);
         let shard = Self::shard_for_from_hash(h);
 
         let nh = {
             let map = self.fast_shards[shard].read();
-            if let Some(entry) = map.get(&dst_id) {
+            if let Some(entry) = map.get(dst_id) {
                 if entry.alternate_channels.is_empty() {
                     Some(entry.next_hop_id)
                 } else {
@@ -391,7 +391,7 @@ impl Table {
             SPRAY_CACHE.with(|c| {
                 let cache = unsafe { &mut *c.get() };
                 cache.epochs[cache_idx] = cur_epoch;
-                cache.dest_ids[cache_idx] = dst_id;
+                cache.dest_ids[cache_idx] = *dst_id;
                 cache.flow_labels[cache_idx] = flow_label;
                 cache.next_hops[cache_idx] = v;
             });
@@ -405,15 +405,15 @@ impl Table {
     /// or cloning an intermediate vector of channel entries.
     pub fn lookup_spray_single(
         &self,
-        dst_id: [u8; 32],
+        dst_id: &[u8; 32],
         flow_label: u32,
         channel_idx: usize,
     ) -> Option<[u8; 32]> {
-        let h = Self::hash_32(&dst_id);
+        let h = Self::hash_32(dst_id);
         let shard = Self::shard_for_from_hash(h);
 
         let map = self.fast_shards[shard].read();
-        let e = map.get(&dst_id)?;
+        let e = map.get(dst_id)?;
         let count = 1 + e.alternate_channels.len();
         let flow_idx = if count > 1 {
             (flow_label as usize) % count
@@ -437,14 +437,14 @@ impl Table {
         Some(nh)
     }
 
-    pub fn lookup_next_hop(&self, dst_id: [u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
+    pub fn lookup_next_hop(&self, dst_id: &[u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::simple_cache_index(&dst_id);
+        let idx = Self::simple_cache_index(dst_id);
 
         if let Some(v) = THREAD_CACHE.with(|c| {
             let cache = unsafe { &*c.get() };
-            if cache.epochs[idx] == cur_epoch && cache.dest_ids[idx] == dst_id {
+            if cache.epochs[idx] == cur_epoch && &cache.dest_ids[idx] == dst_id {
                 Some(cache.next_hops[idx])
             } else {
                 None
@@ -454,14 +454,14 @@ impl Table {
         }
 
         // Fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table)
-        let h = Self::hash_32(&dst_id);
+        let h = Self::hash_32(dst_id);
         let shard = Self::shard_for_from_hash(h);
         let nh_opt = {
             let map = self.fast_shards[shard].read();
-            map.get(&dst_id).map(|e| e.next_hop_id)
+            map.get(dst_id).map(|e| e.next_hop_id)
         };
         if let Some(nh) = nh_opt {
-            Self::cache_hot_entry_with_idx(idx, cur_epoch, dst_id, nh);
+            Self::cache_hot_entry_with_idx(idx, cur_epoch, *dst_id, nh);
             return Some(nh);
         }
 
@@ -471,11 +471,11 @@ impl Table {
     /// Fast predictive flow hash fallback over `predictive_next_hops`.
     /// Called directly when exact route lookup (`lookup_next_hop`) returns `None`,
     /// avoiding redundant re-checks of thread-local cache and fast_shards.
-    /// Optimized: `src_id` is passed as a reference `&[u8; 32]` to eliminate 32-byte stack copies.
+    /// Optimized: `src_id` and `dst_id` are passed as references `&[u8; 32]` to eliminate 32-byte stack copies.
     pub fn lookup_predictive_fallback(
         &self,
         src_id: &[u8; 32],
-        dst_id: [u8; 32],
+        dst_id: &[u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
         let inner = self.inner.read();
@@ -487,18 +487,18 @@ impl Table {
             // Fast path: single predictive fallback entry avoids 8 unaligned reads & XOR fold overhead
             return Some(inner.predictive_next_hops[0]);
         }
-        let pred_idx = fast_flow_hash(src_id, &dst_id, flow_label) as usize % n;
+        let pred_idx = fast_flow_hash(src_id, dst_id, flow_label) as usize % n;
         Some(inner.predictive_next_hops[pred_idx])
     }
 
     /// Look up exact next hop for `dst_id` via hot cache / table shards,
     /// or fall back to predictive flow hash over `predictive_next_hops` if not found.
-    /// Optimized: `src_id` is passed as a reference `&[u8; 32]` to completely avoid 32-byte
+    /// Optimized: `src_id` and `dst_id` are passed as references `&[u8; 32]` to completely avoid 32-byte
     /// stack copies on hot path route hits.
     pub fn lookup_or_predict(
         &self,
         src_id: &[u8; 32],
-        dst_id: [u8; 32],
+        dst_id: &[u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
         if let Some(nh) = self.lookup_next_hop(dst_id, flow_label) {
@@ -510,7 +510,7 @@ impl Table {
     pub fn predictive_next_hop(
         &self,
         src_id: &[u8; 32],
-        dst_id: [u8; 32],
+        dst_id: &[u8; 32],
         flow_label: u32,
     ) -> Option<[u8; 32]> {
         self.lookup_or_predict(src_id, dst_id, flow_label)
@@ -620,7 +620,7 @@ mod tests {
             alternate_channels: Vec::new(),
             mcr_epoch: 1,
         });
-        let got = t.lookup_next_hop(dest, 0).unwrap();
+        let got = t.lookup_next_hop(&dest, 0).unwrap();
         assert_eq!(got, next);
     }
 
@@ -647,7 +647,7 @@ mod tests {
         });
         let src = [4u8; 32];
         let dst = [99u8; 32];
-        let choice = t.predictive_next_hop(&src, dst, 7).unwrap();
+        let choice = t.predictive_next_hop(&src, &dst, 7).unwrap();
         assert!(choice == [9u8; 32] || choice == [8u8; 32]);
     }
 
@@ -660,7 +660,7 @@ mod tests {
         let nh2 = [22u8; 32];
 
         // 1. Missing destination returns None
-        assert!(t.lookup_spray_single(dest, 0, 0).is_none());
+        assert!(t.lookup_spray_single(&dest, 0, 0).is_none());
 
         // 2. Single-channel route
         t.update_route(RouteEntry {
@@ -673,8 +673,8 @@ mod tests {
             mcr_epoch: 1,
         });
 
-        assert_eq!(t.lookup_spray_single(dest, 0, 0).unwrap(), nh0);
-        assert_eq!(t.lookup_spray_single(dest, 0, 1).unwrap(), nh0);
+        assert_eq!(t.lookup_spray_single(&dest, 0, 0).unwrap(), nh0);
+        assert_eq!(t.lookup_spray_single(&dest, 0, 1).unwrap(), nh0);
 
         // 3. Multi-channel route
         t.update_route(RouteEntry {
@@ -688,11 +688,11 @@ mod tests {
         });
 
         for flow_label in 0..10 {
-            let full_spray = t.lookup_spray(dest, flow_label);
+            let full_spray = t.lookup_spray(&dest, flow_label);
             assert_eq!(full_spray.len(), 3);
 
             for ch_idx in 0..5 {
-                let single = t.lookup_spray_single(dest, flow_label, ch_idx).unwrap();
+                let single = t.lookup_spray_single(&dest, flow_label, ch_idx).unwrap();
                 let expected = full_spray[ch_idx % full_spray.len()].0;
                 assert_eq!(
                     single, expected,
@@ -723,9 +723,9 @@ mod tests {
 
         for flow_label in 1..5 {
             // First lookup populates SPRAY_CACHE at cache_idx
-            let first = t.lookup_spray_primary(dest, flow_label).unwrap();
+            let first = t.lookup_spray_primary(&dest, flow_label).unwrap();
             // Second lookup must hit SPRAY_CACHE at cache_idx and return identical result
-            let second = t.lookup_spray_primary(dest, flow_label).unwrap();
+            let second = t.lookup_spray_primary(&dest, flow_label).unwrap();
             assert_eq!(
                 first, second,
                 "Multi-channel spray primary cache miss or mismatch for flow_label={}",
@@ -748,9 +748,9 @@ mod tests {
             alternate_channels: Vec::new(),
             mcr_epoch: 1,
         });
-        assert_eq!(t.lookup_or_predict(&[1u8; 32], dest, 0).unwrap(), nh);
+        assert_eq!(t.lookup_or_predict(&[1u8; 32], &dest, 0).unwrap(), nh);
         t.remove_route(dest);
-        assert!(t.lookup_next_hop(dest, 0).is_none());
+        assert!(t.lookup_next_hop(&dest, 0).is_none());
 
         let router = Router::new();
         let policy = router
