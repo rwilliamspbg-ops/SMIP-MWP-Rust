@@ -33,9 +33,25 @@ pub fn alloc_and_fill(size: usize) -> Vec<u8> {
     v
 }
 
+static PATTERN_256: [u8; 256] = {
+    let mut arr = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        arr[i] = i as u8;
+        i += 1;
+    }
+    arr
+};
+
+// Fill buffer with repeating 256-byte sequence using 256-byte chunk copies
 fn fill_pattern(buffer: &mut [u8]) {
-    for (index, byte) in buffer.iter_mut().enumerate() {
-        *byte = (index & 0xFF) as u8;
+    let mut chunks = buffer.chunks_exact_mut(256);
+    for chunk in chunks.by_ref() {
+        chunk.copy_from_slice(&PATTERN_256);
+    }
+    let remainder = chunks.into_remainder();
+    if !remainder.is_empty() {
+        remainder.copy_from_slice(&PATTERN_256[..remainder.len()]);
     }
 }
 
