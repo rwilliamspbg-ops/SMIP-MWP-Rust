@@ -46,16 +46,16 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
-        // Direct pointer cast to &[u8; HEADER_SIZE] after length check avoids slice subslicing and try_into bounds checks
+        // Direct unaligned scalar writes avoid staging byte arrays on the stack before writing
         let buf_ptr = buf.as_mut_ptr();
         unsafe {
             *(buf_ptr.add(SRC_OFFSET) as *mut [u8; 32]) = self.src_id;
             *(buf_ptr.add(DST_OFFSET) as *mut [u8; 32]) = self.dst_id;
-            *(buf_ptr.add(FLOW_OFFSET) as *mut [u8; 4]) = self.flow_label.to_be_bytes();
-            *(buf_ptr.add(SEQ_OFFSET) as *mut [u8; 8]) = self.seq_num.to_be_bytes();
+            (buf_ptr.add(FLOW_OFFSET) as *mut u32).write_unaligned(self.flow_label.to_be());
+            (buf_ptr.add(SEQ_OFFSET) as *mut u64).write_unaligned(self.seq_num.to_be());
             *(buf_ptr.add(SESSION_OFFSET) as *mut [u8; 16]) = self.session_id;
-            *(buf_ptr.add(FLAGS_OFFSET) as *mut [u8; 2]) = self.flags.to_be_bytes();
-            *(buf_ptr.add(LEN_OFFSET) as *mut [u8; 2]) = self.length.to_be_bytes();
+            (buf_ptr.add(FLAGS_OFFSET) as *mut u16).write_unaligned(self.flags.to_be());
+            (buf_ptr.add(LEN_OFFSET) as *mut u16).write_unaligned(self.length.to_be());
         }
         Ok(())
     }
@@ -64,16 +64,17 @@ impl Header {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
         }
-        // Direct pointer reads from validated buffer avoid slice subslicing and try_into conversions
+        // Direct unaligned scalar reads bypass stack array staging and convert endianness in registers
         let buf_ptr = buf.as_ptr();
         unsafe {
             let src_id = *(buf_ptr.add(SRC_OFFSET) as *const [u8; 32]);
             let dst_id = *(buf_ptr.add(DST_OFFSET) as *const [u8; 32]);
-            let flow_label = u32::from_be_bytes(*(buf_ptr.add(FLOW_OFFSET) as *const [u8; 4]));
-            let seq_num = u64::from_be_bytes(*(buf_ptr.add(SEQ_OFFSET) as *const [u8; 8]));
+            let flow_label =
+                u32::from_be((buf_ptr.add(FLOW_OFFSET) as *const u32).read_unaligned());
+            let seq_num = u64::from_be((buf_ptr.add(SEQ_OFFSET) as *const u64).read_unaligned());
             let session_id = *(buf_ptr.add(SESSION_OFFSET) as *const [u8; 16]);
-            let flags = u16::from_be_bytes(*(buf_ptr.add(FLAGS_OFFSET) as *const [u8; 2]));
-            let length = u16::from_be_bytes(*(buf_ptr.add(LEN_OFFSET) as *const [u8; 2]));
+            let flags = u16::from_be((buf_ptr.add(FLAGS_OFFSET) as *const u16).read_unaligned());
+            let length = u16::from_be((buf_ptr.add(LEN_OFFSET) as *const u16).read_unaligned());
             Ok(Header {
                 src_id,
                 dst_id,
@@ -114,7 +115,7 @@ impl<'a> HeaderViewRef<'a> {
         let buf = unsafe { &*(buf.as_ptr() as *const [u8; HEADER_SIZE]) };
         Ok(Self { buf })
     }
-    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation, element-by-element indexing, and try_from length assertions.
+    // Direct unaligned scalar reads load directly into CPU registers, eliminating stack-allocated byte array staging
     #[inline]
     pub fn src_id(&self) -> &[u8; 32] {
         unsafe { &*(self.buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]) }
@@ -125,11 +126,11 @@ impl<'a> HeaderViewRef<'a> {
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
-        u32::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLOW_OFFSET) as *const [u8; 4]) })
+        u32::from_be(unsafe { (self.buf.as_ptr().add(FLOW_OFFSET) as *const u32).read_unaligned() })
     }
     #[inline]
     pub fn seq_num(&self) -> u64 {
-        u64::from_be_bytes(unsafe { *(self.buf.as_ptr().add(SEQ_OFFSET) as *const [u8; 8]) })
+        u64::from_be(unsafe { (self.buf.as_ptr().add(SEQ_OFFSET) as *const u64).read_unaligned() })
     }
     #[inline]
     pub fn session_id(&self) -> &[u8; 16] {
@@ -137,11 +138,13 @@ impl<'a> HeaderViewRef<'a> {
     }
     #[inline]
     pub fn flags(&self) -> u16 {
-        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLAGS_OFFSET) as *const [u8; 2]) })
+        u16::from_be(unsafe {
+            (self.buf.as_ptr().add(FLAGS_OFFSET) as *const u16).read_unaligned()
+        })
     }
     #[inline]
     pub fn length(&self) -> u16 {
-        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(LEN_OFFSET) as *const [u8; 2]) })
+        u16::from_be(unsafe { (self.buf.as_ptr().add(LEN_OFFSET) as *const u16).read_unaligned() })
     }
 }
 
@@ -159,7 +162,7 @@ impl<'a> HeaderView<'a> {
         let buf = unsafe { &mut *(buf.as_mut_ptr() as *mut [u8; HEADER_SIZE]) };
         Ok(Self { buf })
     }
-    // Direct pointer casting from validated [u8; HEADER_SIZE] buffer bypasses slice fat pointer creation, element-by-element indexing, and try_from length assertions.
+    // Direct unaligned scalar reads load directly into CPU registers, eliminating stack-allocated byte array staging
     #[inline]
     pub fn src_id(&self) -> &[u8; 32] {
         unsafe { &*(self.buf.as_ptr().add(SRC_OFFSET) as *const [u8; 32]) }
@@ -170,11 +173,11 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn flow_label(&self) -> u32 {
-        u32::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLOW_OFFSET) as *const [u8; 4]) })
+        u32::from_be(unsafe { (self.buf.as_ptr().add(FLOW_OFFSET) as *const u32).read_unaligned() })
     }
     #[inline]
     pub fn seq_num(&self) -> u64 {
-        u64::from_be_bytes(unsafe { *(self.buf.as_ptr().add(SEQ_OFFSET) as *const [u8; 8]) })
+        u64::from_be(unsafe { (self.buf.as_ptr().add(SEQ_OFFSET) as *const u64).read_unaligned() })
     }
     #[inline]
     pub fn session_id(&self) -> &[u8; 16] {
@@ -182,14 +185,16 @@ impl<'a> HeaderView<'a> {
     }
     #[inline]
     pub fn flags(&self) -> u16 {
-        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(FLAGS_OFFSET) as *const [u8; 2]) })
+        u16::from_be(unsafe {
+            (self.buf.as_ptr().add(FLAGS_OFFSET) as *const u16).read_unaligned()
+        })
     }
     #[inline]
     pub fn length(&self) -> u16 {
-        u16::from_be_bytes(unsafe { *(self.buf.as_ptr().add(LEN_OFFSET) as *const [u8; 2]) })
+        u16::from_be(unsafe { (self.buf.as_ptr().add(LEN_OFFSET) as *const u16).read_unaligned() })
     }
 
-    // Setters - direct unaligned pointer writes into validated [u8; HEADER_SIZE] buffer bypass slice creation and copy_from_slice bounds checks.
+    // Setters - direct unaligned scalar writes into validated buffer avoid stack array staging before writing.
     #[inline]
     pub fn set_src_id(&mut self, id: [u8; 32]) {
         unsafe {
@@ -205,13 +210,13 @@ impl<'a> HeaderView<'a> {
     #[inline]
     pub fn set_flow_label(&mut self, v: u32) {
         unsafe {
-            *(self.buf.as_mut_ptr().add(FLOW_OFFSET) as *mut [u8; 4]) = v.to_be_bytes();
+            (self.buf.as_mut_ptr().add(FLOW_OFFSET) as *mut u32).write_unaligned(v.to_be());
         }
     }
     #[inline]
     pub fn set_seq_num(&mut self, v: u64) {
         unsafe {
-            *(self.buf.as_mut_ptr().add(SEQ_OFFSET) as *mut [u8; 8]) = v.to_be_bytes();
+            (self.buf.as_mut_ptr().add(SEQ_OFFSET) as *mut u64).write_unaligned(v.to_be());
         }
     }
     #[inline]
@@ -223,13 +228,13 @@ impl<'a> HeaderView<'a> {
     #[inline]
     pub fn set_flags(&mut self, v: u16) {
         unsafe {
-            *(self.buf.as_mut_ptr().add(FLAGS_OFFSET) as *mut [u8; 2]) = v.to_be_bytes();
+            (self.buf.as_mut_ptr().add(FLAGS_OFFSET) as *mut u16).write_unaligned(v.to_be());
         }
     }
     #[inline]
     pub fn set_length(&mut self, v: u16) {
         unsafe {
-            *(self.buf.as_mut_ptr().add(LEN_OFFSET) as *mut [u8; 2]) = v.to_be_bytes();
+            (self.buf.as_mut_ptr().add(LEN_OFFSET) as *mut u16).write_unaligned(v.to_be());
         }
     }
 }
