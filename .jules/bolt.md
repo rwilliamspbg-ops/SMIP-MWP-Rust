@@ -131,3 +131,7 @@
 ## 2026-06-20 - [Precompute AF_XDP Ring Masks on Construction]
 **Learning:** Recalculating descriptor ring capacities and bitmasks in AF_XDP ring methods (`rx_pop`, `tx_push`, `fill_push`, `comp_pop`) on every batch push/pop executes redundant memory region subtraction and integer division (`/ std::mem::size_of::<u64>()`) on the hot datapath.
 **Action:** Precompute ring power-of-two masks (`rx_mask`, `tx_mask`, `fill_mask`, `comp_mask`) once on struct initialization (`RingMmap::new`) to eliminate division and subtraction instructions during hot packet ring pops and pushes.
+
+## 2026-06-21 - [Unaligned Scalar Operations for Wire Header Parsing and Serialization]
+**Learning:** Parsing and serializing integer fields in packet headers using `uXX::from_be_bytes(*(ptr as *const [u8; N]))` stages fixed-size byte arrays on the stack before converting endianness. Using direct unaligned scalar operations (`read_unaligned` and `write_unaligned`) allows LLVM to generate register-level unaligned loads/stores combined with native byte-swap instructions (`movbe` or `bswap`), completely bypassing stack staging overhead.
+**Action:** Use `(ptr as *const uXX).read_unaligned()` and `(ptr as *mut uXX).write_unaligned()` for scalar header fields in hot wire parsing and serialization routines.
