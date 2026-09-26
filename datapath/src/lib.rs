@@ -1230,6 +1230,9 @@ impl Forwarder {
             // Append results in the main thread to the arena.
             let mut local_enc_count = 0u64;
             let mut local_enc_ns = 0u64;
+            self.arena
+                .reserve(outputs.iter().map(|(bytes, ..)| bytes.len()).sum::<usize>());
+            self.offsets.reserve(outputs.len());
             for (bytes, encrypted, route_miss, enc_ns) in outputs {
                 let start = self.arena.len();
                 self.arena.extend_from_slice(&bytes);
