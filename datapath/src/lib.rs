@@ -109,6 +109,19 @@ impl AlignedBuffer {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+
+    /// Return a mutable slice starting at `start` with length `len` without bounds checking.
+    /// # Safety
+    /// Caller must ensure `start + len <= self.capacity()`.
+    #[inline]
+    unsafe fn as_mut_slice_at_unchecked(&mut self, start: usize, len: usize) -> &mut [u8] {
+        std::slice::from_raw_parts_mut(self.ptr.as_ptr().add(start), len)
+    }
+
     #[cfg(test)]
     fn as_ptr(&self) -> *const u8 {
         self.ptr.as_ptr()
@@ -396,9 +409,12 @@ impl Forwarder {
                         } else {
                             None
                         };
+                        // Fast, bounds-free slice creation for pre-reserved arena storage
                         match session.encrypt_into_slice(
-                            &mut self.arena.as_mut_slice()
-                                [payload_start..payload_start + payload_len],
+                            unsafe {
+                                self.arena
+                                    .as_mut_slice_at_unchecked(payload_start, payload_len)
+                            },
                             seq_num,
                         ) {
                             Ok(tag) => {
@@ -708,7 +724,9 @@ impl Forwarder {
 
                 if !forwarded {
                     let start = self.arena.len();
-                    self.arena.extend_from_slice(&pkt);
+                    unsafe {
+                        self.arena.extend_from_slice_unchecked(&pkt);
+                    }
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     stats.forwarded += 1;
@@ -807,7 +825,9 @@ impl Forwarder {
                         }
                         None => {
                             let start = self.arena.len();
-                            self.arena.extend_from_slice(&pkt);
+                            unsafe {
+                                self.arena.extend_from_slice_unchecked(&pkt);
+                            }
                             let len = self.arena.len() - start;
                             self.offsets.push((start, len));
                             stats.forwarded += 1;
@@ -829,10 +849,9 @@ impl Forwarder {
                             self.arena
                                 .extend_from_slice_unchecked(&pkt[..HEADER_SIZE + payload_len]);
                         }
-                        // Overwrite next_hop field directly in the arena using raw pointer assignment
+                        // Overwrite next_hop field directly in the arena using direct pointer assignment
                         unsafe {
-                            *(self.arena.as_mut_slice().as_mut_ptr().add(start + 32)
-                                as *mut [u8; 32]) = next_hop;
+                            *(self.arena.as_mut_ptr().add(start + 32) as *mut [u8; 32]) = next_hop;
                         }
 
                         let payload_start = start + HEADER_SIZE;
@@ -843,9 +862,12 @@ impl Forwarder {
                             } else {
                                 None
                             };
+                            // Fast, bounds-free slice creation for pre-reserved arena storage
                             match session.encrypt_into_slice(
-                                &mut self.arena.as_mut_slice()
-                                    [payload_start..payload_start + payload_len],
+                                unsafe {
+                                    self.arena
+                                        .as_mut_slice_at_unchecked(payload_start, payload_len)
+                                },
                                 seq_num,
                             ) {
                                 Ok(tag) => {
@@ -900,11 +922,10 @@ impl Forwarder {
 
                         let f_start = self.arena.len();
                         // Copy entire packet in a single operation to reduce slice copy overhead
-                        self.arena.extend_from_slice(&pkt);
-                        // Overwrite next_hop field directly in the arena using raw pointer assignment
                         unsafe {
-                            *(self.arena.as_mut_slice().as_mut_ptr().add(f_start + 32)
-                                as *mut [u8; 32]) = next_hop;
+                            self.arena.extend_from_slice_unchecked(&pkt);
+                            *(self.arena.as_mut_ptr().add(f_start + 32) as *mut [u8; 32]) =
+                                next_hop;
                         }
                         let len = self.arena.len() - f_start;
                         self.offsets.push((f_start, len));
@@ -920,7 +941,9 @@ impl Forwarder {
                     }
                 } else {
                     let start = self.arena.len();
-                    self.arena.extend_from_slice(&pkt);
+                    unsafe {
+                        self.arena.extend_from_slice_unchecked(&pkt);
+                    }
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     stats.forwarded += 1;
@@ -1329,7 +1352,9 @@ impl Forwarder {
 
             if !forwarded {
                 let start = self.arena.len();
-                self.arena.extend_from_slice(pkt);
+                unsafe {
+                    self.arena.extend_from_slice_unchecked(pkt);
+                }
                 let len = self.arena.len() - start;
                 self.offsets.push((start, len));
                 stats.forwarded += 1;
