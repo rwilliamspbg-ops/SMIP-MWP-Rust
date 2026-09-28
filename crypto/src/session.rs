@@ -105,6 +105,7 @@ impl SessionAead {
         Ok(Self::ChaCha(chacha))
     }
 
+    #[inline]
     fn encrypt(&self, nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
         // Replace dynamic slice length assertion checks of GenericArray::from_slice with
         // static/bounds-free GenericArray::from(*nonce) in the hot AEAD encryption and decryption paths.
@@ -118,6 +119,7 @@ impl SessionAead {
 
     /// Encrypt plaintext that is already loaded into `buf`, appending the
     /// 16-byte AEAD tag in-place.  Zero extra heap allocations.
+    #[inline]
     fn encrypt_in_place_buf(
         &self,
         nonce: &[u8; NONCE_SIZE],
@@ -131,6 +133,7 @@ impl SessionAead {
         .map_err(|_| SessionError::AuthenticationFailed)
     }
 
+    #[inline]
     fn encrypt_in_place_detached(
         &self,
         nonce: &[u8; NONCE_SIZE],
@@ -147,6 +150,7 @@ impl SessionAead {
         }
     }
 
+    #[inline]
     fn decrypt_in_place_buf(
         &self,
         nonce: &[u8; NONCE_SIZE],
@@ -160,6 +164,7 @@ impl SessionAead {
         .map_err(|_| SessionError::AuthenticationFailed)
     }
 
+    #[inline]
     fn decrypt(
         &self,
         nonce: &[u8; NONCE_SIZE],
@@ -217,6 +222,7 @@ impl HybridSession {
         })
     }
 
+    #[inline]
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
         let mut nonce = self.nonce_base;
         let mixed = self.nonce_xor ^ seq;
@@ -232,6 +238,7 @@ impl HybridSession {
 
     /// Encrypts `payload` completely in-place, appending the authentication tag.
     /// Uses `AeadInPlace::encrypt_in_place` to avoid allocating temporary buffer vectors.
+    #[inline]
     pub fn encrypt_in_place(&self, payload: &mut Vec<u8>, seq: u64) -> Result<(), SessionError> {
         if payload.len() > (1 << 24) {
             return Err(SessionError::PayloadTooLarge);
@@ -240,6 +247,7 @@ impl HybridSession {
         self.aead.encrypt_in_place_buf(&nonce, payload)
     }
 
+    #[inline]
     pub fn encrypt_into_slice(
         &self,
         payload: &mut [u8],
@@ -257,6 +265,7 @@ impl HybridSession {
     /// Zero-allocation encrypt: caller fills `dst` with the plaintext, then
     /// this method encrypts it in-place and appends the 16-byte tag.
     /// `dst` must have capacity for `plaintext_len + TAG_SIZE` bytes.
+    #[inline]
     pub fn encrypt_to(
         &self,
         dst: &mut Vec<u8>,
@@ -274,6 +283,7 @@ impl HybridSession {
 
     /// Decrypts `payload` completely in-place and truncates the authentication tag.
     /// Uses `AeadInPlace::decrypt_in_place` to avoid allocating temporary buffer vectors.
+    #[inline]
     pub fn decrypt_in_place(&self, payload: &mut Vec<u8>, seq: u64) -> Result<(), SessionError> {
         if payload.len() < TAG_SIZE {
             return Err(SessionError::CiphertextTooShort);
@@ -282,6 +292,7 @@ impl HybridSession {
         self.aead.decrypt_in_place_buf(&nonce, payload)
     }
 
+    #[inline]
     pub fn encrypt(&self, plaintext: &[u8], seq: u64) -> Result<Vec<u8>, SessionError> {
         if plaintext.len() > (1 << 24) {
             return Err(SessionError::PayloadTooLarge);
@@ -290,6 +301,7 @@ impl HybridSession {
         self.aead.encrypt(&nonce, plaintext)
     }
 
+    #[inline]
     pub fn decrypt(&self, ciphertext: &[u8], seq: u64) -> Result<Vec<u8>, SessionError> {
         if ciphertext.len() < TAG_SIZE {
             return Err(SessionError::CiphertextTooShort);

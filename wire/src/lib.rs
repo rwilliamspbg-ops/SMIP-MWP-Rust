@@ -42,6 +42,7 @@ impl Header {
         }
     }
 
+    #[inline]
     pub fn marshal_into(&self, buf: &mut [u8]) -> Result<(), ErrBufferTooSmall> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);
@@ -60,6 +61,7 @@ impl Header {
         Ok(())
     }
 
+    #[inline]
     pub fn parse(buf: &[u8]) -> Result<Self, ErrBufferTooSmall> {
         if buf.len() < HEADER_SIZE {
             return Err(ErrBufferTooSmall);

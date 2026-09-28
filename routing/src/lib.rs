@@ -103,6 +103,7 @@ thread_local! {
 /// hasher, reducing per-miss cost on the trusted datapath hot path.
 /// We use native 64-bit integer pointer casting and XOR folding via `read_unaligned`
 /// to avoid generic hashing and slice-length overhead on the hot path entirely.
+#[inline]
 fn fast_flow_hash(src_id: &[u8; 32], dst_id: &[u8; 32], flow_label: u32) -> u64 {
     let s_ptr = src_id.as_ptr() as *const u64;
     let d_ptr = dst_id.as_ptr() as *const u64;
@@ -307,6 +308,7 @@ impl Table {
     /// Optimized: holds the read lock and avoids cloning RouteEntry (which contains a heap-allocated Vec).
     /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
     /// main table BTreeMap search redundant on misses.
+    #[inline]
     pub fn lookup_spray(&self, dst_id: &[u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
         let h = Self::hash_32(dst_id);
         let shard = Self::shard_for_from_hash(h);
@@ -342,6 +344,7 @@ impl Table {
     /// directly on reference to avoid cloning RouteEntry.
     /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
     /// main table BTreeMap search redundant on misses.
+    #[inline]
     pub fn lookup_spray_primary(&self, dst_id: &[u8; 32], flow_label: u32) -> Option<[u8; 32]> {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
         let cache_idx = Self::spray_cache_index(dst_id, flow_label);
@@ -403,6 +406,7 @@ impl Table {
     /// Select a single channel by index (round-robin if out of range).
     /// Optimized: performs direct zero-allocation shard lookup without constructing
     /// or cloning an intermediate vector of channel entries.
+    #[inline]
     pub fn lookup_spray_single(
         &self,
         dst_id: &[u8; 32],
@@ -437,6 +441,7 @@ impl Table {
         Some(nh)
     }
 
+    #[inline]
     pub fn lookup_next_hop(&self, dst_id: &[u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
         // Fast per-thread hot-key cache check
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
@@ -472,6 +477,7 @@ impl Table {
     /// Called directly when exact route lookup (`lookup_next_hop`) returns `None`,
     /// avoiding redundant re-checks of thread-local cache and fast_shards.
     /// Optimized: `src_id` and `dst_id` are passed as references `&[u8; 32]` to eliminate 32-byte stack copies.
+    #[inline]
     pub fn lookup_predictive_fallback(
         &self,
         src_id: &[u8; 32],
@@ -495,6 +501,7 @@ impl Table {
     /// or fall back to predictive flow hash over `predictive_next_hops` if not found.
     /// Optimized: `src_id` and `dst_id` are passed as references `&[u8; 32]` to completely avoid 32-byte
     /// stack copies on hot path route hits.
+    #[inline]
     pub fn lookup_or_predict(
         &self,
         src_id: &[u8; 32],
@@ -507,6 +514,7 @@ impl Table {
         self.lookup_predictive_fallback(src_id, dst_id, flow_label)
     }
 
+    #[inline]
     pub fn predictive_next_hop(
         &self,
         src_id: &[u8; 32],
