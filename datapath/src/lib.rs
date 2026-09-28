@@ -682,6 +682,7 @@ impl Forwarder {
         stats
     }
 
+    #[inline]
     pub fn process_batch(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         // If MCR is enabled, use the MCR-aware processing path.
         if self.mcr_enabled {
@@ -766,6 +767,7 @@ impl Forwarder {
 
     /// MCR-aware processing: for now delegates to `process_batch` while
     /// preserving a stable API for future MCR spray behavior.
+    #[inline]
     pub fn process_batch_mcr(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         use rayon::prelude::*;
 
@@ -1302,10 +1304,12 @@ impl Forwarder {
     /// Full-spray mode: duplicate to all MCR channels per-packet.
     /// Uses lookup_spray() to get primary+alternate next-hops, then processes
     /// each channel's copy in parallel (when batch threshold met) or serially.
+    #[inline]
     pub fn process_batch_spray_full(&mut self, sock: &mut dyn XdpSocket) -> ForwarderStats {
         self.process_batch_mcr(sock)
     }
 
+    #[inline]
     pub fn process_batch_slices(
         &mut self,
         sock: &mut dyn XdpSocket,
