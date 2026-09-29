@@ -135,3 +135,7 @@
 ## 2026-06-21 - [Unaligned Scalar Operations for Wire Header Parsing and Serialization]
 **Learning:** Parsing and serializing integer fields in packet headers using `uXX::from_be_bytes(*(ptr as *const [u8; N]))` stages fixed-size byte arrays on the stack before converting endianness. Using direct unaligned scalar operations (`read_unaligned` and `write_unaligned`) allows LLVM to generate register-level unaligned loads/stores combined with native byte-swap instructions (`movbe` or `bswap`), completely bypassing stack staging overhead.
 **Action:** Use `(ptr as *const uXX).read_unaligned()` and `(ptr as *mut uXX).write_unaligned()` for scalar header fields in hot wire parsing and serialization routines.
+
+## 2026-06-22 - [Fast-Path Bitmasking and Lemire Reduction for Fallback Routing]
+**Learning:** Evaluating dynamic integer modulo division (`hash % n`) in predictive fallback routing lookups emits an expensive `idiv` instruction requiring 10–20 CPU clock cycles. Checking `n.is_power_of_two()` to perform bitwise masking `hash & (n - 1)` or Lemire's multiplication reduction `((hash as u128 * n as u128) >> 64)` completely avoids integer division on hot lookup paths.
+**Action:** Use `if n.is_power_of_two() { hash & (n - 1) } else { ((hash as u128 * n as u128) >> 64) as usize }` instead of `% n` when mapping hash values across dynamic slice lengths.

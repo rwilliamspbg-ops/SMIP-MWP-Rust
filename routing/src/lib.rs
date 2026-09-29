@@ -493,7 +493,15 @@ impl Table {
             // Fast path: single predictive fallback entry avoids 8 unaligned reads & XOR fold overhead
             return Some(inner.predictive_next_hops[0]);
         }
-        let pred_idx = fast_flow_hash(src_id, dst_id, flow_label) as usize % n;
+        let hash = fast_flow_hash(src_id, dst_id, flow_label);
+        // Fast-path index reduction: use bitwise AND masking when n is a power of 2,
+        // or Lemire's multiplication reduction ((hash * n) >> 64) otherwise,
+        // completely eliminating expensive integer division (idiv) instructions.
+        let pred_idx = if n.is_power_of_two() {
+            (hash as usize) & (n - 1)
+        } else {
+            ((hash as u128 * n as u128) >> 64) as usize
+        };
         Some(inner.predictive_next_hops[pred_idx])
     }
 
