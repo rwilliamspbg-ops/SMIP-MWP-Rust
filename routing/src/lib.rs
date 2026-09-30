@@ -533,7 +533,7 @@ impl Table {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct RoutePolicy {
     pub next_hop_id: [u8; 32],
     pub queue_id: i32,
@@ -581,11 +581,11 @@ impl Router {
     ) -> Result<RoutePolicy, &'static str> {
         let key = self.compute_flow_key(src_id, dst_id, flow_label);
         let m = self.inner.read();
-        if let Some(p) = m.get(&key) {
-            return Ok(p.clone());
+        if let Some(&p) = m.get(&key) {
+            return Ok(p);
         }
-        if let Some(p) = m.get(&0) {
-            return Ok(p.clone());
+        if let Some(&p) = m.get(&0) {
+            return Ok(p);
         }
         Err("no policy available")
     }
