@@ -58,53 +58,67 @@ impl RingMmap {
     }
 
     /// Access the raw base pointer
+    #[inline]
     pub fn base_ptr(&self) -> *mut u8 {
         self.base.as_ptr()
     }
 
     /// Return the size of the mapped ring region.
+    #[inline]
     pub fn len(&self) -> usize {
         self.size
     }
 
     /// Returns true if the mapped region has zero length.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.size == 0
     }
+
     /// Report the mmap offsets
+    #[inline]
     pub fn offsets(&self) -> XskMmapOffsets {
         self.offsets
     }
 
+    #[inline]
     pub fn rx_available(&self) -> usize {
         unsafe {
-            let prod = self.read_u32_at(self.offsets.rx) as usize;
-            let cons = self.read_u32_at(self.offsets.rx + 4) as usize;
+            // Direct metadata raw pointer access avoids calling `read_u32_at` twice
+            // and its two runtime `assert!` bounds checks on every query.
+            let meta_ptr = self.base.as_ptr().add(self.offsets.rx as usize) as *const u32;
+            let prod = u32::from_le(std::ptr::read_unaligned(meta_ptr)) as usize;
+            let cons = u32::from_le(std::ptr::read_unaligned(meta_ptr.add(1))) as usize;
             prod.wrapping_sub(cons)
         }
     }
 
     #[allow(dead_code)]
+    #[inline]
     pub fn rx_capacity(&self) -> usize {
         self.rx_mask + 1
     }
 
     #[allow(dead_code)]
+    #[inline]
     pub fn tx_capacity(&self) -> usize {
         self.tx_mask + 1
     }
 
     #[allow(dead_code)]
+    #[inline]
     pub fn fill_capacity(&self) -> usize {
         self.fill_mask + 1
     }
 
     #[allow(dead_code)]
+    #[inline]
     pub fn comp_capacity(&self) -> usize {
         self.comp_mask + 1
     }
 
     /// Pop up to `max` RX frame descriptors and return their offsets.
+    #[inline]
     pub fn rx_pop(&self, max: usize) -> Vec<u64> {
         unsafe {
             let offs = self.offsets;
@@ -147,6 +161,7 @@ impl RingMmap {
     }
 
     /// Pop up to `max` completion descriptors from the comp ring and return addresses.
+    #[inline]
     pub fn comp_pop(&self, max: usize) -> Vec<u64> {
         unsafe {
             let offs = self.offsets;
@@ -189,6 +204,7 @@ impl RingMmap {
     }
 
     /// Push `addrs` into the fill ring for the kernel to use as RX buffers.
+    #[inline]
     pub fn fill_push(&self, addrs: &[u64]) -> usize {
         unsafe {
             let offs = self.offsets;
@@ -228,6 +244,7 @@ impl RingMmap {
     }
 
     /// Push `addrs` into the TX ring for transmission.
+    #[inline]
     pub fn tx_push(&self, addrs: &[u64]) -> usize {
         unsafe {
             let offs = self.offsets;
