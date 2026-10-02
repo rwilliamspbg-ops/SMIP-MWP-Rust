@@ -40,6 +40,7 @@ impl AlignedBuffer {
         self.len
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn capacity(&self) -> usize {
         self.cap
@@ -995,13 +996,11 @@ impl Forwarder {
                             metrics.lookup_hits += 1;
                             if let Some(session) = session_ref {
                                 if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                                    let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                                    let remaining = self.arena.capacity().saturating_sub(start);
-                                    if remaining < needed {
-                                        self.arena.reserve(needed - remaining);
+                                    unsafe {
+                                        self.arena.extend_from_slice_unchecked(
+                                            &pkt[..HEADER_SIZE + payload_len],
+                                        );
                                     }
-                                    self.arena
-                                        .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
 
                                     let payload_start = start + HEADER_SIZE;
                                     let enc_start = if self.profile_enabled {
@@ -1010,8 +1009,12 @@ impl Forwarder {
                                         None
                                     };
                                     match session.encrypt_into_slice(
-                                        &mut self.arena.as_mut_slice()
-                                            [payload_start..payload_start + payload_len],
+                                        unsafe {
+                                            self.arena.as_mut_slice_at_unchecked(
+                                                payload_start,
+                                                payload_len,
+                                            )
+                                        },
                                         seq_num,
                                     ) {
                                         Ok(tag) => {
@@ -1019,30 +1022,41 @@ impl Forwarder {
                                                 local_enc_ns += st.elapsed().as_nanos() as u64;
                                             }
                                             local_enc_count += 1;
-                                            self.arena.extend_from_slice(tag.as_slice());
-                                            let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
-                                            if pkt.len() > target_len {
-                                                self.arena.extend_from_slice(&pkt[target_len..]);
+                                            unsafe {
+                                                self.arena.extend_from_tag_unchecked(tag.as_ref());
+                                                if pkt.len() > HEADER_SIZE + payload_len {
+                                                    self.arena.extend_from_slice_unchecked(
+                                                        &pkt[HEADER_SIZE + payload_len..],
+                                                    );
+                                                }
                                             }
                                             was_encrypted = true;
                                         }
                                         Err(_) => {
                                             self.arena.truncate(start);
-                                            self.arena.extend_from_slice(&pkt);
+                                            unsafe {
+                                                self.arena.extend_from_slice_unchecked(&pkt);
+                                            }
                                             was_route_miss = true;
                                         }
                                     }
                                 } else {
-                                    self.arena.extend_from_slice(&pkt);
+                                    unsafe {
+                                        self.arena.extend_from_slice_unchecked(&pkt);
+                                    }
                                     if payload_len > 0 {
                                         was_route_miss = true;
                                     }
                                 }
                             } else {
-                                self.arena.extend_from_slice(&pkt);
+                                unsafe {
+                                    self.arena.extend_from_slice_unchecked(&pkt);
+                                }
                             }
                         } else {
-                            self.arena.extend_from_slice(&pkt);
+                            unsafe {
+                                self.arena.extend_from_slice_unchecked(&pkt);
+                            }
                             was_route_miss = true;
                         }
 
@@ -1074,18 +1088,14 @@ impl Forwarder {
                         if route_exists {
                             if let Some(session) = session_ref {
                                 if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                                    let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                                    let remaining = self.arena.capacity().saturating_sub(start);
-                                    if remaining < needed {
-                                        self.arena.reserve(needed - remaining);
-                                    }
-                                    self.arena
-                                        .extend_from_slice(&pkt[..HEADER_SIZE + payload_len]);
-
-                                    if let Ok(mut view) = wire::HeaderView::view(
-                                        &mut self.arena.as_mut_slice()[start..],
-                                    ) {
-                                        view.set_dst_id(nh);
+                                    // Capacity is pre-reserved for full spray at start of process_batch_mcr.
+                                    // Combine header copy and direct pointer dst_id overwrite.
+                                    unsafe {
+                                        self.arena.extend_from_slice_unchecked(
+                                            &pkt[..HEADER_SIZE + payload_len],
+                                        );
+                                        *(self.arena.as_mut_ptr().add(start + 32)
+                                            as *mut [u8; 32]) = nh;
                                     }
 
                                     let payload_start = start + HEADER_SIZE;
@@ -1095,8 +1105,12 @@ impl Forwarder {
                                         None
                                     };
                                     match session.encrypt_into_slice(
-                                        &mut self.arena.as_mut_slice()
-                                            [payload_start..payload_start + payload_len],
+                                        unsafe {
+                                            self.arena.as_mut_slice_at_unchecked(
+                                                payload_start,
+                                                payload_len,
+                                            )
+                                        },
                                         seq_num,
                                     ) {
                                         Ok(tag) => {
@@ -1104,49 +1118,47 @@ impl Forwarder {
                                                 local_enc_ns += st.elapsed().as_nanos() as u64;
                                             }
                                             local_enc_count += 1;
-                                            self.arena.extend_from_slice(tag.as_slice());
-                                            let target_len = HEADER_SIZE + payload_len + TAG_SIZE;
-                                            if pkt.len() > target_len {
-                                                self.arena.extend_from_slice(&pkt[target_len..]);
+                                            unsafe {
+                                                self.arena.extend_from_tag_unchecked(tag.as_ref());
+                                                if pkt.len() > HEADER_SIZE + payload_len {
+                                                    self.arena.extend_from_slice_unchecked(
+                                                        &pkt[HEADER_SIZE + payload_len..],
+                                                    );
+                                                }
                                             }
                                             was_encrypted = true;
                                         }
                                         Err(_) => {
                                             self.arena.truncate(start);
-                                            self.arena.extend_from_slice(&pkt);
-                                            if let Ok(mut view) = wire::HeaderView::view(
-                                                &mut self.arena.as_mut_slice()[start..],
-                                            ) {
-                                                view.set_dst_id(nh);
+                                            unsafe {
+                                                self.arena.extend_from_slice_unchecked(&pkt);
+                                                *(self.arena.as_mut_ptr().add(start + 32)
+                                                    as *mut [u8; 32]) = nh;
                                             }
                                             was_route_miss = true;
                                         }
                                     }
                                 } else {
-                                    self.arena.extend_from_slice(&pkt);
-                                    if let Ok(mut view) = wire::HeaderView::view(
-                                        &mut self.arena.as_mut_slice()[start..],
-                                    ) {
-                                        view.set_dst_id(nh);
+                                    unsafe {
+                                        self.arena.extend_from_slice_unchecked(&pkt);
+                                        *(self.arena.as_mut_ptr().add(start + 32)
+                                            as *mut [u8; 32]) = nh;
                                     }
                                     if payload_len > 0 {
                                         was_route_miss = true;
                                     }
                                 }
                             } else {
-                                self.arena.extend_from_slice(&pkt);
-                                if let Ok(mut view) =
-                                    wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..])
-                                {
-                                    view.set_dst_id(nh);
+                                unsafe {
+                                    self.arena.extend_from_slice_unchecked(&pkt);
+                                    *(self.arena.as_mut_ptr().add(start + 32) as *mut [u8; 32]) =
+                                        nh;
                                 }
                             }
                         } else {
-                            self.arena.extend_from_slice(&pkt);
-                            if let Ok(mut view) =
-                                wire::HeaderView::view(&mut self.arena.as_mut_slice()[start..])
-                            {
-                                view.set_dst_id(nh);
+                            unsafe {
+                                self.arena.extend_from_slice_unchecked(&pkt);
+                                *(self.arena.as_mut_ptr().add(start + 32) as *mut [u8; 32]) = nh;
                             }
                             was_route_miss = true;
                         }
