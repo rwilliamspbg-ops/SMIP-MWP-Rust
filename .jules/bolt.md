@@ -139,3 +139,7 @@
 ## 2026-06-22 - [Fast-Path Bitmasking and Lemire Reduction for Fallback Routing]
 **Learning:** Evaluating dynamic integer modulo division (`hash % n`) in predictive fallback routing lookups emits an expensive `idiv` instruction requiring 10–20 CPU clock cycles. Checking `n.is_power_of_two()` to perform bitwise masking `hash & (n - 1)` or Lemire's multiplication reduction `((hash as u128 * n as u128) >> 64)` completely avoids integer division on hot lookup paths.
 **Action:** Use `if n.is_power_of_two() { hash & (n - 1) } else { ((hash as u128 * n as u128) >> 64) as usize }` instead of `% n` when mapping hash values across dynamic slice lengths.
+
+## 2026-06-23 - [Bitmasking Power-of-Two Channel Counts in Spray Routing]
+**Learning:** Dynamic integer modulo (`flow_label % choices`) on multi-channel spray forwarding hot paths emits a multi-cycle `idiv` instruction. When channel count `choices` is a power of two (the predominant case in multi-path networking), calculating the channel index via bitwise AND `(flow_label as usize) & (choices - 1)` eliminates integer division latency entirely.
+**Action:** Always check `choices.is_power_of_two()` before using `% choices` on hot packet forwarding paths.

@@ -321,10 +321,15 @@ impl Table {
             for ch in &e.alternate_channels {
                 out.push((*ch, false));
             }
-            // If there are multiple channels, re-order by hash selection so primary reflects flow affinity
+            // If there are multiple channels, re-order by hash selection so primary reflects flow affinity.
+            // Bitwise AND avoids dynamic integer division (idiv) instructions when channel count is a power of two.
             if out.len() > 1 {
                 let choices = out.len();
-                let idx = (flow_label as usize) % choices;
+                let idx = if choices.is_power_of_two() {
+                    (flow_label as usize) & (choices - 1)
+                } else {
+                    (flow_label as usize) % choices
+                };
                 if idx != 0 {
                     out.swap(0, idx);
                     // O(1) direct update: element swapped to index 0 is now primary, and former primary at idx is no longer primary
@@ -378,7 +383,12 @@ impl Table {
                     // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
                     // mathematically XOR-cancels the 32-byte arrays completely, yielding exactly flow_label.
                     // We use direct flow_label as index to avoid 8 unaligned reads & multiple XOR operations.
-                    let ch_idx = (flow_label as usize) % choices;
+                    // Bitwise AND avoids dynamic integer division (idiv) instructions when channel count is a power of two.
+                    let ch_idx = if choices.is_power_of_two() {
+                        (flow_label as usize) & (choices - 1)
+                    } else {
+                        (flow_label as usize) % choices
+                    };
                     if ch_idx == 0 {
                         Some(entry.next_hop_id)
                     } else {
@@ -419,12 +429,21 @@ impl Table {
         let map = self.fast_shards[shard].read();
         let e = map.get(dst_id)?;
         let count = 1 + e.alternate_channels.len();
+        // Bitwise AND avoids dynamic integer division (idiv) instructions when channel count is a power of two.
         let flow_idx = if count > 1 {
-            (flow_label as usize) % count
+            if count.is_power_of_two() {
+                (flow_label as usize) & (count - 1)
+            } else {
+                (flow_label as usize) % count
+            }
         } else {
             0
         };
-        let target_idx = channel_idx % count;
+        let target_idx = if count.is_power_of_two() {
+            channel_idx & (count - 1)
+        } else {
+            channel_idx % count
+        };
 
         let nh = if target_idx == 0 {
             if flow_idx == 0 {
