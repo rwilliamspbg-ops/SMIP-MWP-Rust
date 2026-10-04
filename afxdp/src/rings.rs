@@ -137,19 +137,48 @@ impl RingMmap {
 
             // Precomputed bitmask avoids integer division and subtraction on the hot ring pop datapath.
             let mask = self.rx_mask;
+            let capacity = mask + 1;
 
             let to_take = std::cmp::min(avail, max);
             let mut out: Vec<u64> = Vec::with_capacity(to_take);
             let out_ptr: *mut u64 = out.as_mut_ptr();
-            let desc_base = self.base.as_ptr().add(rx_desc_off as usize) as *const u64;
+            let desc_base = self.base.as_ptr().add(rx_desc_off as usize);
 
-            // Direct pointer indexing and unaligned 64-bit reads bypass per-element assertion
-            // and out.push capacity checks on the hot ring-pop datapath.
-            for i in 0..to_take {
-                let idx = (cons as usize + i) & mask;
-                let desc_ptr = desc_base.add(idx);
-                let desc = u64::from_le(std::ptr::read_unaligned(desc_ptr));
-                out_ptr.add(i).write(desc);
+            // Chunked bulk copying avoids per-element modulo bitmasking and scalar pointer arithmetic in ring loops.
+            // Using raw byte pointer copy_nonoverlapping eliminates pointer alignment constraints while preserving vectorization.
+            let start_idx = (cons as usize) & mask;
+            let chunk1_len = std::cmp::min(to_take, capacity - start_idx);
+            let chunk2_len = to_take - chunk1_len;
+
+            let out_bytes = out_ptr as *mut u8;
+            let elem_size = std::mem::size_of::<u64>();
+
+            if cfg!(target_endian = "little") {
+                std::ptr::copy_nonoverlapping(
+                    desc_base.add(start_idx * elem_size),
+                    out_bytes,
+                    chunk1_len * elem_size,
+                );
+                if chunk2_len > 0 {
+                    std::ptr::copy_nonoverlapping(
+                        desc_base,
+                        out_bytes.add(chunk1_len * elem_size),
+                        chunk2_len * elem_size,
+                    );
+                }
+            } else {
+                for i in 0..chunk1_len {
+                    let ptr = desc_base.add((start_idx + i) * elem_size) as *const u64;
+                    let desc = u64::from_le(std::ptr::read_unaligned(ptr));
+                    out_ptr.add(i).write(desc);
+                }
+                if chunk2_len > 0 {
+                    for i in 0..chunk2_len {
+                        let ptr = desc_base.add(i * elem_size) as *const u64;
+                        let desc = u64::from_le(std::ptr::read_unaligned(ptr));
+                        out_ptr.add(chunk1_len + i).write(desc);
+                    }
+                }
             }
             out.set_len(to_take);
 
@@ -180,19 +209,48 @@ impl RingMmap {
 
             // Precomputed bitmask avoids integer division and subtraction on the hot ring pop datapath.
             let mask = self.comp_mask;
+            let capacity = mask + 1;
 
             let to_take = std::cmp::min(avail, max);
             let mut out: Vec<u64> = Vec::with_capacity(to_take);
             let out_ptr: *mut u64 = out.as_mut_ptr();
-            let desc_base = self.base.as_ptr().add(comp_desc_off as usize) as *const u64;
+            let desc_base = self.base.as_ptr().add(comp_desc_off as usize);
 
-            // Direct pointer indexing and unaligned 64-bit reads bypass per-element assertion
-            // and out.push capacity checks on the hot ring-pop datapath.
-            for i in 0..to_take {
-                let idx = (cons as usize + i) & mask;
-                let desc_ptr = desc_base.add(idx);
-                let desc = u64::from_le(std::ptr::read_unaligned(desc_ptr));
-                out_ptr.add(i).write(desc);
+            // Chunked bulk copying avoids per-element modulo bitmasking and scalar pointer arithmetic in ring loops.
+            // Using raw byte pointer copy_nonoverlapping eliminates pointer alignment constraints while preserving vectorization.
+            let start_idx = (cons as usize) & mask;
+            let chunk1_len = std::cmp::min(to_take, capacity - start_idx);
+            let chunk2_len = to_take - chunk1_len;
+
+            let out_bytes = out_ptr as *mut u8;
+            let elem_size = std::mem::size_of::<u64>();
+
+            if cfg!(target_endian = "little") {
+                std::ptr::copy_nonoverlapping(
+                    desc_base.add(start_idx * elem_size),
+                    out_bytes,
+                    chunk1_len * elem_size,
+                );
+                if chunk2_len > 0 {
+                    std::ptr::copy_nonoverlapping(
+                        desc_base,
+                        out_bytes.add(chunk1_len * elem_size),
+                        chunk2_len * elem_size,
+                    );
+                }
+            } else {
+                for i in 0..chunk1_len {
+                    let ptr = desc_base.add((start_idx + i) * elem_size) as *const u64;
+                    let desc = u64::from_le(std::ptr::read_unaligned(ptr));
+                    out_ptr.add(i).write(desc);
+                }
+                if chunk2_len > 0 {
+                    for i in 0..chunk2_len {
+                        let ptr = desc_base.add(i * elem_size) as *const u64;
+                        let desc = u64::from_le(std::ptr::read_unaligned(ptr));
+                        out_ptr.add(chunk1_len + i).write(desc);
+                    }
+                }
             }
             out.set_len(to_take);
 
@@ -228,13 +286,40 @@ impl RingMmap {
             }
 
             let to_push = std::cmp::min(free, addrs.len());
-            let desc_base = self.base.as_ptr().add(fill_desc_off as usize) as *mut u64;
+            let desc_base = self.base.as_ptr().add(fill_desc_off as usize);
 
-            // Direct pointer indexing and unaligned 64-bit writes bypass per-element assertion checks.
-            for (i, &addr) in addrs.iter().enumerate().take(to_push) {
-                let idx = (prod as usize + i) & mask;
-                let desc_ptr = desc_base.add(idx);
-                std::ptr::write_unaligned(desc_ptr, addr.to_le());
+            // Chunked bulk copying avoids per-element modulo bitmasking and scalar pointer arithmetic in ring loops.
+            // Using raw byte pointer copy_nonoverlapping eliminates pointer alignment constraints while preserving vectorization.
+            let start_idx = (prod as usize) & mask;
+            let chunk1_len = std::cmp::min(to_push, capacity - start_idx);
+            let chunk2_len = to_push - chunk1_len;
+
+            let addrs_bytes = addrs.as_ptr() as *const u8;
+            let elem_size = std::mem::size_of::<u64>();
+
+            if cfg!(target_endian = "little") {
+                std::ptr::copy_nonoverlapping(
+                    addrs_bytes,
+                    desc_base.add(start_idx * elem_size),
+                    chunk1_len * elem_size,
+                );
+                if chunk2_len > 0 {
+                    std::ptr::copy_nonoverlapping(
+                        addrs_bytes.add(chunk1_len * elem_size),
+                        desc_base,
+                        chunk2_len * elem_size,
+                    );
+                }
+            } else {
+                let desc_ptr = desc_base as *mut u64;
+                for (i, &addr) in addrs[..chunk1_len].iter().enumerate() {
+                    std::ptr::write_unaligned(desc_ptr.add(start_idx + i), addr.to_le());
+                }
+                if chunk2_len > 0 {
+                    for (i, &addr) in addrs[chunk1_len..to_push].iter().enumerate() {
+                        std::ptr::write_unaligned(desc_ptr.add(i), addr.to_le());
+                    }
+                }
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
@@ -268,13 +353,40 @@ impl RingMmap {
             }
 
             let to_push = std::cmp::min(free, addrs.len());
-            let desc_base = self.base.as_ptr().add(tx_desc_off as usize) as *mut u64;
+            let desc_base = self.base.as_ptr().add(tx_desc_off as usize);
 
-            // Direct pointer indexing and unaligned 64-bit writes bypass per-element assertion checks.
-            for (i, &addr) in addrs.iter().enumerate().take(to_push) {
-                let idx = (prod as usize + i) & mask;
-                let desc_ptr = desc_base.add(idx);
-                std::ptr::write_unaligned(desc_ptr, addr.to_le());
+            // Chunked bulk copying avoids per-element modulo bitmasking and scalar pointer arithmetic in ring loops.
+            // Using raw byte pointer copy_nonoverlapping eliminates pointer alignment constraints while preserving vectorization.
+            let start_idx = (prod as usize) & mask;
+            let chunk1_len = std::cmp::min(to_push, capacity - start_idx);
+            let chunk2_len = to_push - chunk1_len;
+
+            let addrs_bytes = addrs.as_ptr() as *const u8;
+            let elem_size = std::mem::size_of::<u64>();
+
+            if cfg!(target_endian = "little") {
+                std::ptr::copy_nonoverlapping(
+                    addrs_bytes,
+                    desc_base.add(start_idx * elem_size),
+                    chunk1_len * elem_size,
+                );
+                if chunk2_len > 0 {
+                    std::ptr::copy_nonoverlapping(
+                        addrs_bytes.add(chunk1_len * elem_size),
+                        desc_base,
+                        chunk2_len * elem_size,
+                    );
+                }
+            } else {
+                let desc_ptr = desc_base as *mut u64;
+                for (i, &addr) in addrs[..chunk1_len].iter().enumerate() {
+                    std::ptr::write_unaligned(desc_ptr.add(start_idx + i), addr.to_le());
+                }
+                if chunk2_len > 0 {
+                    for (i, &addr) in addrs[chunk1_len..to_push].iter().enumerate() {
+                        std::ptr::write_unaligned(desc_ptr.add(i), addr.to_le());
+                    }
+                }
             }
 
             let new_prod = prod.wrapping_add(to_push as u32);
