@@ -143,3 +143,7 @@
 ## 2026-06-23 - [Bitmasking Power-of-Two Channel Counts in Spray Routing]
 **Learning:** Dynamic integer modulo (`flow_label % choices`) on multi-channel spray forwarding hot paths emits a multi-cycle `idiv` instruction. When channel count `choices` is a power of two (the predominant case in multi-path networking), calculating the channel index via bitwise AND `(flow_label as usize) & (choices - 1)` eliminates integer division latency entirely.
 **Action:** Always check `choices.is_power_of_two()` before using `% choices` on hot packet forwarding paths.
+
+## 2026-06-24 - [Avoid Unnecessary Unsafe Raw Pointer Reads on Non-Hot Path Arrays]
+**Learning:** Replacing safe, idiomatic Rust slice/array operations (like `u64::from_be_bytes`) with `unsafe` unaligned pointer arithmetic on non-hot-path initialization functions adds potential memory safety hazards without measurable performance gains, as LLVM already optimizes fixed-size array byte conversions into single-instruction loads.
+**Action:** Preserve safe, idiomatic Rust conversions for non-hot-path code and reserve `unsafe` unaligned loads strictly for profiling-proven, critical packet forwarding loops.
