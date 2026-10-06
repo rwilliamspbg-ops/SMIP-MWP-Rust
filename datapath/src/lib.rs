@@ -105,6 +105,7 @@ impl AlignedBuffer {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
@@ -907,11 +908,10 @@ impl Forwarder {
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
                         self.arena.reserve(needed);
 
-                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                        // Overwrite next_hop field directly in the arena using raw pointer assignment
                         unsafe {
-                            *(self.arena.as_mut_slice().as_mut_ptr().add(start + 32)
-                                as *mut [u8; 32]) = next_hop;
+                            self.arena.extend_from_slice_unchecked(&pkt[..HEADER_SIZE]);
+                            // Overwrite next_hop field directly in the arena using raw pointer assignment
+                            *(self.arena.as_mut_ptr().add(start + 32) as *mut [u8; 32]) = next_hop;
                         }
 
                         if payload_len > 0 {
@@ -1176,7 +1176,9 @@ impl Forwarder {
                     }
                 } else {
                     let start = self.arena.len();
-                    self.arena.extend_from_slice(&pkt);
+                    unsafe {
+                        self.arena.extend_from_slice_unchecked(&pkt);
+                    }
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     stats.forwarded += 1;

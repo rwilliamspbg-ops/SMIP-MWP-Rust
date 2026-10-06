@@ -183,19 +183,21 @@ impl Table {
 
     #[inline]
     fn simple_cache_index(dest_id: &[u8; 32]) -> usize {
-        let ptr = dest_id.as_ptr() as *const u32;
+        let ptr = dest_id.as_ptr() as *const u64;
         let val = unsafe { ptr.read_unaligned() };
-        // Use Knuth's multiplicative hashing to scramble the index across the cache size
-        let hash = val.wrapping_mul(0x9e3779b9);
+        let folded = (val as u32) ^ ((val >> 32) as u32);
+        // Use Knuth's multiplicative hashing on 64-bit folded destination fragment
+        let hash = folded.wrapping_mul(0x9e3779b9);
         (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
     #[inline]
     fn spray_cache_index(dest_id: &[u8; 32], flow_label: u32) -> usize {
-        let ptr = dest_id.as_ptr() as *const u32;
+        let ptr = dest_id.as_ptr() as *const u64;
         let val = unsafe { ptr.read_unaligned() };
-        // Use Knuth's multiplicative hashing to scramble both the dest_id fragment and flow_label across the cache size
-        let hash = (val ^ flow_label).wrapping_mul(0x9e3779b9);
+        let folded = (val as u32) ^ ((val >> 32) as u32) ^ flow_label;
+        // Use Knuth's multiplicative hashing on folded 64-bit dest_id fragment and flow_label
+        let hash = folded.wrapping_mul(0x9e3779b9);
         (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
