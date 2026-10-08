@@ -5,7 +5,6 @@ use aes_gcm::{
     Aes256Gcm,
 };
 use ahash::{AHashMap, AHasher};
-use chacha20poly1305::ChaCha20Poly1305;
 use hkdf::Hkdf;
 use parking_lot::RwLock;
 use sha2::Sha256;
@@ -90,95 +89,6 @@ fn derive_session_material(
     })
 }
 
-#[allow(clippy::large_enum_variant)]
-enum SessionAead {
-    Aes(Aes256Gcm),
-    ChaCha(ChaCha20Poly1305),
-}
-
-impl SessionAead {
-    fn new(key: &[u8; KEY_SIZE]) -> Result<Self, SessionError> {
-        if let Ok(aes) = Aes256Gcm::new_from_slice(key) {
-            return Ok(Self::Aes(aes));
-        }
-        let chacha = ChaCha20Poly1305::new_from_slice(key).map_err(|_| SessionError::AeadError)?;
-        Ok(Self::ChaCha(chacha))
-    }
-
-    #[inline]
-    fn encrypt(&self, nonce: &[u8; NONCE_SIZE], plaintext: &[u8]) -> Result<Vec<u8>, SessionError> {
-        // Replace dynamic slice length assertion checks of GenericArray::from_slice with
-        // static/bounds-free GenericArray::from(*nonce) in the hot AEAD encryption and decryption paths.
-        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
-        match self {
-            SessionAead::Aes(aead) => aead.encrypt(&nonce_ref, plaintext),
-            SessionAead::ChaCha(aead) => aead.encrypt(&nonce_ref, plaintext),
-        }
-        .map_err(|_| SessionError::AuthenticationFailed)
-    }
-
-    /// Encrypt plaintext that is already loaded into `buf`, appending the
-    /// 16-byte AEAD tag in-place.  Zero extra heap allocations.
-    #[inline]
-    fn encrypt_in_place_buf(
-        &self,
-        nonce: &[u8; NONCE_SIZE],
-        buf: &mut Vec<u8>,
-    ) -> Result<(), SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
-        match self {
-            SessionAead::Aes(aead) => aead.encrypt_in_place(&nonce_ref, b"", buf),
-            SessionAead::ChaCha(aead) => aead.encrypt_in_place(&nonce_ref, b"", buf),
-        }
-        .map_err(|_| SessionError::AuthenticationFailed)
-    }
-
-    #[inline]
-    fn encrypt_in_place_detached(
-        &self,
-        nonce: &[u8; NONCE_SIZE],
-        buf: &mut [u8],
-    ) -> Result<GenericArray<u8, U16>, SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
-        match self {
-            SessionAead::Aes(aead) => aead
-                .encrypt_in_place_detached(&nonce_ref, b"", buf)
-                .map_err(|_| SessionError::AuthenticationFailed),
-            SessionAead::ChaCha(aead) => aead
-                .encrypt_in_place_detached(&nonce_ref, b"", buf)
-                .map_err(|_| SessionError::AuthenticationFailed),
-        }
-    }
-
-    #[inline]
-    fn decrypt_in_place_buf(
-        &self,
-        nonce: &[u8; NONCE_SIZE],
-        buf: &mut Vec<u8>,
-    ) -> Result<(), SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
-        match self {
-            SessionAead::Aes(aead) => aead.decrypt_in_place(&nonce_ref, b"", buf),
-            SessionAead::ChaCha(aead) => aead.decrypt_in_place(&nonce_ref, b"", buf),
-        }
-        .map_err(|_| SessionError::AuthenticationFailed)
-    }
-
-    #[inline]
-    fn decrypt(
-        &self,
-        nonce: &[u8; NONCE_SIZE],
-        ciphertext: &[u8],
-    ) -> Result<Vec<u8>, SessionError> {
-        let nonce_ref = GenericArray::<u8, U12>::from(*nonce);
-        match self {
-            SessionAead::Aes(aead) => aead.decrypt(&nonce_ref, ciphertext),
-            SessionAead::ChaCha(aead) => aead.decrypt(&nonce_ref, ciphertext),
-        }
-        .map_err(|_| SessionError::AuthenticationFailed)
-    }
-}
-
 pub fn prederive_session(combined_secret: &[u8], session_info: &[u8]) -> Result<(), SessionError> {
     if combined_secret.is_empty() || session_info.is_empty() {
         return Err(SessionError::BufferTooSmall);
@@ -193,7 +103,8 @@ pub fn prederive_session(combined_secret: &[u8], session_info: &[u8]) -> Result<
 }
 
 pub struct HybridSession {
-    aead: SessionAead,
+    // Direct Aes256Gcm cipher avoids enum tag storage, enum pattern matching, and indirect dispatch on hot packet encryption paths.
+    aead: Aes256Gcm,
     nonce_base: [u8; NONCE_SIZE],
     nonce_xor: u64,
 }
@@ -204,14 +115,16 @@ impl HybridSession {
         if let Some(entry) = HKDF_CACHE.read().get(&cache_key).cloned() {
             let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
             let nonce_xor = existing ^ entry.seq_mask;
+            let aead =
+                Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
             return Ok(Self {
-                aead: SessionAead::new(&entry.key)?,
+                aead,
                 nonce_base: entry.nonce_base,
                 nonce_xor,
             });
         }
         let entry = derive_session_material(combined_secret, session_info)?;
-        let aead = SessionAead::new(&entry.key)?;
+        let aead = Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
         HKDF_CACHE.write().insert(cache_key, entry.clone());
         let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
         let nonce_xor = existing ^ entry.seq_mask;
@@ -244,7 +157,10 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
-        self.aead.encrypt_in_place_buf(&nonce, payload)
+        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
+        self.aead
+            .encrypt_in_place(&nonce_ref, b"", payload)
+            .map_err(|_| SessionError::AuthenticationFailed)
     }
 
     #[inline]
@@ -257,8 +173,9 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
+        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .encrypt_in_place_detached(&nonce, payload)
+            .encrypt_in_place_detached(&nonce_ref, b"", payload)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 
@@ -278,7 +195,10 @@ impl HybridSession {
         dst.clear();
         dst.extend_from_slice(plaintext);
         let nonce = self.build_nonce(seq);
-        self.aead.encrypt_in_place_buf(&nonce, dst)
+        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
+        self.aead
+            .encrypt_in_place(&nonce_ref, b"", dst)
+            .map_err(|_| SessionError::AuthenticationFailed)
     }
 
     /// Decrypts `payload` completely in-place and truncates the authentication tag.
@@ -289,7 +209,10 @@ impl HybridSession {
             return Err(SessionError::CiphertextTooShort);
         }
         let nonce = self.build_nonce(seq);
-        self.aead.decrypt_in_place_buf(&nonce, payload)
+        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
+        self.aead
+            .decrypt_in_place(&nonce_ref, b"", payload)
+            .map_err(|_| SessionError::AuthenticationFailed)
     }
 
     #[inline]
@@ -298,7 +221,10 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
-        self.aead.encrypt(&nonce, plaintext)
+        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
+        self.aead
+            .encrypt(&nonce_ref, plaintext)
+            .map_err(|_| SessionError::AuthenticationFailed)
     }
 
     #[inline]
@@ -307,7 +233,10 @@ impl HybridSession {
             return Err(SessionError::CiphertextTooShort);
         }
         let nonce = self.build_nonce(seq);
-        self.aead.decrypt(&nonce, ciphertext)
+        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
+        self.aead
+            .decrypt(&nonce_ref, ciphertext)
+            .map_err(|_| SessionError::AuthenticationFailed)
     }
 }
 
