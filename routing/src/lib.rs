@@ -185,19 +185,17 @@ impl Table {
     fn simple_cache_index(dest_id: &[u8; 32]) -> usize {
         let ptr = dest_id.as_ptr() as *const u64;
         let val = unsafe { ptr.read_unaligned() };
-        let folded = (val as u32) ^ ((val >> 32) as u32);
-        // Use Knuth's multiplicative hashing on 64-bit folded destination fragment
-        let hash = folded.wrapping_mul(0x9e3779b9);
+        // Direct 64-bit Knuth multiplicative hashing on unaligned 64-bit key eliminates bit-shift and XOR instruction overhead
+        let hash = val.wrapping_mul(0x9e3779b97f4a7c15);
         (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
     #[inline]
     fn spray_cache_index(dest_id: &[u8; 32], flow_label: u32) -> usize {
         let ptr = dest_id.as_ptr() as *const u64;
-        let val = unsafe { ptr.read_unaligned() };
-        let folded = (val as u32) ^ ((val >> 32) as u32) ^ flow_label;
-        // Use Knuth's multiplicative hashing on folded 64-bit dest_id fragment and flow_label
-        let hash = folded.wrapping_mul(0x9e3779b9);
+        let val = unsafe { ptr.read_unaligned() } ^ (flow_label as u64);
+        // Direct 64-bit Knuth multiplicative hashing on unaligned 64-bit key combined with flow_label
+        let hash = val.wrapping_mul(0x9e3779b97f4a7c15);
         (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
