@@ -105,7 +105,7 @@ pub fn prederive_session(combined_secret: &[u8], session_info: &[u8]) -> Result<
 pub struct HybridSession {
     // Direct Aes256Gcm cipher avoids enum tag storage, enum pattern matching, and indirect dispatch on hot packet encryption paths.
     aead: Aes256Gcm,
-    nonce_base: [u8; NONCE_SIZE],
+    nonce_prefix: [u8; 4],
     nonce_xor: u64,
 }
 
@@ -117,9 +117,10 @@ impl HybridSession {
             let nonce_xor = existing ^ entry.seq_mask;
             let aead =
                 Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
+            let nonce_prefix = unsafe { *(entry.nonce_base.as_ptr() as *const [u8; 4]) };
             return Ok(Self {
                 aead,
-                nonce_base: entry.nonce_base,
+                nonce_prefix,
                 nonce_xor,
             });
         }
@@ -128,23 +129,25 @@ impl HybridSession {
         HKDF_CACHE.write().insert(cache_key, entry.clone());
         let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
         let nonce_xor = existing ^ entry.seq_mask;
+        let nonce_prefix = unsafe { *(entry.nonce_base.as_ptr() as *const [u8; 4]) };
         Ok(Self {
             aead,
-            nonce_base: entry.nonce_base,
+            nonce_prefix,
             nonce_xor,
         })
     }
 
     #[inline]
     fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
-        let mut nonce = self.nonce_base;
+        let mut nonce = [0u8; NONCE_SIZE];
         let mixed = self.nonce_xor ^ seq;
-        // Perform a single, unaligned 64-bit big-endian write to indices 4 to 11.
-        // This avoids individual byte assignments and multiple bounds check branches,
-        // allowing LLVM to emit a single register-level store instruction.
+        // Optimization: Write the 4-byte static prefix and 8-byte unaligned u64 sequence/XOR directly.
+        // This avoids copying 12 bytes of nonce_base where 8 bytes were immediately overwritten,
+        // ensuring each byte of the 12-byte nonce array is written exactly once with zero redundant copies.
         unsafe {
-            let ptr = nonce.as_mut_ptr().add(4) as *mut u64;
-            ptr.write_unaligned(mixed.to_be());
+            let ptr = nonce.as_mut_ptr();
+            *(ptr as *mut [u8; 4]) = self.nonce_prefix;
+            (ptr.add(4) as *mut u64).write_unaligned(mixed.to_be());
         }
         nonce
     }
