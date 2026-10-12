@@ -138,12 +138,12 @@ impl HybridSession {
     }
 
     #[inline]
-    fn build_nonce(&self, seq: u64) -> [u8; NONCE_SIZE] {
-        let mut nonce = [0u8; NONCE_SIZE];
+    fn build_nonce(&self, seq: u64) -> GenericArray<u8, U12> {
+        let mut nonce = GenericArray::<u8, U12>::default();
         let mixed = self.nonce_xor ^ seq;
-        // Optimization: Write the 4-byte static prefix and 8-byte unaligned u64 sequence/XOR directly.
-        // This avoids copying 12 bytes of nonce_base where 8 bytes were immediately overwritten,
-        // ensuring each byte of the 12-byte nonce array is written exactly once with zero redundant copies.
+        // Optimization: Write the 4-byte static prefix and 8-byte unaligned u64 sequence/XOR directly
+        // into the GenericArray. Returns GenericArray<u8, U12> directly to eliminate redundant
+        // array-to-GenericArray conversions across all encryption/decryption calls.
         unsafe {
             let ptr = nonce.as_mut_ptr();
             *(ptr as *mut [u8; 4]) = self.nonce_prefix;
@@ -160,9 +160,8 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
-        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .encrypt_in_place(&nonce_ref, b"", payload)
+            .encrypt_in_place(&nonce, b"", payload)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 
@@ -176,9 +175,8 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
-        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .encrypt_in_place_detached(&nonce_ref, b"", payload)
+            .encrypt_in_place_detached(&nonce, b"", payload)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 
@@ -198,9 +196,8 @@ impl HybridSession {
         dst.clear();
         dst.extend_from_slice(plaintext);
         let nonce = self.build_nonce(seq);
-        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .encrypt_in_place(&nonce_ref, b"", dst)
+            .encrypt_in_place(&nonce, b"", dst)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 
@@ -212,9 +209,8 @@ impl HybridSession {
             return Err(SessionError::CiphertextTooShort);
         }
         let nonce = self.build_nonce(seq);
-        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .decrypt_in_place(&nonce_ref, b"", payload)
+            .decrypt_in_place(&nonce, b"", payload)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 
@@ -224,9 +220,8 @@ impl HybridSession {
             return Err(SessionError::PayloadTooLarge);
         }
         let nonce = self.build_nonce(seq);
-        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .encrypt(&nonce_ref, plaintext)
+            .encrypt(&nonce, plaintext)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 
@@ -236,9 +231,8 @@ impl HybridSession {
             return Err(SessionError::CiphertextTooShort);
         }
         let nonce = self.build_nonce(seq);
-        let nonce_ref = GenericArray::<u8, U12>::from(nonce);
         self.aead
-            .decrypt(&nonce_ref, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| SessionError::AuthenticationFailed)
     }
 }
