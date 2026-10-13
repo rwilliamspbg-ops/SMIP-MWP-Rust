@@ -14,7 +14,9 @@ const SESSION_OFFSET: usize = 76;
 const FLAGS_OFFSET: usize = 92;
 const LEN_OFFSET: usize = 94;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Derive Copy on Header: composed entirely of Copy primitive fields ([u8; 32], [u8; 16], u32, u64, u16),
+// allowing fast register-level bitwise copies and passing by-value without explicit .clone() allocation overhead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     pub src_id: [u8; 32],
     pub dst_id: [u8; 32],
