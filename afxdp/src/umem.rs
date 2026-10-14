@@ -13,13 +13,20 @@ pub struct Umem {
     len: usize,
     frame_size: usize,
     frames: AtomicUsize,
+    /// Some only on targets where the region came from the global allocator.
+    layout: Option<std::alloc::Layout>,
 }
 
 impl Umem {
     /// Allocate an anonymous memory region for frames.
+    ///
+    /// On Unix the region is an anonymous `mmap`, which is what a real AF_XDP
+    /// UMEM wants. `mmap` and friends are not available in `libc` on Windows,
+    /// so that target falls back to a plain heap allocation: the frame
+    /// accounting is identical and the crate still compiles and tests, it just
+    /// cannot be wired to a kernel datapath there.
+    #[cfg(unix)]
     pub fn new(len: usize, frame_size: usize) -> Result<Self, UmemError> {
-        // Use a simple anonymous mmap for the frame pool. This is portable and
-        // sufficient for testing and for wiring into a real AF_XDP backing later.
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = libc::MAP_ANONYMOUS | libc::MAP_PRIVATE;
         unsafe {
@@ -30,16 +37,33 @@ impl Umem {
                 ));
             }
             let nn = NonNull::new_unchecked(p as *mut u8);
-            // Compute number of frames available in this UMEM region and store
-            // it in the atomic `frames` counter for use by simple allocators.
             let total_frames = if frame_size == 0 { 0 } else { len / frame_size };
             Ok(Umem {
                 ptr: nn,
                 len,
                 frame_size,
                 frames: AtomicUsize::new(total_frames),
+                layout: None,
             })
         }
+    }
+
+    /// Windows fallback: heap-backed region with the same frame accounting.
+    #[cfg(not(unix))]
+    pub fn new(len: usize, frame_size: usize) -> Result<Self, UmemError> {
+        let layout = std::alloc::Layout::from_size_align(len.max(1), 8)
+            .map_err(|e| UmemError::MmapFailed(e.to_string()))?;
+        // SAFETY: layout has non-zero size and we keep the pointer for Drop.
+        let raw = unsafe { std::alloc::alloc(layout) };
+        let nn = NonNull::new(raw).ok_or_else(|| UmemError::MmapFailed("alloc".into()))?;
+        let total_frames = if frame_size == 0 { 0 } else { len / frame_size };
+        Ok(Umem {
+            ptr: nn,
+            len,
+            frame_size,
+            frames: AtomicUsize::new(total_frames),
+            layout: Some(layout),
+        })
     }
 
     /// Number of frames available (simple counter for demo use)
@@ -75,10 +99,21 @@ impl Umem {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Umem {
     fn drop(&mut self) {
         unsafe {
             libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.len);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for Umem {
+    fn drop(&mut self) {
+        if let Some(layout) = self.layout {
+            // SAFETY: pointer came from alloc with this exact layout.
+            unsafe { std::alloc::dealloc(self.ptr.as_ptr(), layout) };
         }
     }
 }

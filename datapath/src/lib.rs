@@ -1631,8 +1631,45 @@ mod tests {
         });
     }
 
+    // MCR behaviour is configured through process-wide env vars, which cargo
+    // tests share across threads. Serialize the tests that mutate them and
+    // restore the previous values on drop so ordering cannot change results.
+    static MCR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct McrEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        spray: Option<String>,
+        enabled: Option<String>,
+    }
+
+    impl Drop for McrEnvGuard {
+        fn drop(&mut self) {
+            use std::env;
+            match &self.spray {
+                Some(v) => env::set_var("MOHAWK_MCR_SPRAY_MODE", v),
+                None => env::remove_var("MOHAWK_MCR_SPRAY_MODE"),
+            }
+            match &self.enabled {
+                Some(v) => env::set_var("MOHAWK_MCR_ENABLED", v),
+                None => env::remove_var("MOHAWK_MCR_ENABLED"),
+            }
+        }
+    }
+
+    /// Take the MCR env lock and snapshot the vars so Drop can restore them.
+    fn mcr_env_lock() -> McrEnvGuard {
+        use std::env;
+        let lock = MCR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        McrEnvGuard {
+            spray: env::var("MOHAWK_MCR_SPRAY_MODE").ok(),
+            enabled: env::var("MOHAWK_MCR_ENABLED").ok(),
+            _lock: lock,
+        }
+    }
+
     #[test]
     fn mcr_full_spray_duplicates_outputs() {
+        let _guard = mcr_env_lock();
         use std::env;
         env::set_var("MOHAWK_MCR_SPRAY_MODE", "full");
         env::set_var("MOHAWK_MCR_ENABLED", "1");
@@ -1671,6 +1708,7 @@ mod tests {
 
     #[test]
     fn mcr_primary_spray_balances_flows() {
+        let _guard = mcr_env_lock();
         use std::env;
         env::set_var("MOHAWK_MCR_SPRAY_MODE", "primary");
         env::set_var("MOHAWK_MCR_ENABLED", "1");
