@@ -204,8 +204,15 @@ fn workspace_root() -> PathBuf {
 
 #[cfg(test)]
 fn sha256_hex(data: &[u8]) -> String {
+    // The manifest records hashes of LF-normalized content, so normalize
+    // line endings before hashing or a CRLF checkout fails the comparison.
+    let normalized: Vec<u8> = data
+        .iter()
+        .copied()
+        .filter(|b| *b != b'\r')
+        .collect();
     let mut hasher = Sha256::new();
-    hasher.update(data);
+    hasher.update(&normalized);
     format!("{:x}", hasher.finalize())
 }
 
@@ -247,7 +254,7 @@ mod tests {
             serde_json::from_str(&manifest_data).expect("parse manifest");
 
         assert_eq!(manifest.contract, "Mohawk Go-Rust Bridge Contract");
-        assert_eq!(manifest.version, "bridge_contract.manifest.v1");
+        assert_eq!(manifest.version, "bridge_contract.manifest.v2");
 
         let root = workspace_root();
         let schema_data = fs::read(root.join(&manifest.schema.path)).expect("read schema");
