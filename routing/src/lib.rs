@@ -303,44 +303,71 @@ impl Table {
         GLOBAL_TABLE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Return list of channels for spraying for given destination and flow label.
+    /// Fills `buf` with list of channels for spraying for given destination and flow label
+    /// and returns number of written channels.
     /// Each tuple is `(next_hop_id, is_primary)` where primary is first element.
-    /// Optimized: holds the read lock and avoids cloning RouteEntry (which contains a heap-allocated Vec).
-    /// Fast_shards is an all-inclusive hash index of all route entries in `Table`, making fallback to
-    /// main table BTreeMap search redundant on misses.
+    /// Zero heap allocation: writes directly into caller-provided stack slice.
     #[inline]
-    pub fn lookup_spray(&self, dst_id: &[u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
+    pub fn lookup_spray_buf(
+        &self,
+        dst_id: &[u8; 32],
+        flow_label: u32,
+        buf: &mut [([u8; 32], bool)],
+    ) -> usize {
         let h = Self::hash_32(dst_id);
         let shard = Self::shard_for_from_hash(h);
 
         let map = self.fast_shards[shard].read();
         if let Some(e) = map.get(dst_id) {
-            // construct channels vector: primary + alternates
-            let mut out = Vec::with_capacity(1 + e.alternate_channels.len());
-            out.push((e.next_hop_id, true));
-            for ch in &e.alternate_channels {
-                out.push((*ch, false));
+            let total = 1 + e.alternate_channels.len();
+            let count = total.min(buf.len());
+            if count == 0 {
+                return 0;
             }
-            // If there are multiple channels, re-order by hash selection so primary reflects flow affinity.
-            // Bitwise AND avoids dynamic integer division (idiv) instructions when channel count is a power of two.
-            if out.len() > 1 {
-                let choices = out.len();
-                let idx = if choices.is_power_of_two() {
-                    (flow_label as usize) & (choices - 1)
+            if total == 1 {
+                buf[0] = (e.next_hop_id, true);
+                return 1;
+            }
+
+            let choices = total;
+            let idx = if choices.is_power_of_two() {
+                (flow_label as usize) & (choices - 1)
+            } else {
+                (flow_label as usize) % choices
+            };
+
+            // Write primary channel at index 0 (selected by flow affinity)
+            let primary_nh = if idx == 0 {
+                e.next_hop_id
+            } else {
+                e.alternate_channels[idx - 1]
+            };
+            buf[0] = (primary_nh, true);
+
+            // Write remaining non-primary channels in order, replacing position `idx` with `e.next_hop_id`
+            for (i, slot) in buf.iter_mut().enumerate().take(count).skip(1) {
+                let ch_idx = if i == idx { 0 } else { i };
+                let nh = if ch_idx == 0 {
+                    e.next_hop_id
                 } else {
-                    (flow_label as usize) % choices
+                    e.alternate_channels[ch_idx - 1]
                 };
-                if idx != 0 {
-                    out.swap(0, idx);
-                    // O(1) direct update: element swapped to index 0 is now primary, and former primary at idx is no longer primary
-                    out[0].1 = true;
-                    out[idx].1 = false;
-                }
+                *slot = (nh, false);
             }
-            return out;
+            return count;
         }
 
-        Vec::new()
+        0
+    }
+
+    /// Return list of channels for spraying for given destination and flow label.
+    /// Each tuple is `(next_hop_id, is_primary)` where primary is first element.
+    /// Delegates to `lookup_spray_buf` with a 16-element stack buffer.
+    #[inline]
+    pub fn lookup_spray(&self, dst_id: &[u8; 32], flow_label: u32) -> Vec<([u8; 32], bool)> {
+        let mut stack_buf = [([0u8; 32], false); 16];
+        let count = self.lookup_spray_buf(dst_id, flow_label, &mut stack_buf);
+        stack_buf[..count].to_vec()
     }
 
     /// Return the primary next-hop for spray-mode forwarding without
@@ -735,6 +762,55 @@ mod tests {
                     flow_label, ch_idx
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_lookup_spray_buf_matches_lookup_spray() {
+        let t = Table::new();
+        let dest = [100u8; 32];
+        let nh0 = [200u8; 32];
+        let nh1 = [201u8; 32];
+        let nh2 = [202u8; 32];
+        let nh3 = [203u8; 32];
+
+        // 1. Missing route
+        let mut buf = [([0u8; 32], false); 16];
+        assert_eq!(t.lookup_spray_buf(&dest, 0, &mut buf), 0);
+        assert!(t.lookup_spray(&dest, 0).is_empty());
+
+        // 2. Single-channel
+        t.update_route(RouteEntry {
+            dest_id: dest,
+            next_hop_id: nh0,
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 1,
+            alternate_channels: Vec::new(),
+            mcr_epoch: 1,
+        });
+
+        let vec_res = t.lookup_spray(&dest, 12);
+        let n = t.lookup_spray_buf(&dest, 12, &mut buf);
+        assert_eq!(n, vec_res.len());
+        assert_eq!(&buf[..n], vec_res.as_slice());
+
+        // 3. Multi-channel (4 channels) across various flow labels
+        t.update_route(RouteEntry {
+            dest_id: dest,
+            next_hop_id: nh0,
+            metric: 1,
+            last_seen: SystemTime::now(),
+            channel_count: 4,
+            alternate_channels: vec![nh1, nh2, nh3],
+            mcr_epoch: 1,
+        });
+
+        for flow_label in 0..20 {
+            let vec_out = t.lookup_spray(&dest, flow_label);
+            let buf_count = t.lookup_spray_buf(&dest, flow_label, &mut buf);
+            assert_eq!(buf_count, vec_out.len());
+            assert_eq!(&buf[..buf_count], vec_out.as_slice());
         }
     }
 
