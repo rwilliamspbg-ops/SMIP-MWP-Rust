@@ -209,6 +209,7 @@ impl HybridKEX {
 
 /// Derives a deterministic HKDF salt from the handshake transcript so both peers
 /// use identical salt without a separate round-trip.
+#[inline]
 fn build_transcript(
     x25519_init_pub: &[u8],
     x25519_resp_pub: &[u8],
@@ -225,6 +226,7 @@ fn build_transcript(
 }
 
 /// Two-stage HKDF combiner producing a 64-byte session secret.
+#[inline]
 fn derive_session_secret(
     x25519_ss: &[u8],
     mlkem_ss: &[u8],

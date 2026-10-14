@@ -5,7 +5,7 @@ use rand::{Rng, SeedableRng};
 use routing::{RouteEntry, Table};
 use std::env;
 use std::time::{Instant, SystemTime};
-use wire::{Header, HEADER_SIZE};
+use wire::{Header, HeaderView, HEADER_SIZE};
 
 const TAG_SIZE: usize = 16;
 
@@ -109,16 +109,9 @@ fn build_packet_template(payload_len: usize) -> Vec<u8> {
 }
 
 fn set_packet_seq(packet: &mut [u8], seq: u64) {
-    let header = Header {
-        src_id: [1u8; 32],
-        dst_id: [2u8; 32],
-        flow_label: 7,
-        seq_num: seq,
-        session_id: [0u8; 16],
-        flags: 0,
-        length: (packet.len().saturating_sub(HEADER_SIZE + TAG_SIZE)) as u16,
-    };
-    header.marshal_into(packet).expect("marshal header");
+    if let Ok(mut view) = HeaderView::view(packet) {
+        view.set_seq_num(seq);
+    }
 }
 
 fn inject_byzantine_noise(

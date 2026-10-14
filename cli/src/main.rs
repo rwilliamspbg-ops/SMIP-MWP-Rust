@@ -563,38 +563,48 @@ fn main() {
     }
 
     if let Some(ref sock) = metrics_socket {
-        // Spawn a unix-domain socket listener that returns current cumulative counter
         let sock_path = sock.clone();
         thread::spawn(move || {
-            use std::os::unix::net::UnixListener;
-            if std::path::Path::new(&sock_path).exists() {
-                let _ = std::fs::remove_file(&sock_path);
-            }
-            let listener = match UnixListener::bind(&sock_path) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("metrics socket bind: {}", e);
-                    return;
+            // AF_XDP metrics over a Unix-domain socket is a Linux-only path;
+            // `std::os::unix` does not exist on Windows, so skip it there
+            // rather than failing to compile.
+            #[cfg(unix)]
+            {
+                use std::os::unix::net::UnixListener;
+                if std::path::Path::new(&sock_path).exists() {
+                    let _ = std::fs::remove_file(&sock_path);
                 }
-            };
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(mut s) => {
-                        let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        let msg = format!(
-                            "{{\"timestamp\":{},\"packets_processed\":{}}}\n",
-                            now, count
-                        );
-                        let _ = s.write_all(msg.as_bytes());
-                    }
+                let listener = match UnixListener::bind(&sock_path) {
+                    Ok(l) => l,
                     Err(e) => {
-                        eprintln!("metrics socket accept: {}", e);
+                        eprintln!("metrics socket bind: {}", e);
+                        return;
+                    }
+                };
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(mut s) => {
+                            let count = datapath::PACKETS_PROCESSED.load(Ordering::Relaxed);
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let msg = format!(
+                                "{{\"timestamp\":{},\"packets_processed\":{}}}\n",
+                                now, count
+                            );
+                            let _ = s.write_all(msg.as_bytes());
+                        }
+                        Err(e) => {
+                            eprintln!("metrics socket accept: {}", e);
+                        }
                     }
                 }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &sock_path;
+                eprintln!("metrics socket: unsupported on this platform");
             }
         });
     }

@@ -19,6 +19,7 @@ pub const DEFAULT_SECURITY_CONFIG: SecurityConfig = SecurityConfig {
     rate_limit_per_sec: 10_000_000,
 };
 
+#[inline]
 pub fn check_sequence_number_overflow(seq: u64, max_seq: u64) -> bool {
     if max_seq == 0 {
         return false;
@@ -26,8 +27,13 @@ pub fn check_sequence_number_overflow(seq: u64, max_seq: u64) -> bool {
     seq >= max_seq
 }
 
+/// Increments the global sequence counter using `Ordering::Relaxed`.
+/// `Ordering::Relaxed` provides atomic increment and uniqueness without forcing
+/// hardware sequentially-consistent memory fences (`SeqCst`), reducing CPU overhead
+/// in high-throughput network datapath loops.
+#[inline]
 pub fn increment_global_seq() -> u64 {
-    GLOBAL_SEQ_COUNTER.fetch_add(1, Ordering::SeqCst) + 1
+    GLOBAL_SEQ_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 #[derive(Debug)]
@@ -48,6 +54,7 @@ impl DoSThrottle {
         }
     }
 
+    #[inline]
     pub fn allow_packet(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -99,6 +106,7 @@ impl HybridKEXState {
         }
     }
 
+    #[inline]
     pub fn check_timeout(&mut self) -> Result<(), String> {
         if !self.handshake_done && SystemTime::now() > self.timeout {
             return Err(format!(
@@ -112,6 +120,7 @@ impl HybridKEXState {
         Ok(())
     }
 
+    #[inline]
     pub fn increment_seq_counter(&mut self) -> Result<u64, String> {
         self.seq_counter = self.seq_counter.saturating_add(1);
         let seq = self.seq_counter;
@@ -160,6 +169,7 @@ impl HybridKEXState {
         Ok(seq)
     }
 
+    #[inline]
     pub fn check_retries(&mut self) -> Result<(), String> {
         if self.retry_count >= 3 {
             return Err(format!(
@@ -171,10 +181,12 @@ impl HybridKEXState {
         Ok(())
     }
 
+    #[inline]
     pub fn reset_retry(&mut self) {
         self.retry_count = 0;
     }
 
+    #[inline]
     pub fn cleanup(&mut self) {
         self.kex_started = SystemTime::UNIX_EPOCH;
         self.timeout = SystemTime::UNIX_EPOCH;

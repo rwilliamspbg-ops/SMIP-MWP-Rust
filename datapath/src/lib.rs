@@ -105,6 +105,7 @@ impl AlignedBuffer {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
@@ -907,11 +908,10 @@ impl Forwarder {
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
                         self.arena.reserve(needed);
 
-                        self.arena.extend_from_slice(&pkt[..HEADER_SIZE]);
-                        // Overwrite next_hop field directly in the arena using raw pointer assignment
                         unsafe {
-                            *(self.arena.as_mut_slice().as_mut_ptr().add(start + 32)
-                                as *mut [u8; 32]) = next_hop;
+                            self.arena.extend_from_slice_unchecked(&pkt[..HEADER_SIZE]);
+                            // Overwrite next_hop field directly in the arena using raw pointer assignment
+                            *(self.arena.as_mut_ptr().add(start + 32) as *mut [u8; 32]) = next_hop;
                         }
 
                         if payload_len > 0 {
@@ -980,7 +980,11 @@ impl Forwarder {
                     let payload_len = h.length() as usize;
 
                     metrics.lookup_calls += 1;
-                    let channels = self.routes.lookup_spray(dst_id, flow_label);
+                    let mut channels_buf = [([0u8; 32], false); 16];
+                    let ch_count =
+                        self.routes
+                            .lookup_spray_buf(dst_id, flow_label, &mut channels_buf);
+                    let channels = &channels_buf[..ch_count];
                     if channels.is_empty() {
                         let start = self.arena.len();
 
@@ -1074,7 +1078,7 @@ impl Forwarder {
                     }
                     metrics.lookup_hits += 1;
 
-                    for (nh, _is_primary) in channels {
+                    for &(nh, _is_primary) in channels {
                         let start = self.arena.len();
 
                         let route_exists = self
@@ -1176,7 +1180,9 @@ impl Forwarder {
                     }
                 } else {
                     let start = self.arena.len();
-                    self.arena.extend_from_slice(&pkt);
+                    unsafe {
+                        self.arena.extend_from_slice_unchecked(&pkt);
+                    }
                     let len = self.arena.len() - start;
                     self.offsets.push((start, len));
                     stats.forwarded += 1;
@@ -1219,28 +1225,33 @@ impl Forwarder {
                     let dst_id = *h.dst_id();
                     let flow_label = h.flow_label();
 
-                    let channels = self.routes.lookup_spray(&dst_id, flow_label);
+                    let mut channels_buf = [([0u8; 32], false); 16];
+                    let ch_count =
+                        self.routes
+                            .lookup_spray_buf(&dst_id, flow_label, &mut channels_buf);
+                    let channels = &channels_buf[..ch_count];
                     if channels.is_empty() {
                         duplicated.push((pkt, dst_id));
                         continue;
                     }
 
-                    let mut channels = channels;
-                    if let Some((last_nh, _)) = channels.pop() {
-                        for (nh, _is_primary) in channels {
+                    for (i, &(nh, _is_primary)) in channels.iter().enumerate() {
+                        if i < ch_count - 1 {
                             let mut modified = pkt.clone();
                             // Overwrite next_hop field using raw pointer assignment
                             unsafe {
                                 *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
                             }
                             duplicated.push((modified, dst_id));
+                        } else {
+                            let mut modified = pkt;
+                            // Overwrite next_hop field using raw pointer assignment
+                            unsafe {
+                                *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
+                            }
+                            duplicated.push((modified, dst_id));
+                            break;
                         }
-                        let mut modified = pkt;
-                        // Overwrite next_hop field using raw pointer assignment
-                        unsafe {
-                            *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = last_nh;
-                        }
-                        duplicated.push((modified, dst_id));
                     }
                 } else {
                     duplicated.push((pkt, [0u8; 32]));
@@ -1393,20 +1404,26 @@ impl Forwarder {
 }
 
 pub mod socket {
+    /// Pre-allocated receive ring backing `process_batch_slices`.
+    ///
+    /// Slots live in one flat `Vec<u8>` addressed by stride rather than a
+    /// `Vec<Vec<u8>>`, so `slot()`/`slot_mut()` are an offset calculation into
+    /// contiguous memory instead of a pointer chase through a per-slot heap
+    /// allocation. The RX loop touches every slot in sequence, which makes the
+    /// cache behaviour of this layout the difference between one cache line per
+    /// packet and one per ring.
     pub struct SliceRing {
-        slots: Vec<Vec<u8>>,
+        backing: Vec<u8>,
+        slot_size: usize,
         lens: Vec<usize>,
         pub active: Vec<usize>,
     }
 
     impl SliceRing {
         pub fn new(slot_count: usize, slot_size: usize) -> Self {
-            let mut slots = Vec::with_capacity(slot_count);
-            for _ in 0..slot_count {
-                slots.push(vec![0u8; slot_size]);
-            }
             Self {
-                slots,
+                backing: vec![0u8; slot_count * slot_size],
+                slot_size,
                 lens: vec![0; slot_count],
                 active: Vec::with_capacity(slot_count),
             }
@@ -1418,20 +1435,27 @@ pub mod socket {
 
         pub fn claim(&self) -> usize {
             let idx = self.active.len();
-            assert!(idx < self.slots.len(), "SliceRing exhausted");
+            assert!(idx < self.lens.len(), "SliceRing exhausted");
             idx
         }
 
         pub fn slot_mut(&mut self, idx: usize) -> &mut [u8] {
-            self.slots[idx].as_mut_slice()
+            let start = idx * self.slot_size;
+            &mut self.backing[start..start + self.slot_size]
         }
 
         pub fn set_len(&mut self, idx: usize, len: usize) {
-            self.lens[idx] = len.min(self.slots[idx].len());
+            self.lens[idx] = len.min(self.slot_size);
         }
 
         pub fn slot(&self, idx: usize) -> &[u8] {
-            &self.slots[idx][..self.lens[idx]]
+            let start = idx * self.slot_size;
+            &self.backing[start..start + self.lens[idx]]
+        }
+
+        /// Number of slots the ring can hold.
+        pub fn capacity(&self) -> usize {
+            self.lens.len()
         }
     }
 
@@ -1620,8 +1644,45 @@ mod tests {
         });
     }
 
+    // MCR behaviour is configured through process-wide env vars, which cargo
+    // tests share across threads. Serialize the tests that mutate them and
+    // restore the previous values on drop so ordering cannot change results.
+    static MCR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct McrEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        spray: Option<String>,
+        enabled: Option<String>,
+    }
+
+    impl Drop for McrEnvGuard {
+        fn drop(&mut self) {
+            use std::env;
+            match &self.spray {
+                Some(v) => env::set_var("MOHAWK_MCR_SPRAY_MODE", v),
+                None => env::remove_var("MOHAWK_MCR_SPRAY_MODE"),
+            }
+            match &self.enabled {
+                Some(v) => env::set_var("MOHAWK_MCR_ENABLED", v),
+                None => env::remove_var("MOHAWK_MCR_ENABLED"),
+            }
+        }
+    }
+
+    /// Take the MCR env lock and snapshot the vars so Drop can restore them.
+    fn mcr_env_lock() -> McrEnvGuard {
+        use std::env;
+        let lock = MCR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        McrEnvGuard {
+            spray: env::var("MOHAWK_MCR_SPRAY_MODE").ok(),
+            enabled: env::var("MOHAWK_MCR_ENABLED").ok(),
+            _lock: lock,
+        }
+    }
+
     #[test]
     fn mcr_full_spray_duplicates_outputs() {
+        let _guard = mcr_env_lock();
         use std::env;
         env::set_var("MOHAWK_MCR_SPRAY_MODE", "full");
         env::set_var("MOHAWK_MCR_ENABLED", "1");
@@ -1660,6 +1721,7 @@ mod tests {
 
     #[test]
     fn mcr_primary_spray_balances_flows() {
+        let _guard = mcr_env_lock();
         use std::env;
         env::set_var("MOHAWK_MCR_SPRAY_MODE", "primary");
         env::set_var("MOHAWK_MCR_ENABLED", "1");
