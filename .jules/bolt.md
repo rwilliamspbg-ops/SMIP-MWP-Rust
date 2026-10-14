@@ -143,3 +143,7 @@
 ## 2026-06-23 - [Bitmasking Power-of-Two Channel Counts in Spray Routing]
 **Learning:** Dynamic integer modulo (`flow_label % choices`) on multi-channel spray forwarding hot paths emits a multi-cycle `idiv` instruction. When channel count `choices` is a power of two (the predominant case in multi-path networking), calculating the channel index via bitwise AND `(flow_label as usize) & (choices - 1)` eliminates integer division latency entirely.
 **Action:** Always check `choices.is_power_of_two()` before using `% choices` on hot packet forwarding paths.
+
+## 2026-06-24 - [Zero-Allocation Stack Buffer Queries for Multi-Channel Spray Forwarding]
+**Learning:** Returning a heap-allocated `Vec<([u8; 32], bool)>` from `lookup_spray` forces dynamic memory allocation and deallocation on every packet during full-spray forwarding loops. Providing a buffer-filling method `lookup_spray_buf(&self, dst_id, flow_label, buf: &mut [([u8; 32], bool)])` allows hot forwarding loops to resolve multi-channel spray routes directly into fixed stack-allocated buffers (`[([u8; 32], bool); 16]`), completely eliminating per-packet heap allocations.
+**Action:** Provide `_buf` slice-writing variants for hot routing lookups returning collection types so callers can reuse stack buffers without allocating heap vectors on every packet.

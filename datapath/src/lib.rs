@@ -980,7 +980,11 @@ impl Forwarder {
                     let payload_len = h.length() as usize;
 
                     metrics.lookup_calls += 1;
-                    let channels = self.routes.lookup_spray(dst_id, flow_label);
+                    let mut channels_buf = [([0u8; 32], false); 16];
+                    let ch_count =
+                        self.routes
+                            .lookup_spray_buf(dst_id, flow_label, &mut channels_buf);
+                    let channels = &channels_buf[..ch_count];
                     if channels.is_empty() {
                         let start = self.arena.len();
 
@@ -1074,7 +1078,7 @@ impl Forwarder {
                     }
                     metrics.lookup_hits += 1;
 
-                    for (nh, _is_primary) in channels {
+                    for &(nh, _is_primary) in channels {
                         let start = self.arena.len();
 
                         let route_exists = self
@@ -1221,28 +1225,33 @@ impl Forwarder {
                     let dst_id = *h.dst_id();
                     let flow_label = h.flow_label();
 
-                    let channels = self.routes.lookup_spray(&dst_id, flow_label);
+                    let mut channels_buf = [([0u8; 32], false); 16];
+                    let ch_count =
+                        self.routes
+                            .lookup_spray_buf(&dst_id, flow_label, &mut channels_buf);
+                    let channels = &channels_buf[..ch_count];
                     if channels.is_empty() {
                         duplicated.push((pkt, dst_id));
                         continue;
                     }
 
-                    let mut channels = channels;
-                    if let Some((last_nh, _)) = channels.pop() {
-                        for (nh, _is_primary) in channels {
+                    for (i, &(nh, _is_primary)) in channels.iter().enumerate() {
+                        if i < ch_count - 1 {
                             let mut modified = pkt.clone();
                             // Overwrite next_hop field using raw pointer assignment
                             unsafe {
                                 *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
                             }
                             duplicated.push((modified, dst_id));
+                        } else {
+                            let mut modified = pkt;
+                            // Overwrite next_hop field using raw pointer assignment
+                            unsafe {
+                                *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
+                            }
+                            duplicated.push((modified, dst_id));
+                            break;
                         }
-                        let mut modified = pkt;
-                        // Overwrite next_hop field using raw pointer assignment
-                        unsafe {
-                            *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = last_nh;
-                        }
-                        duplicated.push((modified, dst_id));
                     }
                 } else {
                     duplicated.push((pkt, [0u8; 32]));
