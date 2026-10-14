@@ -1404,20 +1404,26 @@ impl Forwarder {
 }
 
 pub mod socket {
+    /// Pre-allocated receive ring backing `process_batch_slices`.
+    ///
+    /// Slots live in one flat `Vec<u8>` addressed by stride rather than a
+    /// `Vec<Vec<u8>>`, so `slot()`/`slot_mut()` are an offset calculation into
+    /// contiguous memory instead of a pointer chase through a per-slot heap
+    /// allocation. The RX loop touches every slot in sequence, which makes the
+    /// cache behaviour of this layout the difference between one cache line per
+    /// packet and one per ring.
     pub struct SliceRing {
-        slots: Vec<Vec<u8>>,
+        backing: Vec<u8>,
+        slot_size: usize,
         lens: Vec<usize>,
         pub active: Vec<usize>,
     }
 
     impl SliceRing {
         pub fn new(slot_count: usize, slot_size: usize) -> Self {
-            let mut slots = Vec::with_capacity(slot_count);
-            for _ in 0..slot_count {
-                slots.push(vec![0u8; slot_size]);
-            }
             Self {
-                slots,
+                backing: vec![0u8; slot_count * slot_size],
+                slot_size,
                 lens: vec![0; slot_count],
                 active: Vec::with_capacity(slot_count),
             }
@@ -1429,20 +1435,27 @@ pub mod socket {
 
         pub fn claim(&self) -> usize {
             let idx = self.active.len();
-            assert!(idx < self.slots.len(), "SliceRing exhausted");
+            assert!(idx < self.lens.len(), "SliceRing exhausted");
             idx
         }
 
         pub fn slot_mut(&mut self, idx: usize) -> &mut [u8] {
-            self.slots[idx].as_mut_slice()
+            let start = idx * self.slot_size;
+            &mut self.backing[start..start + self.slot_size]
         }
 
         pub fn set_len(&mut self, idx: usize, len: usize) {
-            self.lens[idx] = len.min(self.slots[idx].len());
+            self.lens[idx] = len.min(self.slot_size);
         }
 
         pub fn slot(&self, idx: usize) -> &[u8] {
-            &self.slots[idx][..self.lens[idx]]
+            let start = idx * self.slot_size;
+            &self.backing[start..start + self.lens[idx]]
+        }
+
+        /// Number of slots the ring can hold.
+        pub fn capacity(&self) -> usize {
+            self.lens.len()
         }
     }
 
