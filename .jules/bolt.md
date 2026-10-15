@@ -147,3 +147,7 @@
 ## 2026-06-24 - [Avoid Unnecessary Unsafe Raw Pointer Reads on Non-Hot Path Arrays]
 **Learning:** Replacing safe, idiomatic Rust slice/array operations (like `u64::from_be_bytes`) with `unsafe` unaligned pointer arithmetic on non-hot-path initialization functions adds potential memory safety hazards without measurable performance gains, as LLVM already optimizes fixed-size array byte conversions into single-instruction loads.
 **Action:** Preserve safe, idiomatic Rust conversions for non-hot-path code and reserve `unsafe` unaligned loads strictly for profiling-proven, critical packet forwarding loops.
+
+## 2026-06-25 - [Eliminate Unused Tuple Fields in Parallel Batch Vectors]
+**Learning:** Storing unused tuple fields (such as `(Vec<u8>, [u8; 32])` where `[u8; 32]` is immediately discarded in parallel processing closures) inflates vector element size and incurs redundant 32-byte stack/register copies for every frame in high-throughput batching loops.
+**Action:** Ensure parallel processing vectors only hold necessary payloads (`Vec<Vec<u8>>`) and pass borrowed references directly to lookup methods.
