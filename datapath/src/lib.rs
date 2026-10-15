@@ -1217,21 +1217,20 @@ impl Forwarder {
             return stats;
         } else {
             // Parallel path keeps the existing duplication behavior because one
-            // input packet can expand to multiple outputs.
-            let mut duplicated: Vec<(Vec<u8>, [u8; 32])> =
-                Vec::with_capacity(received * spray_multiplier);
+            // input packet can expand to multiple outputs. Storing raw Vec<u8> directly
+            // avoids allocating and copying an unneeded 32-byte dst_id per duplicated frame.
+            let mut duplicated: Vec<Vec<u8>> = Vec::with_capacity(received * spray_multiplier);
             for pkt in frames {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
-                    let dst_id = *h.dst_id();
                     let flow_label = h.flow_label();
 
                     let mut channels_buf = [([0u8; 32], false); 16];
                     let ch_count =
                         self.routes
-                            .lookup_spray_buf(&dst_id, flow_label, &mut channels_buf);
+                            .lookup_spray_buf(h.dst_id(), flow_label, &mut channels_buf);
                     let channels = &channels_buf[..ch_count];
                     if channels.is_empty() {
-                        duplicated.push((pkt, dst_id));
+                        duplicated.push(pkt);
                         continue;
                     }
 
@@ -1242,19 +1241,19 @@ impl Forwarder {
                             unsafe {
                                 *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
                             }
-                            duplicated.push((modified, dst_id));
+                            duplicated.push(modified);
                         } else {
                             let mut modified = pkt;
                             // Overwrite next_hop field using raw pointer assignment
                             unsafe {
                                 *(modified.as_mut_ptr().add(32) as *mut [u8; 32]) = nh;
                             }
-                            duplicated.push((modified, dst_id));
+                            duplicated.push(modified);
                             break;
                         }
                     }
                 } else {
-                    duplicated.push((pkt, [0u8; 32]));
+                    duplicated.push(pkt);
                 }
             }
             // Parallel path: process packets in parallel but return owned
@@ -1264,7 +1263,7 @@ impl Forwarder {
             let profile_enabled = self.profile_enabled;
             let outputs: Vec<(Vec<u8>, bool, bool, u64)> = duplicated
                 .into_par_iter()
-                .map(|(pkt, _)| {
+                .map(|pkt| {
                     Self::process_packet_owned_consuming(
                         pkt,
                         routes_ref,
