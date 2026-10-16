@@ -818,8 +818,6 @@ impl Forwarder {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id = h.dst_id();
                     let flow_label = h.flow_label();
-                    let seq_num = h.seq_num();
-                    let payload_len = h.length() as usize;
 
                     metrics.lookup_calls += 1;
                     let next_hop = match self.routes.lookup_spray_primary(dst_id, flow_label) {
@@ -839,6 +837,11 @@ impl Forwarder {
                             continue;
                         }
                     };
+
+                    // Optimization: Extract seq_num and payload_len only after route hit is confirmed above
+                    // (the None arm continues early), avoiding unaligned reads and endianness swaps on route misses.
+                    let seq_num = h.seq_num();
+                    let payload_len = h.length() as usize;
 
                     let start = self.arena.len();
                     let mut was_encrypted = false;
@@ -976,8 +979,6 @@ impl Forwarder {
                 if let Ok(h) = HeaderViewRef::new(&pkt) {
                     let dst_id = h.dst_id();
                     let flow_label = h.flow_label();
-                    let seq_num = h.seq_num();
-                    let payload_len = h.length() as usize;
 
                     metrics.lookup_calls += 1;
                     let mut channels_buf = [([0u8; 32], false); 16];
@@ -998,6 +999,8 @@ impl Forwarder {
 
                         if route_exists {
                             metrics.lookup_hits += 1;
+                            let seq_num = h.seq_num();
+                            let payload_len = h.length() as usize;
                             if let Some(session) = session_ref {
                                 if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                                     unsafe {
@@ -1077,6 +1080,8 @@ impl Forwarder {
                         continue;
                     }
                     metrics.lookup_hits += 1;
+                    let seq_num = h.seq_num();
+                    let payload_len = h.length() as usize;
 
                     for &(nh, _is_primary) in channels {
                         let start = self.arena.len();
