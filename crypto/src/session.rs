@@ -139,17 +139,16 @@ impl HybridSession {
 
     #[inline]
     fn build_nonce(&self, seq: u64) -> GenericArray<u8, U12> {
-        let mut nonce = GenericArray::<u8, U12>::default();
+        let mut nonce = std::mem::MaybeUninit::<GenericArray<u8, U12>>::uninit();
         let mixed = self.nonce_xor ^ seq;
         // Optimization: Write the 4-byte static prefix and 8-byte unaligned u64 sequence/XOR directly
-        // into the GenericArray. Returns GenericArray<u8, U12> directly to eliminate redundant
-        // array-to-GenericArray conversions across all encryption/decryption calls.
+        // into uninitialized GenericArray storage to avoid zeroing memory before overwriting it.
         unsafe {
-            let ptr = nonce.as_mut_ptr();
+            let ptr = nonce.as_mut_ptr() as *mut u8;
             *(ptr as *mut [u8; 4]) = self.nonce_prefix;
             (ptr.add(4) as *mut u64).write_unaligned(mixed.to_be());
+            nonce.assume_init()
         }
-        nonce
     }
 
     /// Encrypts `payload` completely in-place, appending the authentication tag.
