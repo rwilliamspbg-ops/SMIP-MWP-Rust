@@ -151,3 +151,7 @@
 ## 2026-06-25 - [Eliminate Unused Tuple Fields in Parallel Batch Vectors]
 **Learning:** Storing unused tuple fields (such as `(Vec<u8>, [u8; 32])` where `[u8; 32]` is immediately discarded in parallel processing closures) inflates vector element size and incurs redundant 32-byte stack/register copies for every frame in high-throughput batching loops.
 **Action:** Ensure parallel processing vectors only hold necessary payloads (`Vec<Vec<u8>>`) and pass borrowed references directly to lookup methods.
+
+## 2026-06-26 - [Uninitialized GenericArray Allocation for Nonce Construction]
+**Learning:** Initializing fixed-size wrapper structs like `GenericArray::<u8, U12>::default()` before writing unaligned scalar fields emits redundant zero-fill instructions (`memset`/zero-stores). Constructing the storage via `std::mem::MaybeUninit` and filling every byte directly before `assume_init()` completely eliminates zero-fill overhead on hot symmetric encryption/decryption paths.
+**Action:** Use `std::mem::MaybeUninit` when constructing fixed-size array wrappers whose fields are fully initialized by subsequent unaligned stores.
