@@ -206,11 +206,7 @@ fn workspace_root() -> PathBuf {
 fn sha256_hex(data: &[u8]) -> String {
     // The manifest records hashes of LF-normalized content, so normalize
     // line endings before hashing or a CRLF checkout fails the comparison.
-    let normalized: Vec<u8> = data
-        .iter()
-        .copied()
-        .filter(|b| *b != b'\r')
-        .collect();
+    let normalized: Vec<u8> = data.iter().copied().filter(|b| *b != b'\r').collect();
     let mut hasher = Sha256::new();
     hasher.update(&normalized);
     format!("{:x}", hasher.finalize())

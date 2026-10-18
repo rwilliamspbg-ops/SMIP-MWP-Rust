@@ -367,8 +367,6 @@ impl Forwarder {
         if let Ok(h) = HeaderViewRef::new(pkt) {
             let dst_id = h.dst_id();
             let flow_label = h.flow_label();
-            let seq_num = h.seq_num();
-            let payload_len = h.length() as usize;
 
             metrics.lookup_calls += 1;
             // Optimization: Attempt fast exact route lookup first; on miss, invoke predictive
@@ -394,6 +392,11 @@ impl Forwarder {
 
             if is_hit {
                 if let Some(session) = self.session.as_ref() {
+                    // Optimization: Extract seq_num and payload_len only after route hit is confirmed above,
+                    // avoiding unaligned scalar reads and endianness swaps on route misses.
+                    let seq_num = h.seq_num();
+                    let payload_len = h.length() as usize;
+
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let start = self.arena.len();
                         let needed = HEADER_SIZE + payload_len + TAG_SIZE;
@@ -463,14 +466,16 @@ impl Forwarder {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
             let dst_id = h.dst_id();
             let flow_label = h.flow_label();
-            let seq_num = h.seq_num();
-            let payload_len = h.length() as usize;
 
             // measure encrypt under caller's profiler by timing around call sites
             if routes
                 .lookup_or_predict(h.src_id(), dst_id, flow_label)
                 .is_some()
             {
+                // Optimization: Defer seq_num and payload_len extraction until after route hit is confirmed
+                let seq_num = h.seq_num();
+                let payload_len = h.length() as usize;
+
                 let enc_start = if profile_enabled {
                     Some(std::time::Instant::now())
                 } else {
@@ -512,13 +517,14 @@ impl Forwarder {
         if let Ok(h) = HeaderViewRef::new(&pkt) {
             let dst_id = h.dst_id();
             let flow_label = h.flow_label();
-            let seq_num = h.seq_num();
-            let payload_len = h.length() as usize;
 
             if routes
                 .lookup_or_predict(h.src_id(), dst_id, flow_label)
                 .is_some()
             {
+                // Optimization: Defer seq_num and payload_len extraction until after route hit is confirmed
+                let seq_num = h.seq_num();
+                let payload_len = h.length() as usize;
                 let enc_start = if profile_enabled {
                     Some(std::time::Instant::now())
                 } else {
