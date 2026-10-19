@@ -345,13 +345,9 @@ impl Table {
             buf[0] = (primary_nh, true);
 
             // Write remaining non-primary channels in order, replacing position `idx` with `e.next_hop_id`
+            let alt = e.alternate_channels.as_slice();
             for (i, slot) in buf.iter_mut().enumerate().take(count).skip(1) {
-                let ch_idx = if i == idx { 0 } else { i };
-                let nh = if ch_idx == 0 {
-                    e.next_hop_id
-                } else {
-                    e.alternate_channels[ch_idx - 1]
-                };
+                let nh = if i == idx { e.next_hop_id } else { alt[i - 1] };
                 *slot = (nh, false);
             }
             return count;

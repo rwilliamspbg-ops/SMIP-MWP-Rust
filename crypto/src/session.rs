@@ -8,7 +8,6 @@ use ahash::{AHashMap, AHasher};
 use hkdf::Hkdf;
 use parking_lot::RwLock;
 use sha2::Sha256;
-use std::convert::TryInto;
 use std::hash::Hasher;
 use thiserror::Error;
 
@@ -113,11 +112,12 @@ impl HybridSession {
     pub fn new(combined_secret: &[u8], session_info: &[u8]) -> Result<Self, SessionError> {
         let cache_key = derive_cache_key(combined_secret, session_info);
         if let Some(entry) = HKDF_CACHE.read().get(&cache_key).cloned() {
-            let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
+            let existing =
+                u64::from_be_bytes(*<&[u8; 8]>::try_from(&entry.nonce_base[4..12]).unwrap());
             let nonce_xor = existing ^ entry.seq_mask;
             let aead =
                 Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
-            let nonce_prefix = unsafe { *(entry.nonce_base.as_ptr() as *const [u8; 4]) };
+            let nonce_prefix = *<&[u8; 4]>::try_from(&entry.nonce_base[..4]).unwrap();
             return Ok(Self {
                 aead,
                 nonce_prefix,
@@ -127,9 +127,9 @@ impl HybridSession {
         let entry = derive_session_material(combined_secret, session_info)?;
         let aead = Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
         HKDF_CACHE.write().insert(cache_key, entry.clone());
-        let existing = u64::from_be_bytes(entry.nonce_base[4..12].try_into().unwrap());
+        let existing = u64::from_be_bytes(*<&[u8; 8]>::try_from(&entry.nonce_base[4..12]).unwrap());
         let nonce_xor = existing ^ entry.seq_mask;
-        let nonce_prefix = unsafe { *(entry.nonce_base.as_ptr() as *const [u8; 4]) };
+        let nonce_prefix = *<&[u8; 4]>::try_from(&entry.nonce_base[..4]).unwrap();
         Ok(Self {
             aead,
             nonce_prefix,
