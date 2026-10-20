@@ -155,3 +155,7 @@
 ## 2026-06-26 - [Uninitialized GenericArray Allocation for Nonce Construction]
 **Learning:** Initializing fixed-size wrapper structs like `GenericArray::<u8, U12>::default()` before writing unaligned scalar fields emits redundant zero-fill instructions (`memset`/zero-stores). Constructing the storage via `std::mem::MaybeUninit` and filling every byte directly before `assume_init()` completely eliminates zero-fill overhead on hot symmetric encryption/decryption paths.
 **Action:** Use `std::mem::MaybeUninit` when constructing fixed-size array wrappers whose fields are fully initialized by subsequent unaligned stores.
+
+## 2026-06-27 - [Single TLS Access Closure Scope for Thread-Local Routing Caches]
+**Learning:** Performing thread-local cache check, shard map fallback query, and cache update in separate statements causes `THREAD_CACHE.with` / `SPRAY_CACHE.with` to execute twice on cache misses. Each `.with` invocation emits TLS address resolution instructions (`__tls_get_addr` or thread pointer offset computation) and closure call overhead. Wrapping the cache miss lookup and cache store inside the single `.with` closure scope allows updating the cache in-place with zero additional TLS resolution overhead.
+**Action:** Perform thread-local cache lookup, fallback query, and cache update inside a single `.with(|c| ...)` scope when handling cache misses.
