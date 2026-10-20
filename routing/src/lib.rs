@@ -206,15 +206,6 @@ impl Table {
         folded & (HOT_CACHE_SIZE - 1)
     }
 
-    fn cache_hot_entry_with_idx(idx: usize, cur_epoch: u64, dest_id: [u8; 32], next_hop: [u8; 32]) {
-        THREAD_CACHE.with(|c| {
-            let cache = unsafe { &mut *c.get() };
-            cache.epochs[idx] = cur_epoch;
-            cache.dest_ids[idx] = dest_id;
-            cache.next_hops[idx] = next_hop;
-        });
-    }
-
     /// Increment per-channel forwarded counter for `dest_id` and `next_hop`.
     pub fn inc_channel_forwarded(&self, dest_id: [u8; 32], next_hop: [u8; 32]) {
         let mut stats = self.mcr_channel_stats.write();
@@ -377,30 +368,23 @@ impl Table {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
         let cache_idx = Self::spray_cache_index(dst_id, flow_label);
 
-        if let Some(v) = SPRAY_CACHE.with(|c| {
-            let cache = unsafe { &*c.get() };
+        SPRAY_CACHE.with(|c| {
+            let cache = unsafe { &mut *c.get() };
             // Checking 4-byte scalar flow_label before 32-byte dest_id allows short-circuiting
             // early on flow label misses, completely bypassing 32-byte array equality comparisons.
             if cache.epochs[cache_idx] == cur_epoch
                 && cache.flow_labels[cache_idx] == flow_label
                 && &cache.dest_ids[cache_idx] == dst_id
             {
-                Some(cache.next_hops[cache_idx])
-            } else {
-                None
+                return Some(cache.next_hops[cache_idx]);
             }
-        }) {
-            return Some(v);
-        }
 
-        let h = Self::hash_32(dst_id);
-        let shard = Self::shard_for_from_hash(h);
-
-        let nh = {
+            let h = Self::hash_32(dst_id);
+            let shard = Self::shard_for_from_hash(h);
             let map = self.fast_shards[shard].read();
             if let Some(entry) = map.get(dst_id) {
-                if entry.alternate_channels.is_empty() {
-                    Some(entry.next_hop_id)
+                let nh = if entry.alternate_channels.is_empty() {
+                    entry.next_hop_id
                 } else {
                     let choices = 1 + entry.alternate_channels.len();
                     // Since dst_id is identical to itself, fast_flow_hash(&dst_id, &dst_id, flow_label)
@@ -413,27 +397,21 @@ impl Table {
                         (flow_label as usize) % choices
                     };
                     if ch_idx == 0 {
-                        Some(entry.next_hop_id)
+                        entry.next_hop_id
                     } else {
-                        Some(entry.alternate_channels[ch_idx - 1])
+                        entry.alternate_channels[ch_idx - 1]
                     }
-                }
-            } else {
-                None
-            }
-        };
+                };
 
-        if let Some(v) = nh {
-            SPRAY_CACHE.with(|c| {
-                let cache = unsafe { &mut *c.get() };
                 cache.epochs[cache_idx] = cur_epoch;
                 cache.dest_ids[cache_idx] = *dst_id;
                 cache.flow_labels[cache_idx] = flow_label;
-                cache.next_hops[cache_idx] = v;
-            });
-        }
-
-        nh
+                cache.next_hops[cache_idx] = nh;
+                Some(nh)
+            } else {
+                None
+            }
+        })
     }
 
     /// Select a single channel by index (round-robin if out of range).
@@ -489,30 +467,26 @@ impl Table {
         let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
         let idx = Self::simple_cache_index(dst_id);
 
-        if let Some(v) = THREAD_CACHE.with(|c| {
-            let cache = unsafe { &*c.get() };
+        THREAD_CACHE.with(|c| {
+            let cache = unsafe { &mut *c.get() };
             if cache.epochs[idx] == cur_epoch && &cache.dest_ids[idx] == dst_id {
-                Some(cache.next_hops[idx])
+                return Some(cache.next_hops[idx]);
+            }
+
+            // Fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table)
+            let h = Self::hash_32(dst_id);
+            let shard = Self::shard_for_from_hash(h);
+            let map = self.fast_shards[shard].read();
+            if let Some(e) = map.get(dst_id) {
+                let nh = e.next_hop_id;
+                cache.epochs[idx] = cur_epoch;
+                cache.dest_ids[idx] = *dst_id;
+                cache.next_hops[idx] = nh;
+                Some(nh)
             } else {
                 None
             }
-        }) {
-            return Some(v);
-        }
-
-        // Fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table)
-        let h = Self::hash_32(dst_id);
-        let shard = Self::shard_for_from_hash(h);
-        let nh_opt = {
-            let map = self.fast_shards[shard].read();
-            map.get(dst_id).map(|e| e.next_hop_id)
-        };
-        if let Some(nh) = nh_opt {
-            Self::cache_hot_entry_with_idx(idx, cur_epoch, *dst_id, nh);
-            return Some(nh);
-        }
-
-        None
+        })
     }
 
     /// Fast predictive flow hash fallback over `predictive_next_hops`.
