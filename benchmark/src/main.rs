@@ -114,30 +114,6 @@ fn set_packet_seq(packet: &mut [u8], seq: u64) {
     }
 }
 
-fn inject_byzantine_noise(
-    packet: &mut Vec<u8>,
-    config: &Config,
-    rng: &mut StdRng,
-    counters: &mut ChaosCounters,
-) -> bool {
-    if rng.gen_bool((config.loss_percent / 100.0).clamp(0.0, 1.0)) {
-        counters.dropped += 1;
-        return false;
-    }
-
-    if rng.gen_bool((config.corrupt_percent / 100.0).clamp(0.0, 1.0)) {
-        counters.corrupted += 1;
-        // Corrupt destination to intentionally trigger miss-path behavior.
-        packet[32..64].fill(9);
-        // Truncate payload occasionally to simulate malformed packet framing.
-        if packet.len() > HEADER_SIZE + 4 {
-            packet.truncate(packet.len() - 4);
-        }
-    }
-
-    true
-}
-
 fn percentile_ns(samples: &[u128], pct: f64) -> u128 {
     if samples.is_empty() {
         return 0;
@@ -159,16 +135,36 @@ fn main() {
     let mut pending_frames: Vec<Vec<u8>> = Vec::with_capacity(config.batch_size.max(1));
     let packet_template = build_packet_template(config.payload_len);
 
+    // Pre-calculate probabilities outside the loop to eliminate repeated floating point division and clamping.
+    let loss_prob = (config.loss_percent / 100.0).clamp(0.0, 1.0);
+    let corrupt_prob = (config.corrupt_percent / 100.0).clamp(0.0, 1.0);
+    let duplicate_prob = (config.duplicate_percent / 100.0).clamp(0.0, 1.0);
+
     let harness_start = Instant::now();
     for seq in 0..config.packets {
-        let mut packet = packet_template.clone();
-        set_packet_seq(&mut packet, seq as u64);
-        if !inject_byzantine_noise(&mut packet, &config, &mut rng, &mut counters) {
+        // Optimization: Evaluate drop probability BEFORE cloning packet_template to eliminate
+        // unnecessary 624-byte Vec<u8> heap allocations and immediate deallocations on dropped packets.
+        // Preserves exact RNG call sequence for 100% seed-reproducible fault counters.
+        if rng.gen_bool(loss_prob) {
+            counters.dropped += 1;
             continue;
         }
 
+        let mut packet = packet_template.clone();
+        set_packet_seq(&mut packet, seq as u64);
+
+        if rng.gen_bool(corrupt_prob) {
+            counters.corrupted += 1;
+            // Corrupt destination to intentionally trigger miss-path behavior.
+            packet[32..64].fill(9);
+            // Truncate payload occasionally to simulate malformed packet framing.
+            if packet.len() > HEADER_SIZE + 4 {
+                packet.truncate(packet.len() - 4);
+            }
+        }
+
         pending_frames.push(packet);
-        if rng.gen_bool((config.duplicate_percent / 100.0).clamp(0.0, 1.0)) {
+        if rng.gen_bool(duplicate_prob) {
             counters.duplicated += 1;
             if let Some(duplicate) = pending_frames.last().cloned() {
                 pending_frames.push(duplicate);
