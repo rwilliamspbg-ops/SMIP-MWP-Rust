@@ -14,6 +14,7 @@ pub struct Umem {
     frame_size: usize,
     frames: AtomicUsize,
     /// Some only on targets where the region came from the global allocator.
+    #[allow(dead_code)]
     layout: Option<std::alloc::Layout>,
 }
 
