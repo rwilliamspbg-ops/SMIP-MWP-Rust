@@ -370,10 +370,14 @@ impl Table {
 
         SPRAY_CACHE.with(|c| {
             let cache = unsafe { &mut *c.get() };
-            // Checking 4-byte scalar flow_label before 32-byte dest_id allows short-circuiting
-            // early on flow label misses, completely bypassing 32-byte array equality comparisons.
+            // Checking scalar flow_label and 64-bit unaligned prefix before full 32-byte dest_id
+            // allows 1-cycle short-circuiting early on misses, bypassing 32-byte array equality comparisons.
             if cache.epochs[cache_idx] == cur_epoch
                 && cache.flow_labels[cache_idx] == flow_label
+                && unsafe {
+                    (cache.dest_ids[cache_idx].as_ptr() as *const u64).read_unaligned()
+                        == (dst_id.as_ptr() as *const u64).read_unaligned()
+                }
                 && &cache.dest_ids[cache_idx] == dst_id
             {
                 return Some(cache.next_hops[cache_idx]);
@@ -469,7 +473,14 @@ impl Table {
 
         THREAD_CACHE.with(|c| {
             let cache = unsafe { &mut *c.get() };
-            if cache.epochs[idx] == cur_epoch && &cache.dest_ids[idx] == dst_id {
+            // Fast 64-bit unaligned prefix comparison short-circuits array equality on destination ID misses
+            if cache.epochs[idx] == cur_epoch
+                && unsafe {
+                    (cache.dest_ids[idx].as_ptr() as *const u64).read_unaligned()
+                        == (dst_id.as_ptr() as *const u64).read_unaligned()
+                }
+                && &cache.dest_ids[idx] == dst_id
+            {
                 return Some(cache.next_hops[idx]);
             }
 
