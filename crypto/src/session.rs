@@ -31,11 +31,11 @@ pub enum SessionError {
     AuthenticationFailed,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct CacheEntry {
     key: [u8; KEY_SIZE],
-    nonce_base: [u8; NONCE_SIZE],
-    seq_mask: u64,
+    nonce_prefix: [u8; 4],
+    nonce_xor: u64,
 }
 
 type CacheMap = RwLock<AHashMap<u64, CacheEntry>>;
@@ -81,10 +81,24 @@ fn derive_session_material(
     hk2.expand(b"mask", &mut mask_bytes)
         .map_err(|_| SessionError::AeadError)?;
 
+    let nonce_prefix = [nonce_base[0], nonce_base[1], nonce_base[2], nonce_base[3]];
+    let existing = u64::from_be_bytes([
+        nonce_base[4],
+        nonce_base[5],
+        nonce_base[6],
+        nonce_base[7],
+        nonce_base[8],
+        nonce_base[9],
+        nonce_base[10],
+        nonce_base[11],
+    ]);
+    let seq_mask = u64::from_be_bytes(mask_bytes);
+    let nonce_xor = existing ^ seq_mask;
+
     Ok(CacheEntry {
         key,
-        nonce_base,
-        seq_mask: u64::from_be_bytes(mask_bytes),
+        nonce_prefix,
+        nonce_xor,
     })
 }
 
@@ -111,29 +125,22 @@ pub struct HybridSession {
 impl HybridSession {
     pub fn new(combined_secret: &[u8], session_info: &[u8]) -> Result<Self, SessionError> {
         let cache_key = derive_cache_key(combined_secret, session_info);
-        if let Some(entry) = HKDF_CACHE.read().get(&cache_key).cloned() {
-            let existing =
-                u64::from_be_bytes(*<&[u8; 8]>::try_from(&entry.nonce_base[4..12]).unwrap());
-            let nonce_xor = existing ^ entry.seq_mask;
+        if let Some(entry) = HKDF_CACHE.read().get(&cache_key).copied() {
             let aead =
                 Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
-            let nonce_prefix = *<&[u8; 4]>::try_from(&entry.nonce_base[..4]).unwrap();
             return Ok(Self {
                 aead,
-                nonce_prefix,
-                nonce_xor,
+                nonce_prefix: entry.nonce_prefix,
+                nonce_xor: entry.nonce_xor,
             });
         }
         let entry = derive_session_material(combined_secret, session_info)?;
         let aead = Aes256Gcm::new_from_slice(&entry.key).map_err(|_| SessionError::AeadError)?;
-        HKDF_CACHE.write().insert(cache_key, entry.clone());
-        let existing = u64::from_be_bytes(*<&[u8; 8]>::try_from(&entry.nonce_base[4..12]).unwrap());
-        let nonce_xor = existing ^ entry.seq_mask;
-        let nonce_prefix = *<&[u8; 4]>::try_from(&entry.nonce_base[..4]).unwrap();
+        HKDF_CACHE.write().insert(cache_key, entry);
         Ok(Self {
             aead,
-            nonce_prefix,
-            nonce_xor,
+            nonce_prefix: entry.nonce_prefix,
+            nonce_xor: entry.nonce_xor,
         })
     }
 
