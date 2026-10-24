@@ -136,18 +136,14 @@ impl Table {
     }
 
     #[inline]
-    fn hash_32(dest_id: &[u8; 32]) -> u64 {
-        let ptr = dest_id.as_ptr() as *const u64;
-        let h0 = unsafe { ptr.read_unaligned() };
-        let h1 = unsafe { ptr.add(1).read_unaligned() };
-        let h2 = unsafe { ptr.add(2).read_unaligned() };
-        let h3 = unsafe { ptr.add(3).read_unaligned() };
-        h0 ^ h1 ^ h2 ^ h3
+    fn shard_for_val(val_64: u64) -> usize {
+        (val_64.wrapping_mul(0x9e3779b97f4a7c15) as usize) & (FAST_SHARDS - 1)
     }
 
     #[inline]
-    fn shard_for_from_hash(h: u64) -> usize {
-        (h as usize) & (FAST_SHARDS - 1)
+    fn shard_for_dest(dest_id: &[u8; 32]) -> usize {
+        let val_64 = unsafe { (dest_id.as_ptr() as *const u64).read_unaligned() };
+        Self::shard_for_val(val_64)
     }
 
     fn rebuild_predictive_entries(inner: &mut TableInner) {
@@ -159,8 +155,7 @@ impl Table {
         e.last_seen = SystemTime::now();
         let dest_id = e.dest_id;
         // update fast-path shard first
-        let h = Self::hash_32(&dest_id);
-        let shard = Self::shard_for_from_hash(h);
+        let shard = Self::shard_for_dest(&dest_id);
         {
             let mut map = self.fast_shards[shard].write();
             map.insert(dest_id, e.clone());
@@ -182,18 +177,15 @@ impl Table {
     }
 
     #[inline]
-    fn simple_cache_index(dest_id: &[u8; 32]) -> usize {
-        let ptr = dest_id.as_ptr() as *const u64;
-        let val = unsafe { ptr.read_unaligned() };
+    fn simple_cache_index(val_64: u64) -> usize {
         // Direct 64-bit Knuth multiplicative hashing on unaligned 64-bit key eliminates bit-shift and XOR instruction overhead
-        let hash = val.wrapping_mul(0x9e3779b97f4a7c15);
+        let hash = val_64.wrapping_mul(0x9e3779b97f4a7c15);
         (hash as usize) & (HOT_CACHE_SIZE - 1)
     }
 
     #[inline]
-    fn spray_cache_index(dest_id: &[u8; 32], flow_label: u32) -> usize {
-        let ptr = dest_id.as_ptr() as *const u64;
-        let val = unsafe { ptr.read_unaligned() } ^ (flow_label as u64);
+    fn spray_cache_index(val_64: u64, flow_label: u32) -> usize {
+        let val = val_64 ^ (flow_label as u64);
         // Direct 64-bit Knuth multiplicative hashing on unaligned 64-bit key combined with flow_label
         let hash = val.wrapping_mul(0x9e3779b97f4a7c15);
         (hash as usize) & (HOT_CACHE_SIZE - 1)
@@ -274,8 +266,7 @@ impl Table {
 
     pub fn remove_route(&self, dest: [u8; 32]) {
         // remove from fast-path shard first
-        let h = Self::hash_32(&dest);
-        let shard = Self::shard_for_from_hash(h);
+        let shard = Self::shard_for_dest(&dest);
         {
             let mut map = self.fast_shards[shard].write();
             map.remove(&dest);
@@ -305,8 +296,7 @@ impl Table {
         flow_label: u32,
         buf: &mut [([u8; 32], bool)],
     ) -> usize {
-        let h = Self::hash_32(dst_id);
-        let shard = Self::shard_for_from_hash(h);
+        let shard = Self::shard_for_dest(dst_id);
 
         let map = self.fast_shards[shard].read();
         if let Some(e) = map.get(dst_id) {
@@ -365,8 +355,9 @@ impl Table {
     /// main table BTreeMap search redundant on misses.
     #[inline]
     pub fn lookup_spray_primary(&self, dst_id: &[u8; 32], flow_label: u32) -> Option<[u8; 32]> {
-        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let cache_idx = Self::spray_cache_index(dst_id, flow_label);
+        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Relaxed);
+        let val_64 = unsafe { (dst_id.as_ptr() as *const u64).read_unaligned() };
+        let cache_idx = Self::spray_cache_index(val_64, flow_label);
 
         SPRAY_CACHE.with(|c| {
             let cache = unsafe { &mut *c.get() };
@@ -375,16 +366,14 @@ impl Table {
             if cache.epochs[cache_idx] == cur_epoch
                 && cache.flow_labels[cache_idx] == flow_label
                 && unsafe {
-                    (cache.dest_ids[cache_idx].as_ptr() as *const u64).read_unaligned()
-                        == (dst_id.as_ptr() as *const u64).read_unaligned()
+                    (cache.dest_ids[cache_idx].as_ptr() as *const u64).read_unaligned() == val_64
                 }
                 && &cache.dest_ids[cache_idx] == dst_id
             {
                 return Some(cache.next_hops[cache_idx]);
             }
 
-            let h = Self::hash_32(dst_id);
-            let shard = Self::shard_for_from_hash(h);
+            let shard = Self::shard_for_val(val_64);
             let map = self.fast_shards[shard].read();
             if let Some(entry) = map.get(dst_id) {
                 let nh = if entry.alternate_channels.is_empty() {
@@ -428,8 +417,7 @@ impl Table {
         flow_label: u32,
         channel_idx: usize,
     ) -> Option<[u8; 32]> {
-        let h = Self::hash_32(dst_id);
-        let shard = Self::shard_for_from_hash(h);
+        let shard = Self::shard_for_dest(dst_id);
 
         let map = self.fast_shards[shard].read();
         let e = map.get(dst_id)?;
@@ -468,16 +456,16 @@ impl Table {
     #[inline]
     pub fn lookup_next_hop(&self, dst_id: &[u8; 32], _flow_label: u32) -> Option<[u8; 32]> {
         // Fast per-thread hot-key cache check
-        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Acquire);
-        let idx = Self::simple_cache_index(dst_id);
+        let cur_epoch = GLOBAL_TABLE_EPOCH.load(Ordering::Relaxed);
+        let val_64 = unsafe { (dst_id.as_ptr() as *const u64).read_unaligned() };
+        let idx = Self::simple_cache_index(val_64);
 
         THREAD_CACHE.with(|c| {
             let cache = unsafe { &mut *c.get() };
             // Fast 64-bit unaligned prefix comparison short-circuits array equality on destination ID misses
             if cache.epochs[idx] == cur_epoch
                 && unsafe {
-                    (cache.dest_ids[idx].as_ptr() as *const u64).read_unaligned()
-                        == (dst_id.as_ptr() as *const u64).read_unaligned()
+                    (cache.dest_ids[idx].as_ptr() as *const u64).read_unaligned() == val_64
                 }
                 && &cache.dest_ids[idx] == dst_id
             {
@@ -485,8 +473,7 @@ impl Table {
             }
 
             // Fast-path shard lookup (fast_shards is an all-inclusive hash index of all route entries in Table)
-            let h = Self::hash_32(dst_id);
-            let shard = Self::shard_for_from_hash(h);
+            let shard = Self::shard_for_val(val_64);
             let map = self.fast_shards[shard].read();
             if let Some(e) = map.get(dst_id) {
                 let nh = e.next_hop_id;
