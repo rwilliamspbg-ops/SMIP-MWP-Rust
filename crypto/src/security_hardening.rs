@@ -54,16 +54,19 @@ impl DoSThrottle {
         }
     }
 
+    /// Checks whether a packet is allowed under the rate limit.
+    /// Uses `Ordering::Relaxed` for atomic `last_packet_time` access as rate limiting
+    /// tracks timestamp intervals without synchronizing surrounding non-atomic memory.
     #[inline]
     pub fn allow_packet(&self) -> bool {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
-        let last_seen = self.last_packet_time.load(Ordering::Acquire);
+        let last_seen = self.last_packet_time.load(Ordering::Relaxed);
         let elapsed = now.saturating_sub(last_seen);
         if last_seen == 0 || elapsed >= self.rate_limit_ns {
-            self.last_packet_time.store(now, Ordering::Release);
+            self.last_packet_time.store(now, Ordering::Relaxed);
             return true;
         }
         false
