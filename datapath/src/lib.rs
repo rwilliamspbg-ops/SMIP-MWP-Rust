@@ -72,6 +72,7 @@ impl AlignedBuffer {
         self.cap = new_cap;
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn extend_from_slice(&mut self, src: &[u8]) {
         self.reserve(src.len());
@@ -662,7 +663,10 @@ impl Forwarder {
 
         for output in outputs {
             let start = self.arena.len();
-            self.arena.extend_from_slice(&output.bytes);
+            // Optimization: Capacity pre-reserved for all output bytes above; bypass per-packet capacity check
+            unsafe {
+                self.arena.extend_from_slice_unchecked(&output.bytes);
+            }
             let len = self.arena.len() - start;
             self.offsets.push((start, len));
             if output.encrypted {
@@ -1293,7 +1297,10 @@ impl Forwarder {
             self.offsets.reserve(outputs.len());
             for (bytes, encrypted, route_miss, enc_ns) in outputs {
                 let start = self.arena.len();
-                self.arena.extend_from_slice(&bytes);
+                // Optimization: Capacity pre-reserved for all output bytes above; bypass per-packet capacity check
+                unsafe {
+                    self.arena.extend_from_slice_unchecked(&bytes);
+                }
                 let len = self.arena.len() - start;
                 self.offsets.push((start, len));
                 if encrypted {
