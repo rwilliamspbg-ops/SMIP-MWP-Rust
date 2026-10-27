@@ -400,10 +400,8 @@ impl Forwarder {
 
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
                         let start = self.arena.len();
-                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                        self.arena.reserve(needed);
 
-                        // Combine header and payload into a single copy operation to reduce slice copy overhead
+                        // Combine header and payload into a single copy operation to reduce slice copy overhead; capacity is pre-reserved at batch start
                         unsafe {
                             self.arena
                                 .extend_from_slice_unchecked(&pkt[..HEADER_SIZE + payload_len]);
@@ -1370,10 +1368,9 @@ impl Forwarder {
         // Pre-reserve offsets capacity to avoid reallocations during packet loop
         self.offsets.reserve(received);
         self.arena.reserve(
-            ring.active
+            ring.active[..received]
                 .iter()
-                .take(received)
-                .map(|&idx| ring.slot(idx).len())
+                .map(|&idx| ring.slot_len(idx))
                 .sum::<usize>()
                 + received * TAG_SIZE,
         );
@@ -1390,7 +1387,7 @@ impl Forwarder {
             None
         };
 
-        for &idx in ring.active.iter().take(received) {
+        for &idx in &ring.active[..received] {
             let pkt = ring.slot(idx);
             let forwarded = self.handle_packet(pkt, use_avx2, &mut stats, &mut metrics);
 
@@ -1446,31 +1443,42 @@ pub mod socket {
             }
         }
 
+        #[inline]
         pub fn clear(&mut self) {
             self.active.clear();
         }
 
+        #[inline]
         pub fn claim(&self) -> usize {
             let idx = self.active.len();
             assert!(idx < self.lens.len(), "SliceRing exhausted");
             idx
         }
 
+        #[inline]
         pub fn slot_mut(&mut self, idx: usize) -> &mut [u8] {
             let start = idx * self.slot_size;
             &mut self.backing[start..start + self.slot_size]
         }
 
+        #[inline]
         pub fn set_len(&mut self, idx: usize, len: usize) {
             self.lens[idx] = len.min(self.slot_size);
         }
 
+        #[inline]
+        pub fn slot_len(&self, idx: usize) -> usize {
+            self.lens[idx]
+        }
+
+        #[inline]
         pub fn slot(&self, idx: usize) -> &[u8] {
             let start = idx * self.slot_size;
             &self.backing[start..start + self.lens[idx]]
         }
 
         /// Number of slots the ring can hold.
+        #[inline]
         pub fn capacity(&self) -> usize {
             self.lens.len()
         }
