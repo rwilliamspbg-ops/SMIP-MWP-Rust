@@ -159,3 +159,7 @@
 ## 2026-06-27 - [Single TLS Access Closure Scope for Thread-Local Routing Caches]
 **Learning:** Performing thread-local cache check, shard map fallback query, and cache update in separate statements causes `THREAD_CACHE.with` / `SPRAY_CACHE.with` to execute twice on cache misses. Each `.with` invocation emits TLS address resolution instructions (`__tls_get_addr` or thread pointer offset computation) and closure call overhead. Wrapping the cache miss lookup and cache store inside the single `.with` closure scope allows updating the cache in-place with zero additional TLS resolution overhead.
 **Action:** Perform thread-local cache lookup, fallback query, and cache update inside a single `.with(|c| ...)` scope when handling cache misses.
+
+## 2026-06-28 - [Consolidate Redundant System Calls and Branch Evaluations in Timeout Checks]
+**Learning:** Checking boolean state flags multiple times sequentially and querying `SystemTime::now()` twice during timeout checks issues redundant clock system calls/vDSO queries. Consolidating the boolean check and capturing `SystemTime::now()` once into a local variable `now` avoids duplicate clock queries.
+**Action:** Consolidate conditional guards and sample high-resolution system clocks once into local variables during timeout and timing checks.
