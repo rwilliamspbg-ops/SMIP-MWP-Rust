@@ -111,14 +111,15 @@ impl HybridKEXState {
 
     #[inline]
     pub fn check_timeout(&mut self) -> Result<(), String> {
-        if !self.handshake_done && SystemTime::now() > self.timeout {
-            return Err(format!(
-                "crypto: handshake timeout for session {:02x?}",
-                self.session_id
-            ));
-        }
         if !self.handshake_done {
-            self.timeout = SystemTime::now() + HANDSHAKE_TIMEOUT;
+            let now = SystemTime::now();
+            if now > self.timeout {
+                return Err(format!(
+                    "crypto: handshake timeout for session {:02x?}",
+                    self.session_id
+                ));
+            }
+            self.timeout = now + HANDSHAKE_TIMEOUT;
         }
         Ok(())
     }
