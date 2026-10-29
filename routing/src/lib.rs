@@ -325,11 +325,13 @@ impl Table {
             };
             buf[0] = (primary_nh, true);
 
-            // Write remaining non-primary channels in order, replacing position `idx` with `e.next_hop_id`
+            // Write remaining non-primary channels in order, replacing position `idx` with `e.next_hop_id`.
+            // Direct range indexing (`1..count`) avoids iterator combinator overhead (`iter_mut().enumerate().take().skip()`)
+            // on hot multi-channel spray routing lookups, allowing LLVM to emit vectorized stores.
             let alt = e.alternate_channels.as_slice();
-            for (i, slot) in buf.iter_mut().enumerate().take(count).skip(1) {
+            for i in 1..count {
                 let nh = if i == idx { e.next_hop_id } else { alt[i - 1] };
-                *slot = (nh, false);
+                buf[i] = (nh, false);
             }
             return count;
         }
