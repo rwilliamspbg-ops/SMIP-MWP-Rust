@@ -856,9 +856,7 @@ impl Forwarder {
                     let mut was_route_miss = false;
 
                     if pkt.len() >= HEADER_SIZE + payload_len && payload_len > 0 {
-                        let needed = pkt.len() + TAG_SIZE;
-                        self.arena.reserve(needed);
-
+                        // Safety: self.arena capacity is pre-reserved for all batch frames + TAG_SIZE at start of process_batch_mcr.
                         // Combine header and payload into a single copy operation to reduce slice copy overhead
                         unsafe {
                             self.arena
@@ -916,9 +914,7 @@ impl Forwarder {
                             }
                         }
                     } else {
-                        let needed = HEADER_SIZE + payload_len + TAG_SIZE;
-                        self.arena.reserve(needed);
-
+                        // Safety: self.arena capacity is pre-reserved for all batch frames + TAG_SIZE at start of process_batch_mcr.
                         unsafe {
                             self.arena.extend_from_slice_unchecked(&pkt[..HEADER_SIZE]);
                             // Overwrite next_hop field directly in the arena using raw pointer assignment
